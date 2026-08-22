@@ -423,6 +423,7 @@ interface IAdaptiveLPVault {
 
     function rebalanceWithSwap(
         bytes32 expectedPlanHash,
+        bool expectedZeroForOne,
         uint256 amountIn,
         uint256 keeperMinAmountOut,
         uint32 deadline
@@ -447,7 +448,7 @@ interface IAdaptiveLPVault {
 | `deposit` | 任意 LP 用户 | 健康非 IDLE、双资产比例、未暂停 | 只转入实际数量，铸造公平 shares |
 | `redeem` | Shares 持有人或获授权 spender | shares 足够 | 按比例退出 Position 和 Idle，销毁 shares，返回双资产 |
 | `rebalance` | 任意地址 | 健康、计划哈希、deadline、Cooldown、`requiresSwap == false` | 原子退出旧 Position、建立新 Position 或 IDLE；`requiresSwap` 为 true 时以 `SwapRequired()` 回滚 |
-| `rebalanceWithSwap` | Keeper/Admin | 健康、`requiresSwap == true`、`amountIn`/`keeperMinAmountOut`/`deadline` 有效、白名单和 NAV 限制 | Vault 内部构造受控 SwapPlan，执行换币后建立目标 Position |
+| `rebalanceWithSwap` | Keeper/Admin | 健康、`requiresSwap == true`、`expectedZeroForOne` 与 Vault 重算方向一致、`amountIn`/`keeperMinAmountOut`/`deadline` 有效、白名单和 NAV 限制 | Vault 内部构造受控 SwapPlan，执行换币后建立目标 Position |
 | `emergencyExitToIdle` | Guardian/Admin | 可退出 Active Position | 无 Swap 清空 Position，进入 IDLE |
 
 所有写入口均应在失败时完全回滚。`redeem` 是唯一不要求 Oracle Healthy 的资产退出入口，Emergency Exit 不要求 TWAP NAV 成功但要求实际 Position 清零和资产返回。
@@ -812,7 +813,7 @@ sequenceDiagram
     participant SwapExecutor
     participant NewAdapter
 
-    Keeper->>Vault: rebalanceWithSwap(expectedPlanHash, amountIn, keeperMinAmountOut, deadline)
+    Keeper->>Vault: rebalanceWithSwap(expectedPlanHash, expectedZeroForOne, amountIn, keeperMinAmountOut, deadline)
     Vault->>Oracle: snapshot()
     Vault->>Strategy: getPlan(current snapshots)
     Strategy-->>Vault: PositionPlan requiresSwap
@@ -821,7 +822,7 @@ sequenceDiagram
     OldAdapter-->>Vault: token0/token1
     Vault->>NewAdapter: previewDeposit(actual balances, current plan)
     NewAdapter-->>Vault: used0/used1
-    Vault->>Vault: validate direction and amountIn; compute protocolMinOut and SwapPlan
+    Vault->>Vault: validate expectedZeroForOne against derived direction and amountIn; compute protocolMinOut and SwapPlan
     Vault->>SwapExecutor: executeSwap(validated SwapPlan, protocolMinOut)
     SwapExecutor-->>Vault: actual amountOut
     Vault->>NewAdapter: deposit() with adjusted assets
