@@ -61,13 +61,13 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 权限由链上角色控制。角色权限不等于资产所有权；任何角色都不能直接取得 Vault 支持资产本金。
 
 
-| 角色                    | 可调用操作                                      | 业务权限                           | 明确禁止                                                    | 暂停影响                                                |
-| --------------------- | ------------------------------------------ | ------------------------------ | ------------------------------------------------------- | --------------------------------------------------- |
-| LP 用户                 | `deposit`、`redeem`、shares 转账、只读查询          | 按规则提供双资产、获得和转让 shares、按比例赎回    | 单边存款、指定策略目标、调用 Swap Rebalance、取得额外 shares               | `depositPaused` 不影响赎回；其他暂停不应阻止正常双资产赎回               |
-| Permissionless Caller | `rebalance`、只读查询                           | 触发当前有效且由 Strategy 生成的无 Swap 计划 | 指定 Venue、Fee Tier、Tick Range、Swap、Router 或接收地址          | 受 `plainRebalancePaused`、Cooldown、Oracle 健康、`expectedPlanHash` 和 `deadline` 限制 |
-| Keeper                | `rebalanceWithSwap`、普通 Rebalance、只读查询      | 按受控 Swap 参数修复资产比例并执行有效目标计划 | 任意 Token、任意 Router、超限数量、降低协议 `minOut`、绕过 NAV 检查         | 受 `swapRebalancePaused` 和全部 Oracle/风控门控限制           |
-| Guardian              | 暂停入口、禁用 Adapter、`emergencyExitToIdle`、只读查询 | 在异常情况下停止风险操作并无 Swap 撤出 LP      | 更换核心依赖、提取支持资产、执行任意 Swap                                 | 可暂停存款和 Rebalance；不应冻结赎回或紧急退出                        |
-| Admin                 | Bootstrap、边界内参数更新、角色管理、Adapter 状态管理、全部受控操作 | 初始化 Vault、配置既有依赖、调整硬边界内参数      | Bootstrap 后替换 Oracle/Router/Adapter、sweep 支持资产、绕过用户输出保护 | 可管理暂停状态，但不能以暂停为由提取用户资产                              |
+| 角色                    | 可调用操作                                      | 业务权限                           | 明确禁止                                                             | 暂停影响                                                                           |
+| --------------------- | ------------------------------------------ | ------------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| LP 用户                 | `deposit`、`redeem`、shares 转账、只读查询          | 按规则提供双资产、获得和转让 shares、按比例赎回    | 单边存款、指定策略目标、调用 Swap Rebalance、取得额外 shares                        | `depositPaused` 不影响赎回；其他暂停不应阻止正常双资产赎回                                          |
+| Permissionless Caller | `rebalance`、只读查询                           | 触发当前有效且由 Strategy 生成的无 Swap 计划 | 指定 Venue、Fee Tier、Tick Range、Swap、Router 或接收地址                   | 受 `plainRebalancePaused`、Cooldown、Oracle 健康、`expectedPlanHash` 和 `deadline` 限制 |
+| Keeper                | `rebalanceWithSwap`、普通 Rebalance、只读查询      | 按受控 Swap 参数修复资产比例并执行有效目标计划     | 任意 Token、任意 Router、超限数量、降低协议 `minOut`、绕过 NAV 检查                  | 受 `swapRebalancePaused` 和全部 Oracle/风控门控限制                                      |
+| Guardian              | 暂停入口、禁用 Adapter、`emergencyExitToIdle`、只读查询 | 在异常情况下停止风险操作并无 Swap 撤出 LP      | 更换核心依赖、提取支持资产、执行任意 Swap                                          | 可暂停存款和 Rebalance；不应冻结赎回或紧急退出                                                   |
+| Admin                 | Bootstrap、角色管理、Adapter 状态管理、全部受控操作         | 初始化 Vault、配置既有依赖、管理运行时权限与控制状态  | 修改部署固定数值、Bootstrap 后替换 Oracle/Router/Adapter、sweep 支持资产、绕过用户输出保护 | 可管理暂停状态，但不能以暂停为由提取用户资产                                                         |
 
 
 角色变更和暂停状态必须发出事件。Admin 的可变参数必须同时满足协议硬边界、当前状态检查和事件可追踪要求。
@@ -75,28 +75,28 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 ## 3. 领域术语
 
 
-| 术语                         | 规范定义                                                     | 数据来源或计算方式                               | 可变性与禁止混用                            |
-| -------------------------- | -------------------------------------------------------- | --------------------------------------- | ----------------------------------- |
-| Vault                      | 持有 Idle 资产、发行 shares 并编排所有模块的核心合约                        | 合约存储和 Adapter 快照                        | Vault 不实现 V2/V3 内部数学                |
-| token0 / token1            | Vault 初始化时固定的两种底层资产及其顺序                                  | immutable 地址和 decimals                  | 不得按调用者输入重排；所有接口使用固定顺序               |
-| Venue                      | 一个具体的流动性池实例或 IDLE 状态                                     | `VenueType` 加 Adapter 配置                | Venue 不是抽象的 DEX 名称                  |
-| Adapter                    | 封装某个 Venue 的存取流动性、费用和 Position 数据的受信模块                   | Registry 中的固定地址                         | Adapter 不能决定 shares 数量；禁用后仍必须可退出    |
-| Active Position            | 当前唯一有效的外部 LP Position                                    | Active Adapter 的 Position 快照            | 非 IDLE 时最多一个；IDLE 时必须为零             |
-| Idle Assets                | 直接保存在 Vault、未部署到 LP 的 token0/token1                      | Vault ERC-20 余额                         | 不是固定比例缓冲；由部署结果、费用、舍入或 IDLE 产生       |
-| Principal                  | 当前 LP liquidity 对应的底层 token0/token1 数量，不含未领取手续费          | V2 储备权益或 V3 liquidity 数学                | 不得与 claimable fee 重复相加              |
-| Claimable Fees             | 已归属于 Position 但尚未转入 Vault 的 token0/token1 手续费            | V2 已包含在储备权益；V3 fee growth / tokens owed | 只可在一个计价路径中出现                        |
-| Total Assets               | Idle 加 Active Adapter 对 Vault 的完整资产报告                    | `T0 = I0 + A0`、`T1 = I1 + A1`           | 不得额外扫描未知 Adapter 或重复添加费用            |
-| NAV                        | 按 canonical TWAP 将全部资产折算为 token1 的价值                     | `NAV1 = T1 + Q1(T0; twapTick)`          | 仅用于定价和风控，不代表可立即换成 token1            |
-| TWAP                       | canonical V3 Pool 在 `twapWindowSeconds` 内的 arithmetic mean tick 对应的几何平均价格 | `observe([twapWindowSeconds, 0])`              | 用于 NAV、目标 Range 和偏离基准，不是现价或统计波动率       |
-| Short TWAP Tick            | canonical V3 Pool 在 `shortTwapWindowSeconds` 内的 arithmetic mean tick | `observe([shortTwapWindowSeconds, 0])`       | 只用于偏离信号，不单独作为 NAV                    |
-| Spot Tick                  | canonical Pool 当前 `slot0().tick`                         | 同一 Oracle 读取                            | 用于 Range 越界和安全检查，不参与 `deviationBps` 或 NAV    |
-| DEVIATION / `deviationBps` | 短周期 TWAP 价格相对 TWAP 价格的绝对偏离，单位为基点                        | Oracle 内部计算                             | 不接受外部输入；不得命名为 volatility            |
-| Oracle Healthy             | Oracle 地址、资产顺序、观察历史、窗口、Tick 和报价均满足可用性检查                  | Oracle 健康检查                             | 与 `EXTREME_DEVIATION` 独立；极端偏离可以仍然健康 |
-| Market Regime              | Strategy 根据健康 Oracle 快照和滞后规则输出的策略状态                      | LOW/MEDIUM/HIGH/EXTREME                 | 不是收益评级或风险免责                         |
-| Position Plan              | 目标 Venue、V3 Range、计划版本和是否需要 Swap 的完整目标                    | Strategy 确定性生成                          | Rebalance 调用者只能提交期望哈希和 deadline，不能改写内容  |
-| Hysteresis                 | 状态进入和退出使用不同阈值形成的滞后区间                                     | Strategy 参数                             | 不能用 Cooldown 替代                     |
-| Cooldown                   | 两次成功 Position 变更之间的最小时间间隔                                | Vault 存储的时间戳                            | 失败交易不更新                             |
-| Donation                   | 未铸造 shares 而直接转入 Vault 的支持资产                             | ERC-20 实际余额增加                           | 永久归现有 shares 持有人；v1 不提供救援           |
+| 术语                         | 规范定义                                                                      | 数据来源或计算方式                               | 可变性与禁止混用                                  |
+| -------------------------- | ------------------------------------------------------------------------- | --------------------------------------- | ----------------------------------------- |
+| Vault                      | 持有 Idle 资产、发行 shares 并编排所有模块的核心合约                                         | 合约存储和 Adapter 快照                        | Vault 不实现 V2/V3 内部数学                      |
+| token0 / token1            | Vault 初始化时固定的两种底层资产及其顺序                                                   | immutable 地址和 decimals                  | 不得按调用者输入重排；所有接口使用固定顺序                     |
+| Venue                      | 一个具体的流动性池实例或 IDLE 状态                                                      | `VenueType` 加 Adapter 配置                | Venue 不是抽象的 DEX 名称                        |
+| Adapter                    | 封装某个 Venue 的存取流动性、费用和 Position 数据的受信模块                                    | Registry 中的固定地址                         | Adapter 不能决定 shares 数量；禁用后仍必须可退出          |
+| Active Position            | 当前唯一有效的外部 LP Position                                                     | Active Adapter 的 Position 快照            | 非 IDLE 时最多一个；IDLE 时必须为零                   |
+| Idle Assets                | 直接保存在 Vault、未部署到 LP 的 token0/token1                                       | Vault ERC-20 余额                         | 不是固定比例缓冲；由部署结果、费用、舍入或 IDLE 产生             |
+| Principal                  | 当前 LP liquidity 对应的底层 token0/token1 数量，不含未领取手续费                           | V2 储备权益或 V3 liquidity 数学                | 不得与 claimable fee 重复相加                    |
+| Claimable Fees             | 已归属于 Position 但尚未转入 Vault 的 token0/token1 手续费                             | V2 已包含在储备权益；V3 fee growth / tokens owed | 只可在一个计价路径中出现                              |
+| Total Assets               | Idle 加 Active Adapter 对 Vault 的完整资产报告                                     | `T0 = I0 + A0`、`T1 = I1 + A1`           | 不得额外扫描未知 Adapter 或重复添加费用                  |
+| NAV                        | 按 canonical TWAP 将全部资产折算为 token1 的价值                                      | `NAV1 = T1 + Q1(T0; twapTick)`          | 仅用于定价和风控，不代表可立即换成 token1                  |
+| TWAP                       | canonical V3 Pool 在 `twapWindowSeconds` 内的 arithmetic mean tick 对应的几何平均价格 | `observe([twapWindowSeconds, 0])`       | 用于 NAV、目标 Range 和偏离基准，不是现价或统计波动率          |
+| Short TWAP Tick            | canonical V3 Pool 在 `shortTwapWindowSeconds` 内的 arithmetic mean tick      | `observe([shortTwapWindowSeconds, 0])`  | 只用于偏离信号，不单独作为 NAV                         |
+| Spot Tick                  | canonical Pool 当前 `slot0().tick`                                          | 同一 Oracle 读取                            | 用于 Range 越界和安全检查，不参与 `deviationBps` 或 NAV |
+| DEVIATION / `deviationBps` | 短周期 TWAP 价格相对 TWAP 价格的绝对偏离，单位为基点                                          | Oracle 内部计算                             | 不接受外部输入；不得命名为 volatility                  |
+| Oracle Healthy             | Oracle 地址、资产顺序、观察历史、窗口、Tick 和报价均满足可用性检查                                   | Oracle 健康检查                             | 与 `EXTREME_DEVIATION` 独立；极端偏离可以仍然健康       |
+| Market Regime              | Strategy 根据健康 Oracle 快照和滞后规则输出的策略状态                                       | LOW/MEDIUM/HIGH/EXTREME                 | 不是收益评级或风险免责                               |
+| Position Plan              | 目标 Venue、V3 Range、计划版本和是否需要 Swap 的完整目标                                    | Strategy 确定性生成                          | Rebalance 调用者只能提交期望哈希和 deadline，不能改写内容    |
+| Hysteresis                 | 状态进入和退出使用不同阈值形成的滞后区间                                                      | Strategy 参数                             | 不能用 Cooldown 替代                           |
+| Cooldown                   | 两次成功 Position 变更之间的最小时间间隔                                                 | Vault 存储的时间戳                            | 失败交易不更新                                   |
+| Donation                   | 未铸造 shares 而直接转入 Vault 的支持资产                                              | ERC-20 实际余额增加                           | 永久归现有 shares 持有人；v1 不提供救援                 |
 
 
 
@@ -114,10 +114,9 @@ flowchart LR
     Vault --> Accounting[VaultAccounting]
     Vault --> Oracle[CanonicalV3Oracle]
     Vault --> Strategy[MarketRegimeStrategy]
-    Vault --> Registry[AdapterRegistry]
     Vault --> Swap[ControlledSwapExecutor]
-    Registry --> V2[UniswapV2Adapter]
-    Registry --> V3[UniswapV3Adapter]
+    Vault --> V2[UniswapV2Adapter]
+    Vault --> V3[UniswapV3Adapter]
     V2 --> V2Pool[Uniswap V2 Pair]
     V3 --> V3Pool[Uniswap V3 Pool and PositionManager]
     Oracle --> Canonical[Canonical Uniswap V3 Pool]
@@ -132,7 +131,7 @@ flowchart LR
 - `activeVenue == IDLE` 时，所有 Adapter 的有效 liquidity、LP Token 余额或 NFT Position liquidity 必须为零。
 - `activeVenue != IDLE` 时，只有对应 Adapter 可以有非零有效 Position；其余 Adapter 只能保留零余额或 `dustTolerance0/1` 范围内的余额。
 - Rebalance 必须先完成旧 Position 退出，再建立新 Position；整个过程在一笔交易内原子完成。
-- Adapter Registry 在 Bootstrap 后封存。可以禁用或恢复已注册 Adapter，但不能新增或替换地址。
+- Vault 继承的 Adapter Registry 身份绑定在 Bootstrap 成功时随 `initialized = true` 自动冻结。Bootstrap 前仅 Admin 可通过 `configureAdapter(venue, adapter, pool, feeTier)` 配置；Bootstrap 后可以禁用或恢复已注册 Adapter，但不能新增或替换地址。
 
 
 
@@ -143,12 +142,12 @@ flowchart LR
 ### 5.1 生命周期状态
 
 
-| 状态              | 进入条件                        | 允许操作                               | 退出条件                               |
-| --------------- | --------------------------- | ---------------------------------- | ---------------------------------- |
-| `UNINITIALIZED` | 合约部署后                       | Admin Bootstrap、只读查询               | Bootstrap 成功后只能进入 `IDLE` 或有效 Venue |
+| 状态              | 进入条件                                 | 允许操作                               | 退出条件                               |
+| --------------- | ------------------------------------ | ---------------------------------- | ---------------------------------- |
+| `UNINITIALIZED` | 合约部署后                                | Admin Bootstrap、只读查询               | Bootstrap 成功后只能进入 `IDLE` 或有效 Venue |
 | `IDLE`          | Bootstrap 生成 EXTREME 计划、运行中极端偏离或紧急退出 | 赎回、只读查询、有效无 Swap/Swap Rebalance 建仓 | Strategy 生成健康非 IDLE 计划并成功建仓        |
-| `ACTIVE`        | 存在唯一有效 Active Position      | 赎回、健康存款、符合条件的 Rebalance            | 迁移、紧急退出或 Position 失效               |
-| `PAUSED`        | 任一独立暂停开关打开                  | 仍可赎回；依暂停类型关闭入口                     | 对应暂停开关关闭且健康门控恢复                    |
+| `ACTIVE`        | 存在唯一有效 Active Position               | 赎回、健康存款、符合条件的 Rebalance            | 迁移、紧急退出或 Position 失效               |
+| `PAUSED`        | 任一独立暂停开关打开                           | 仍可赎回；依暂停类型关闭入口                     | 对应暂停开关关闭且健康门控恢复                    |
 
 
 `PAUSED` 不是资产位置。合约必须独立存储 `activeVenue`、`depositPaused`、`plainRebalancePaused` 和 `swapRebalancePaused`。
@@ -160,7 +159,7 @@ Bootstrap 只能由 Admin 调用且只能成功一次。`minimumLockedShares` �
 前置条件：
 
 - Vault 尚未初始化；
-- token0/token1、canonical Oracle、Swap Executor 和所有 v1 Adapter 已通过绑定检查；
+- `bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓前重新校验 token0/token1、canonical Oracle、Swap Executor 和所有 v1 Adapter 的完整绑定；校验失败则整笔交易回滚；
 - Oracle Healthy，观察窗口有足够历史；
 - 初始 token0 和 token1 均大于零；
 - 初始 `NAV1` 不低于 `minimumInitialNav`；
@@ -460,7 +459,7 @@ IDLE 不是 Adapter，而是 `activeVenue == IDLE` 的资产位置状态。IDLE 
 - 全部支持资产直接保存在 Vault；
 - 不产生 LP 手续费；
 - 不执行外部 LP Position；
-- 仍承担 token 本身、ERC-20、Vault 和治理风险；
+- 仍承担 token 本身、ERC-20、Vault 和角色权限风险；
 - 新 Deposit 关闭，双资产 Redeem 保持开放。
 
 
@@ -471,7 +470,7 @@ IDLE 不是 Adapter，而是 `activeVenue == IDLE` 的资产位置状态。IDLE 
 
 ### 8.1 Canonical Uniswap V3 Oracle
 
-canonical Oracle 在部署时绑定一个 Uniswap V3 Pool，Bootstrap 后不可替换。该 Pool 必须满足：
+canonical Oracle 在部署时绑定一个 Uniswap V3 Pool。该 Pool 必须满足：
 
 - `token0/token1` 与 Vault 固定资产对一致；
 - Pool 地址、Factory、Fee Tier 和代码哈希通过初始化检查；
@@ -559,7 +558,7 @@ Oracle 不健康时：
 - 当前 Oracle Snapshot；
 - 当前 `activeVenue` 和 Position Snapshot；
 - Vault 资产比例、Idle 比例和暂停状态；
-- 受硬边界约束的治理参数。
+- 部署时固定且受硬边界约束的策略参数。
 
 输出为完整 `PositionPlan`，至少包含 `targetVenue`、`marketRegime`、V3 Tick Range、计划版本和 `requiresSwap`。计划哈希只覆盖这些会影响执行结果且可稳定复算的策略字段，不覆盖当前 `block.timestamp`；调用者不能传入策略阈值或目标参数。
 
@@ -598,6 +597,8 @@ $$
 首次从无历史状态计算时按 LOW → MEDIUM → HIGH → EXTREME 的进入阈值选择。Hysteresis 控制幅度，Cooldown 控制时间频率，两者不可互相替代。
 
 ### 9.4 Position Plan 生成规则
+
+
 
 #### 9.4.1 部署率与 `requiresSwap`
 
@@ -691,7 +692,7 @@ Guardian/Admin 可在不依赖价格估值的情况下触发紧急退出：
 
 Oracle 不健康时仍可执行该路径，但不能使用 TWAP NAV 作为成功条件；只能使用底层 AMM 的最小输出、实际余额增加和 Position 清零条件。
 
-## 10. 暂停、治理与可配置参数
+## 10. 暂停、权限与部署配置
 
 
 
@@ -707,31 +708,13 @@ Oracle 不健康时仍可执行该路径，但不能使用 TWAP NAV 作为成功
 
 自动门控应在 Oracle 不健康、IDLE、完全单边、Idle 超限、Adapter 异常、Position 不一致或 Vault 未初始化时关闭相关入口。
 
-### 10.2 参数治理
+### 10.2 部署配置约束
 
-所有治理参数均有协议硬边界；参数更新只能在边界内执行并发出 `ParameterUpdated`。以下数值需要在部署前通过历史数据、Mainnet Fork 和安全审查校准，本文不伪造具体数值：
-
-
-| 参数                                            | 单位         | 用途                | 必须满足的关系                          |
-| --------------------------------------------- | ---------- | ----------------- | -------------------------------- |
-| `twapWindowSeconds`                           | 秒          | TWAP `observe` 观察窗口    | 大于零且不超过硬上限；历史覆盖充足                |
-| `shortTwapWindowSeconds`                      | 秒          | Short TWAP `observe` 观察窗口 | `0 < shortTwapWindowSeconds < twapWindowSeconds`；历史覆盖充足 |
-| `minimumInitialNav`                           | token1 raw | Bootstrap 最低规模    | 大于零                              |
-| `dustTolerance0` / `dustTolerance1`          | token0/token1 raw | 舍入和最小单位容忍 | 由部署前校准，不能用于放宽价值损失 |
-| `bootstrapRatioToleranceBps`                  | bps        | Bootstrap 比例容差    | 小于协议上限                           |
-| `enterMediumBps` / `exitMediumBps`            | bps        | LOW/MEDIUM 边界     | `exitMedium < enterMedium`       |
-| `enterHighBps` / `exitHighBps`                | bps        | MEDIUM/HIGH 边界    | `exitHigh < enterHigh`           |
-| `enterExtremeBps` / `exitExtremeBps`          | bps        | HIGH/EXTREME 边界   | `exitExtreme < enterExtreme`     |
-| `narrowRangeHalfWidth` / `wideRangeHalfWidth` | ticks      | V3 Range 半宽       | `0 < narrow < wide`，均可对齐 spacing |
-| `minRecenterBps`                             | bps        | 相对当前 Range 半宽的同 Venue 重定位门槛 | 大于零且小于 BPS                  |
-| `minDeployBps`                                | bps        | 非 IDLE 最低部署率      | 大于零且不超过 BPS                      |
-| `maxHealthyIdleBps`                           | bps        | 非 IDLE 存款健康上限     | 小于 BPS                           |
-| `maxSwapSlippageBps`                          | bps        | Swap 最低输出约束       | 不超过协议硬上限                         |
-| `maxMigrationLossBps`                         | bps        | 带 Swap 迁移损失上限     | 不超过协议硬上限                         |
-| `minRebalanceCooldown`                        | 秒          | 成功迁移后的冷却时间        | 大于零或由硬边界明确允许为零                   |
-
-
-
+本协议的部署固定配置、参数类型、所属模块、存储方式、协议硬边界和字段关系统一定义于[ARCHITECTURE.md](ARCHITECTURE.md) §4.2、§5.1、§5.2 和 §5.4，本文不重复列举。
+所有部署固定配置必须在部署时完成校验，部署成功后任何角色均不得修改。
+Bootstrap 使用其中的 `minimumInitialNav` 和 `bootstrapRatioToleranceBps`
+完成初始规模与比例检查；Oracle 和 Strategy 使用各自所属模块的固定配置。
+如需采用不同参数，必须部署新的 Vault。
 
 ### 10.3 依赖封存
 

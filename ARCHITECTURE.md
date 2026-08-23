@@ -36,7 +36,6 @@ flowchart TB
         Accounting[VaultAccounting]
         Oracle[CanonicalV3Oracle]
         Strategy[MarketRegimeStrategy]
-        Registry[AdapterRegistry]
         Swap[ControlledSwapExecutor]
         V2Adapter[UniswapV2Adapter]
         V3Adapter[UniswapV3Adapter]
@@ -59,10 +58,9 @@ flowchart TB
     Vault --> Accounting
     Vault --> Oracle
     Vault --> Strategy
-    Vault --> Registry
     Vault --> Swap
-    Registry --> V2Adapter
-    Registry --> V3Adapter
+    Vault --> V2Adapter
+    Vault --> V3Adapter
     V2Adapter --> V2Pair
     V3Adapter --> V3Venue
     V3Adapter --> PositionManager
@@ -167,7 +165,7 @@ AdaptiveLPVault/
 ├── script/
 │   ├── Deploy.s.sol
 │   ├── Configure.s.sol
-│   └── VerifyBindings.s.sol
+│   └── Bootstrap.s.sol
 ├── lib/
 ├── docs/
 │   ├── PRODUCT_SPEC.md
@@ -191,7 +189,7 @@ AdaptiveLPVault/
 | `test/integration` | 跨模块完整流程 | 覆盖原子回滚 |
 | `test/invariant` | 不变量和模糊测试 | 覆盖资产、shares、单活 Position |
 | `test/fork` | Mainnet/Fork 外部协议行为 | 验证真实 V2/V3 接口 |
-| `script` | 部署、绑定校验和参数配置 | 不承担运行时策略 |
+| `script` | 分阶段部署、Adapter 绑定和一次性 Bootstrap | 数值参数仅由 Deploy 写入；主网按 Deploy → Configure → Bootstrap 执行，`bootstrap()` 内部执行最终绑定校验 |
 | `docs` | 发布后的文档副本 | 以根目录规范为源 |
 
 ## 4. 核心类型与枚举
@@ -225,10 +223,10 @@ enum PauseFlag {
 
 `VenueType` 描述资产位置，`MarketRegime` 描述 Oracle/Strategy 状态，暂停标志是独立维度，不能合并为一个状态枚举。
 
-### 4.2 配置类型
+### 4.2 部署配置类型
 
 ```solidity
-struct ImmutableConfig {
+struct VaultConfig {
     address token0;
     address token1;
     uint8 token0Decimals;
@@ -238,11 +236,16 @@ struct ImmutableConfig {
     address canonicalOracle;
     address swapExecutor;
     uint256 minimumLockedShares;
+    uint256 minimumInitialNav;
+    uint16 bootstrapRatioToleranceBps;
+}
+
+struct OracleConfig {
+    uint32 twapWindowSeconds;
+    uint32 shortTwapWindowSeconds;
 }
 
 struct StrategyConfig {
-    uint32 twapWindowSeconds;
-    uint32 shortTwapWindowSeconds;
     uint32 minRebalanceCooldown;
     uint24 enterMediumBps;
     uint24 exitMediumBps;
@@ -258,15 +261,9 @@ struct StrategyConfig {
     uint16 maxSwapSlippageBps;
     uint16 maxMigrationLossBps;
 }
-
-struct PauseState {
-    bool depositPaused;
-    bool plainRebalancePaused;
-    bool swapRebalancePaused;
-}
 ```
 
-`ImmutableConfig` 在构造或不可变初始化阶段设置，Bootstrap 后不可替换；`AdapterRegistry` 以独立源码合约存在并由 `AdaptiveLPVault` 继承，不单独部署；shares 固定使用 18 decimals，`minimumLockedShares` 不得由 Bootstrap 调用者指定，并在 Bootstrap 时铸造给 Vault 自身。`StrategyConfig` 可由 Admin 在硬边界内更新；每次更新发出 `ParameterUpdated`。
+`VaultConfig`、`OracleConfig` 和 `StrategyConfig` 仅作为构造参数与内存传参结构，不作为整体状态变量写入普通 storage。各字段在部署时通过协议硬边界与字段关系校验后，分别写入所属合约的 Solidity `immutable` 状态变量；部署后任何角色均不得修改。
 
 ### 4.3 Oracle 与资产快照
 
@@ -336,20 +333,35 @@ struct SwapPlan {
     uint256 minAmountOut;
     uint32 deadline;
 }
+```
 
+`planHash` 必须覆盖所有影响执行结果且可稳定复算的字段，包括目标 Venue、Range、Regime、版本和 `requiresSwap`，不得覆盖当前 `block.timestamp`。`SwapPlan` 是 Vault 在执行入口内构造、仅传给 `ControlledSwapExecutor` 的交易级对象，不是调用者可自由提交的完整目标结构。`expectedPlanHash` 和 `expectedZeroForOne` 是调用者对预期计划与 Swap 方向的确认值；Vault 在退出旧 Position 后重新生成计划并计算实际方向，不匹配即表示计划或方向已陈旧并回滚。`deadline` 由调用入口独立校验；调用者不能传入任意目标字段、Router、实际方向或 calldata。
+
+### 4.5 运行时控制状态
+
+```solidity
+struct PauseState {
+    bool depositPaused;
+    bool plainRebalancePaused;
+    bool swapRebalancePaused;
+}
+```
+
+`PauseState` 归属于 `AdaptiveLPVault` 的运行时控制状态，由 `VaultPause` 逻辑读写并以普通 storage 保存。
+
+### 4.6 Registry 绑定类型
+
+```solidity
 struct AdapterConfig {
     VenueType venue;
     address adapter;
     address pool;
-    address token0;
-    address token1;
     uint24 feeTier;
     bool enabled;
-    bool canEnter;
 }
 ```
 
-`planHash` 必须覆盖所有影响执行结果且可稳定复算的字段，包括目标 Venue、Range、Regime、版本和 `requiresSwap`，不得覆盖当前 `block.timestamp`。`SwapPlan` 是 Vault 在执行入口内构造、仅传给 `ControlledSwapExecutor` 的交易级对象，不是调用者可自由提交的完整目标结构。`expectedPlanHash` 和 `expectedZeroForOne` 是调用者对预期计划与 Swap 方向的确认值；Vault 在退出旧 Position 后重新生成计划并计算实际方向，不匹配即表示计划或方向已陈旧并回滚。`deadline` 由调用入口独立校验；调用者不能传入任意目标字段、Router、实际方向或 calldata。
+`AdapterConfig` 归属于 Vault 继承的 `AdapterRegistry`，是 `_adapterByVenue` Mapping 的值类型。`venue` 必须与 Mapping Key 一致；Bootstrap 成功后身份绑定字段冻结，只有 `enabled` 可以继续修改。
 
 ## 5. 存储归属与状态转换
 
@@ -357,31 +369,91 @@ struct AdapterConfig {
 
 `AdaptiveLPVault` 至少保存：
 
-| 存储项 | 类型 | 写入时机 | 约束 |
-| --- | --- | --- | --- |
-| `token0/token1` | `address` | 构造 | 不可变 |
-| `initialized` | `bool` | Bootstrap 成功 | 只能从 false 到 true |
-| `activeVenue` | `VenueType` | Bootstrap/Rebalance/Emergency Exit | 与有效 Position 一致 |
-| `activeAdapter` | `address` | Bootstrap/Rebalance | 必须来自封存 Registry |
-| `lastSuccessfulRebalanceAt` | `uint32` | 成功 Position 变更 | 失败交易不更新 |
-| `planVersion` | `uint64` | 成功计划执行 | 单调递增 |
-| `positionPlan` | `PositionPlan` | 成功计划执行 | 与当前 `planVersion` 和资产位置一致 |
-| `pauseState` | `PauseState` | 角色操作或自动门控 | Redeem 不受影响 |
-| `strategyConfig` | `StrategyConfig` | Bootstrap 前/治理更新 | 每字段通过硬边界 |
-| `minimumLockedShares` | `uint256` | 构造 | 永久锁定，不可转出 |
+| 存储项 | 类型 | 存储方式 | 写入时机 | 约束 |
+| --- | --- | --- | --- | --- |
+| `token0/token1` | `address` | `immutable` | 构造 | 固定资产对和顺序；部署后不可修改 |
+| `token0Decimals/token1Decimals` | `uint8` | `immutable` | 构造 | 与固定资产 decimals 一致；部署后不可修改 |
+| `dustTolerance0/dustTolerance1` | `uint256` | `immutable` | 构造 | 仅用于整数舍入和最小单位容忍；部署后不可修改 |
+| `canonicalOracle` | `address` | `immutable` | 构造 | 固定 `CanonicalV3Oracle` 合约；部署后不可替换 |
+| `swapExecutor` | `address` | `immutable` | 构造 | 固定 `ControlledSwapExecutor` 合约；部署后不可替换 |
+| `minimumLockedShares` | `uint256` | `immutable` | 构造 | Bootstrap 时铸造给 Vault 自身，永久锁定 |
+| `minimumInitialNav` | `uint256` | `immutable` | 构造 | Bootstrap 最低 NAV；调用者不能覆盖 |
+| `bootstrapRatioToleranceBps` | `uint16` | `immutable` | 构造 | Bootstrap 比例容差；调用者不能覆盖 |
+| `minRebalanceCooldown` | `uint32` | `immutable` | 构造 | 部署时校验；部署后不可修改 |
+| `enterMediumBps/exitMediumBps` | `uint24` | `immutable` | 构造 | 满足完整 Hysteresis 阈值关系；部署后不可修改 |
+| `enterHighBps/exitHighBps` | `uint24` | `immutable` | 构造 | 满足完整 Hysteresis 阈值关系；部署后不可修改 |
+| `enterExtremeBps/exitExtremeBps` | `uint24` | `immutable` | 构造 | 满足完整 Hysteresis 阈值关系；部署后不可修改 |
+| `narrowRangeHalfWidth/wideRangeHalfWidth` | `int24` | `immutable` | 构造 | `0 < narrow < wide`；部署后不可修改 |
+| `minRecenterBps/minDeployBps/maxHealthyIdleBps` | `uint16` | `immutable` | 构造 | 分别通过协议硬边界校验；部署后不可修改 |
+| `maxSwapSlippageBps/maxMigrationLossBps` | `uint16` | `immutable` | 构造 | 不超过协议硬上限；部署后不可修改 |
+| `initialized` | `bool` | `storage` | Bootstrap 成功 | 只能从 false 到 true |
+| `activeVenue` | `VenueType` | `storage` | Bootstrap/Rebalance/Emergency Exit | 与有效 Position 一致 |
+| `activeAdapter` | `address` | `storage` | Bootstrap/Rebalance | 必须来自 Bootstrap 成功后已冻结的 Registry 绑定 |
+| `lastSuccessfulRebalanceAt` | `uint32` | `storage` | 成功 Position 变更 | 失败交易不更新 |
+| `planVersion` | `uint64` | `storage` | 成功计划执行 | 单调递增 |
+| `positionPlan` | `PositionPlan` | `storage` | 成功计划执行 | 与当前 `planVersion` 和资产位置一致 |
+| `pauseState` | `PauseState` | `storage` | 角色操作或自动门控 | Redeem 不受影响 |
 
 Vault 不保存由 Registry 遍历产生的冗余资产总额。`totalAssets()` 每次读取 Idle 余额和当前 Active Adapter 快照，并调用 Accounting 计算。
 
-### 5.2 Registry 存储
+### 5.2 Oracle 配置存储
 
-`AdapterRegistry` 保存固定长度的 Adapter 配置集合和按 Venue 的索引。Bootstrap 后：
+`CanonicalV3Oracle` 是独立部署的 Oracle 合约：
 
-- 禁止新增 Adapter；
-- 禁止替换 `adapter`、`pool`、Token 或 Fee Tier；
-- 允许切换 `enabled`，但禁用只阻止进入，不阻止退出；
-- `activeAdapter` 必须始终是已注册配置的地址。
+| 存储项 | 类型 | 存储方式 | 写入时机 | 约束 |
+| --- | --- | --- | --- | --- |
+| `twapWindowSeconds` | `uint32` | `immutable` | Oracle 构造 | 大于零且不超过协议硬上限；部署后不可修改 |
+| `shortTwapWindowSeconds` | `uint32` | `immutable` | Oracle 构造 | `0 < shortTwapWindowSeconds < twapWindowSeconds`；部署后不可修改 |
 
-### 5.3 状态转换约束
+Oracle 在构造时完成窗口关系和协议硬边界校验。实现可以使用两个独立的 `immutable` 字段承载，而不要求把整个 `OracleConfig` 结构体写入普通 storage。
+
+### 5.3 Registry 存储
+
+`AdapterRegistry` 是 `AdaptiveLPVault` 继承的内部存储与校验模块。
+
+| 存储项 | 类型 | 存储方式 | 写入时机 | 约束 |
+| --- | --- | --- | --- | --- |
+| `_adapterByVenue` | `mapping(VenueType => AdapterConfig)` | 普通 `storage` Mapping | `configureAdapter`；Bootstrap 后 `setAdapterEnabled` 仅修改 `enabled` | Key 只允许三个非 IDLE Venue；不得用于遍历资产会计 |
+
+`adapter == address(0)` 表示该 Venue 未注册。`IDLE` 不是 Adapter，`_adapterByVenue[IDLE]` 必须保持零值，`getAdapter(IDLE)` 返回 `address(0)`，`isEnterEnabled(IDLE)` 返回 `false`。`isEnterEnabled(venue)` 仅按 `adapter != address(0) && enabled` 派生 Registry 层结果；Vault 初始化、暂停、Oracle 健康和 Position 一致性由 Vault 入口另行校验。
+
+Admin 只能在 `initialized == false` 时新增或修正 Adapter 身份绑定；`bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓之前，在同一交易内重新校验三个非 IDLE Venue 的完整绑定，并仅在全部 Bootstrap 操作成功时通过 `initialized = true` 自动冻结身份字段。Bootstrap 失败不会冻结 Registry。`VaultBootstrapped` 作为绑定已成功冻结的链上信号。
+
+### 5.4 Adapter 合约存储
+
+`UniswapV2Adapter` 和 `UniswapV3Adapter` 是独立部署的 Adapter 合约；每个 Adapter 至少保存以下不可变绑定字段：
+
+| 存储项 | 类型 | 存储方式 | 写入时机 | 约束 |
+| --- | --- | --- | --- | --- |
+| `vault` | `address` | `immutable` | Adapter 构造 | 只有该 Vault 可以调用资产变更方法；部署后不可替换 |
+| `venue` | `VenueType` | `immutable` | Adapter 构造 | 必须与 Adapter 实现及 Registry 注册 Venue 一致 |
+| `pool` | `address` | `immutable` | Adapter 构造 | 固定绑定的 V2 Pair 或 V3 Pool；部署后不可替换 |
+| `token0/token1` | `address` | `immutable` | Adapter 构造 | 必须与 Vault 固定资产及顺序一致；部署后不可替换 |
+| `feeTier` | `uint24` | `immutable` | Adapter 构造 | V3 必须与 Pool Fee Tier 一致；V2 固定为零 |
+
+V3 Adapter 还保存：
+
+| 存储项 | 类型 | 存储方式 | 写入时机 | 约束 |
+| --- | --- | --- | --- | --- |
+| `positionManager` | `address` | `immutable` | Adapter 构造 | 固定的 NonfungiblePositionManager；部署后不可替换 |
+| `positionId` | `uint256` | `storage` | 创建 Position 或完整退出 | 无有效 NFT Position 时为零；同一 Adapter 最多一个有效 Position |
+
+### 5.6 ControlledSwapExecutor 合约存储
+
+`ControlledSwapExecutor` 是独立部署的 Swap 执行合约；其固定依赖和调用权限不属于 Vault 或 Registry 的存储。Executor 至少保存以下部署时固定的绑定字段：
+
+| 存储项 | 类型 | 存储方式 | 写入时机 | 约束 |
+| --- | --- | --- | --- | --- |
+| `vault` | `address` | `immutable` | Executor 构造 | 只有该 Vault 可以调用 `executeSwap()`；部署后不可替换 |
+| `router` | `address` | `immutable` | Executor 构造 | 固定白名单 Router；部署后不可替换 |
+| `token0/token1` | `address` | `immutable` | Executor 构造 | 只能交换 Vault 固定的资产对；部署后不可替换 |
+| `swapPool` | `address` | `immutable` | Executor 构造 | 固定批准使用的 Swap Pool；部署后不可替换 |
+| `feeTier` | `uint24` | `immutable` | Executor 构造 | 必须与 `swapPool` 的 Fee Tier 一致；部署后不可替换 |
+| `swapMethod` | 固定代码逻辑或 `immutable` 枚举 | 部署时固定 | Executor 构造 | 仅允许 v1 规定的 exact-input、single-hop 方法 |
+
+Swap 输出接收方固定为 `vault`。Router allowance 只在执行期间按需设置并在完成后清零，不作为持久化配置。Executor 执行后根据固定 Token 的实际余额增量返回 `amountOut`，不能只依赖 Router 返回值。
+
+### 5.7 状态转换约束
 
 ```mermaid
 stateDiagram-v2
@@ -450,6 +522,8 @@ interface IAdaptiveLPVault {
 | `rebalance` | 任意地址 | 健康、计划哈希、deadline、Cooldown、`requiresSwap == false` | 原子退出旧 Position、建立新 Position 或 IDLE；`requiresSwap` 为 true 时以 `SwapRequired()` 回滚 |
 | `rebalanceWithSwap` | Keeper/Admin | 健康、`requiresSwap == true`、`expectedZeroForOne` 与 Vault 重算方向一致、`amountIn`/`keeperMinAmountOut`/`deadline` 有效、白名单和 NAV 限制 | Vault 内部构造受控 SwapPlan，执行换币后建立目标 Position |
 | `emergencyExitToIdle` | Guardian/Admin | 可退出 Active Position | 无 Swap 清空 Position，进入 IDLE |
+
+Bootstrap 使用部署时固定的 `minimumInitialNav` 与 `bootstrapRatioToleranceBps` 完成最低 NAV 和初始比例检查；
 
 所有写入口均应在失败时完全回滚。`redeem` 是唯一不要求 Oracle Healthy 的资产退出入口，Emergency Exit 不要求 TWAP NAV 成功但要求实际 Position 清零和资产返回。
 
@@ -532,16 +606,21 @@ Adapter 规则：
 
 ```solidity
 interface IAdapterRegistry {
+    function configureAdapter(
+        VenueType venue,
+        address adapter,
+        address pool,
+        uint24 feeTier
+    ) external;
+
     function getAdapter(VenueType venue) external view returns (address adapter);
     function getConfig(VenueType venue) external view returns (AdapterConfig memory);
     function isEnterEnabled(VenueType venue) external view returns (bool);
     function setAdapterEnabled(VenueType venue, bool enabled) external;
-    function seal() external;
-    function sealed() external view returns (bool);
 }
 ```
 
-`seal()` 成功后禁止新增、替换和重新绑定。`setAdapterEnabled` 不能影响从 Adapter 退出资产。
+`configureAdapter` 只能由 Admin 在 `initialized == false` 时调用，用于新增或修正非 IDLE Venue 的 `adapter`、`pool` 和 `feeTier` 绑定；成功配置时将 `enabled` 初始化为 `true` 并发出 `AdapterConfigured`。
 
 ### 6.6 Swap Executor 接口
 
@@ -552,10 +631,15 @@ interface IControlledSwapExecutor {
         returns (uint256 amountOut);
 
     function router() external view returns (address);
+    function vault() external view returns (address);
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+    function swapPool() external view returns (address);
+    function feeTier() external view returns (uint24);
 }
 ```
 
-`ControlledSwapExecutor` 在部署或不可变初始化时固定 Router、token0/token1、Pool/Fee Tier、exact-input 方法和接收地址规则，Bootstrap 后不能由 Keeper/Admin 替换。执行器只接受 Vault 调用，并验证计划哈希、Token 对、方向、实际可用余额、`minAmountOut >= protocolMinOut`、deadline、固定接收地址和精确授权；执行完成后按实际余额增量返回 `amountOut`，不得把 Router 返回值作为唯一结果。
+`ControlledSwapExecutor` 在部署或不可变初始化时固定 `vault`、Router、token0/token1、`swapPool`、Fee Tier、exact-input 方法和接收地址规则，Bootstrap 后不能由 Keeper/Admin 替换。执行器只接受 `vault` 调用，并验证计划哈希、Token 对、方向、实际可用余额、`minAmountOut >= protocolMinOut`、deadline、固定接收地址和精确授权；执行完成后按实际余额增量返回 `amountOut`，不得把 Router 返回值作为唯一结果。
 
 Executor 只承担局部 Swap 安全，不调用 Strategy、不退出或建立 Position，也不校验完整迁移损失。Vault 在 Swap 和目标建仓后重新读取两种资产与 Position，并验证部署率、Idle、NAV 损失和单活 Position；无 Swap 路径额外执行 `dustTolerance0/1` 范围内的逐 Token 资产守恒，带 Swap 路径不要求 token0/token1 分别守恒，只依赖 Executor 的实际余额增量和 `minAmountOut` 校验。完整公式见 [SWAP_REBALANE_MATH.md](SWAP_REBALANE_MATH.md)。
 
@@ -595,7 +679,6 @@ error ActivePositionExists();
 error PositionNotCleared();
 error AdapterNotRegistered();
 error AdapterDisabled();
-error RegistrySealed();
 error NotVaultCaller();
 error UnsupportedToken();
 error Reentrancy();
@@ -685,9 +768,13 @@ event IdleStateChanged(
     uint256 idleBps
 );
 
-event AdapterStatusChanged(VenueType indexed venue, address indexed adapter, bool enabled, bool canEnter);
-event AdapterRegistrySealed();
-event ParameterUpdated(bytes32 indexed parameter, uint256 oldValue, uint256 newValue);
+event AdapterConfigured(
+    VenueType indexed venue,
+    address indexed adapter,
+    address indexed pool,
+    uint24 feeTier
+);
+event AdapterStatusChanged(VenueType indexed venue, address indexed adapter, bool enabled);
 event PauseStateChanged(bool depositPaused, bool plainRebalancePaused, bool swapRebalancePaused);
 event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
 event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
@@ -700,7 +787,7 @@ event EmergencyExit(address indexed caller, VenueType previousVenue, uint256 amo
 - `RebalanceExecuted` 只在所有 post-condition 成功后发出；
 - 任何以 custom error 回滚的交易都不会保留事件日志，协议不定义失败事件；`SwapRequired()` 通过 revert data 返回；
 - `IdleStateChanged` 只反映资产位置变化，不用于表示暂停；
-- 参数和角色事件不能被批量更新静默跳过；
+- 角色变更和运行时控制状态变化不能静默跳过对应事件；
 - Emergency Exit 不发 Swap 事件，因为该路径禁止 Swap。
 
 ## 9. 关键调用时序
@@ -712,13 +799,12 @@ sequenceDiagram
     participant Admin
     participant Vault
     participant Oracle
-    participant Registry
     participant Accounting
     participant Strategy
     participant Adapter
 
     Admin->>Vault: bootstrap(amount0, amount1, receiver)
-    Vault->>Registry: validate sealed bindings
+    Vault->>Vault: validate complete inherited Adapter bindings
     Vault->>Oracle: snapshot()
     Oracle-->>Vault: healthy OracleSnapshot
     Vault->>Accounting: compute seed NAV and grossInitialShares
@@ -729,7 +815,7 @@ sequenceDiagram
     Vault->>Vault: mint and lock grossInitialShares
     Vault->>Adapter: deposit if targetVenue is non-IDLE
     Adapter-->>Vault: used amounts and liquidity
-    Vault->>Vault: validate ACTIVE or EXTREME IDLE post-state
+    Vault->>Vault: validate ACTIVE or EXTREME IDLE post-state; set initialized = true and freeze bindings
     Vault-->>Admin: VaultBootstrapped
 ```
 

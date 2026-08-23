@@ -14,9 +14,24 @@
 minimumInitialNav 与 bootstrapRatioToleranceBps 无配置字段承载 
 这两个 Bootstrap 前置检查参数在两个配置结构体中均无字段。SPEC §10.2 把它们列为"可由 Admin 在硬边界内更新"的治理参数（需发 ParameterUpdated 事件），但 ARCH 没有为它们定义存储归属、更新入口和边界校验位置。实现时无处安放。
 
+> 原因：Bootstrap 专用参数在配置类型设计中遗漏，且其生命周期没有与“仅使用一次”的语义对齐。
+
+修改：
+- `minimumInitialNav` 与 `bootstrapRatioToleranceBps` 纳入 `VaultConfig`，不再单独定义 `BootstrapConfig`；`VaultConfig` 只作为部署构造输入和内存传参结构，不作为整体状态变量写入普通 storage。
+- 两个字段在部署前完成校准，并在 Vault 构造时执行协议硬边界和字段关系校验；随后分别写入 Vault 的 Solidity `immutable` 状态变量。它们只在唯一一次 `bootstrap()` 中读取，调用者不能覆盖。
+- 删除 `BootstrapConfig`、`updateBootstrapConfig`、`bootstrapConfig()` 查询及对应的 `ParameterUpdated` 语义；这两个字段不是治理参数，部署后永久不可修改。如需采用不同值，必须部署新的 Vault。
+
 ## 问题 3
 Adapter Registry 封存时序矛盾：Bootstrap 前还是 Bootstrap 后
 你的 SPEC 说封存发生在 Bootstrap 成功之后 ARCH 的 Bootstrap 时序图要求在 bootstrap 调用内部校验 Registry 已处于 sealed 状态 即封存必须发生在 Bootstrap 之前 。两种读法下系统行为不同 按 SPEC，bootstrap 成功瞬间才 seal 谁调用？bootstrap 内部自动 seal？ ；按 ARCH，Admin 必须先另行调用 seal() 才能通过 bootstrap 的第一步校验。seal() 的调用者、调用时机、bootstrap 与 seal 之间的窗口期行为 谁能在此窗口新增 Adapter 均未定义。
+
+> 原因：Registry 从独立部署改为由 Vault 继承后，旧的独立 `seal()` 生命周期、接口和系统图未同步删除。
+
+修改：
+- `AdapterRegistry` 是由 `AdaptiveLPVault` 继承并内部集成的源码模块，负责 Vault 内的地址簿、绑定校验和 operational 状态；不单独部署、没有独立地址，也不再作为系统图中的跨合约调用节点。绑定使用单一的 `_adapterByVenue` Mapping。
+- 删除手动 `seal()`、`sealed()`、独立 `sealed` 状态、`RegistrySealed` 错误和封存事件契约。`initialized` 是唯一的生命周期冻结边界：`initialized == false` 时 Admin 可以配置或修正绑定；`bootstrap()` 只在完整校验和全部资产/Position 操作成功后将其从 `false` 设置为 `true`，失败不会冻结；`VaultBootstrapped` 是绑定成功冻结的链上信号。
+- Bootstrap 前由 Admin 显式调用 `configureAdapter(VenueType venue, address adapter, address pool, uint24 feeTier)` 配置非 `IDLE` Venue；`bootstrap()` 不会自动调用该入口。配置入口校验 Adapter 合约代码、Adapter 的 Vault/Venue、Pool、Token 顺序和 Fee Tier 绑定，成功时将 `enabled` 初始化为 `true` 并发出 `AdapterConfigured`。
+- Bootstrap 成功后不得新增或替换 Adapter、Pool、Token 顺序或 Fee Tier；仅允许切换已注册 Adapter 的 `enabled` operational 状态。
 
 ## 问题 4
 Market Regime 滞后状态无持久化机制，Hysteresis 正确性依赖未声明的隐式假设

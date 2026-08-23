@@ -68,7 +68,7 @@ Vault 必须验证：
 - 输入 Token 是 `previewDeposit` 识别出的过量 Token；
 - `amountIn` 不超过 Vault 当前该输入 Token 的可用余额；
 - Swap 后不会把资产比例从一侧过量变成另一侧明显过量；
-- Swap 后的 `deployBps` 和 `idleBps` 满足治理参数；
+- Swap 后的 `deployBps` 和 `idleBps` 满足部署时固定的协议参数；
 - Swap 后的完整迁移满足 `maxMigrationLossBps` 和资产状态不变量。
 
 对输入 `x`，先使用协议允许的最差 Swap 输出模拟余额，再验证目标 Position：
