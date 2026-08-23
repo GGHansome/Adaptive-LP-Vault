@@ -93,6 +93,8 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | DEVIATION / `deviationBps` | 短周期 TWAP 价格相对 TWAP 价格的绝对偏离，单位为基点                                          | Oracle 内部计算                             | 不接受外部输入；不得命名为 volatility                  |
 | Oracle Healthy             | Oracle 地址、资产顺序、观察历史、窗口、Tick 和报价均满足可用性检查                                   | Oracle 健康检查                             | 与 `EXTREME_DEVIATION` 独立；极端偏离可以仍然健康       |
 | Market Regime              | Strategy 根据健康 Oracle 快照和滞后规则输出的策略状态                                       | LOW/MEDIUM/HIGH/EXTREME                 | 不是收益评级或风险免责                               |
+| Last Committed Regime / `lastCommittedRegime` | 最近一次成功执行的健康 Strategy 计划所提交的 Regime，作为 Hysteresis 历史 | Vault 持久化状态 | 不从 `activeVenue` 推导；Emergency Exit、全部流通 shares 赎回和 Oracle 不健康不覆盖 |
+| Plan Version / `planVersion` | Position 结构状态的单调版本；候选计划使用下一版本 | Vault 持久化状态 | `0` 仅表示首次计划尚未成功；成功结构变化后递增 |
 | Position Plan              | 目标 Venue、V3 Range、计划版本和是否需要 Swap 的完整目标                                    | Strategy 确定性生成                          | Rebalance 调用者只能提交期望哈希和 deadline，不能改写内容    |
 | Hysteresis                 | 状态进入和退出使用不同阈值形成的滞后区间                                                      | Strategy 参数                             | 不能用 Cooldown 替代                           |
 | Cooldown                   | 两次成功 Position 变更之间的最小时间间隔                                                 | Vault 存储的时间戳                            | 失败交易不更新                                   |
@@ -168,10 +170,10 @@ Bootstrap 只能由 Admin 调用且只能成功一次。`minimumLockedShares` �
 执行规则：
 
 1. 读取 TWAP，并根据 `amount0/amount1` 构造零 Position 的初始资产快照。
-2. 调用 Strategy 生成初始计划，并校验目标 Venue、Range 和 `requiresSwap`。
+2. 以 `planVersion == 0` 表示无历史计划，调用 Strategy 生成初始计划；Strategy 忽略 `lastCommittedRegime` 的默认枚举值，按完整进入阈值分类，并返回 `version == 1` 的计划，然后校验目标 Venue、Range 和 `requiresSwap`。
 3. 按第 6.4 节公式计算 `grossInitialShares`，转入 `amount0/amount1` 后完成铸造，其中 `minimumLockedShares` 铸造给 Vault 自身（`address(this)`），其余发送到 `receiver`；Vault 不提供锁定 shares 的转出或救援机制。
 4. 调取`getPlan()`获取 PositionPlan，若计划为 `EXTREME_DEVIATION`，资产保留在 Vault 并直接进入 IDLE；若计划为 LOW、MEDIUM 或 HIGH，则必须满足 `requiresSwap == false` 和最低部署率，并在同一交易内建立目标 Position 后进入 ACTIVE。`requiresSwap == true` 时以 `SwapRequired()` 回滚，具体策略介绍参考第 9 节。
-5. 验证部署率、资产守恒和 Position 唯一性后，把 `initialized` 置为 `true`，并发出 `VaultBootstrapped`事件。
+5. 验证部署率、资产守恒和 Position 唯一性后，将 `positionPlan` 写为初始计划、`lastCommittedRegime` 写为该计划的 `marketRegime`、`planVersion` 写为 `1`，再把 `initialized` 置为 `true`，并发出 `VaultBootstrapped` 事件。
 
 Bootstrap 已包含首次策略执行，正常情况下不需要再手动调用一次 Rebalance。Bootstrap 失败必须回滚全部资产转移、shares 铸造和 Adapter 状态，且不发出 `VaultBootstrapped`。Bootstrap 后不得重新初始化，也不得通过销毁 shares 重新开启 Bootstrap。
 
@@ -232,7 +234,7 @@ $$
 - 验证两种实际输出不低于用户最小输出；
 - 销毁 shares 后转账给 `receiver`。
 
-如果除 `minimumLockedShares` 外的流通 shares 全部赎回，Vault 必须退出所有 LP Position 并进入 IDLE；锁定 shares、`dustTolerance0/1` 范围内的舍入余额和捐赠余额按既定会计继续存在。该状态不能重新 Bootstrap。
+如果除 `minimumLockedShares` 外的流通 shares 全部赎回，Vault 必须退出所有 LP Position 并进入 IDLE；该完整退出属于 Position 结构变化，必须使 `planVersion` 递增 1，但保持 `lastCommittedRegime` 不变。锁定 shares、`dustTolerance0/1` 范围内的舍入余额和捐赠余额按既定会计继续存在。该状态不能重新 Bootstrap。
 
 ### 5.5 Donation
 
@@ -528,7 +530,7 @@ $$
 
 ### 8.4 Oracle Healthy 与失败门控
 
-以下任一条件不满足，Oracle 状态为 `ORACLE_UNHEALTHY`：
+以下任一条件不满足时，`OracleSnapshot.healthy` 必须为 `false`：
 
 - canonical Pool 地址或资产绑定不匹配；
 - `twapWindowSeconds == 0`、`shortTwapWindowSeconds == 0` 或 `shortTwapWindowSeconds >= twapWindowSeconds`；
@@ -558,11 +560,20 @@ Oracle 不健康时：
 - 当前 Oracle Snapshot；
 - 当前 `activeVenue` 和 Position Snapshot；
 - Vault 资产比例、Idle 比例和暂停状态；
+- 持久化的 `lastCommittedRegime` 和当前 `planVersion`；
 - 部署时固定且受硬边界约束的策略参数。
 
-输出为完整 `PositionPlan`，至少包含 `targetVenue`、`marketRegime`、V3 Tick Range、计划版本和 `requiresSwap`。计划哈希只覆盖这些会影响执行结果且可稳定复算的策略字段，不覆盖当前 `block.timestamp`；调用者不能传入策略阈值或目标参数。
+输出为完整 `PositionPlan`，至少包含 `targetVenue`、`marketRegime`、V3 Tick Range、计划版本和 `requiresSwap`。计划哈希只覆盖这些会影响执行结果且可稳定复算的策略字段，不覆盖当前 `block.timestamp`。
 
-Vault 提供 `previewRebalance()` 只读接口，使用与执行入口相同的 Oracle、资产、Position 快照和 Strategy 计算路径，返回包括 `planHash` 和 `requiresSwap` 在内的最新 `PositionPlan`。该接口供前端和 Keeper 在发送交易前选择 `rebalance` 或 `rebalanceWithSwap`。预览结果只用于执行前判断；真正执行时 Vault 仍必须重新读取最新状态、重新生成计划并校验哈希。
+Vault 提供 `previewRebalance()` 只读接口，且该接口只适用于已初始化 Vault。调用顺序必须为：
+
+- 首先检查 `initialized == true`；未初始化时以 `NotInitialized()` 回滚，不读取默认 `positionPlan`、不调用 Strategy，也不返回占位计划。
+- 初始化后读取 Oracle；Oracle 不健康时以 `OracleUnhealthy()` 回滚，不返回占位计划。
+- 仅在以上检查通过后，使用与执行入口相同的 Oracle、资产、Position 快照和 Strategy 计算路径，返回包括 `planHash` 和 `requiresSwap` 在内的最新 `PositionPlan`。
+
+前端通过回滚原因判断不可执行原因。该接口供前端和 Keeper 在发送交易前选择 `rebalance` 或 `rebalanceWithSwap`。预览结果只用于执行前判断；真正执行时 Vault 仍须重新读取最新状态、重新生成计划并校验哈希。
+
+`planVersion` 初始为 0。成功的 Bootstrap、Venue 迁移、V3 Recenter、策略进入或退出 IDLE、Emergency Exit，以及全部流通 shares 赎回导致的完整 Position 退出，均属于 Position 结构变化并使版本恰好递增 1。沿既有 Position 按当前计划增加流动性的 Deposit、部分 Redeem、费用同步、Donation、暂停状态和 Adapter `enabled` 变化不递增版本。失败交易不得更新版本。
 
 ### 9.2 市场状态与目标 Venue
 
@@ -573,7 +584,6 @@ Vault 提供 `previewRebalance()` 只读接口，使用与执行入口相同的 
 | `MEDIUM_DEVIATION`  | 从 LOW 上升跨过 `enterMediumBps`，或从 HIGH 下降跨过 `exitHighBps`        | V3 高费率池  | 以 TWAP Tick 为中心的宽 Range |
 | `HIGH_DEVIATION`    | 从 MEDIUM 上升跨过 `enterHighBps`，或从 EXTREME 下降跨过 `exitExtremeBps` | V2       | 全价格区间，避免主动窄 Range 管理    |
 | `EXTREME_DEVIATION` | 从 HIGH 上升跨过 `enterExtremeBps`                                 | IDLE     | 无 Swap 撤出或保持全部资产在 Vault |
-| `ORACLE_UNHEALTHY`  | Oracle 健康检查失败                                                 | 无策略目标    | 关闭价值相关操作，仅保留赎回和紧急退出     |
 
 
 
@@ -594,7 +604,7 @@ $$
 - EXTREME 只有在 `deviationBps <= exitExtremeBps` 时回到 HIGH；
 - 未跨越当前状态对应边界时保持当前状态。
 
-首次从无历史状态计算时按 LOW → MEDIUM → HIGH → EXTREME 的进入阈值选择。Hysteresis 控制幅度，Cooldown 控制时间频率，两者不可互相替代。
+`planVersion == 0`时 Strategy 忽略 `lastCommittedRegime` 的 Solidity 默认值，按 LOW → MEDIUM → HIGH → EXTREME 的完整进入阈值直接分类。当 `planVersion > 0` 时，Strategy 使用 `lastCommittedRegime` 执行上述状态转换。Hysteresis 控制幅度，Cooldown 控制时间频率，两者不可互相替代。
 
 ### 9.4 Position Plan 生成规则
 
@@ -612,7 +622,7 @@ $$
 deployBps = \left\lfloor \frac{DeployableNAV_1 \times BPS}{NAV_1} \right\rfloor
 $$
 
-Oracle Healthy 且状态为 LOW、MEDIUM 或 HIGH 时，`deployBps < minDeployBps` 必须标记 `requiresSwap = true`，不得静默改为 IDLE；达到门槛时标记 `requiresSwap = false`。`EXTREME_DEVIATION` 必须以 IDLE 为目标且 `requiresSwap = false`，Oracle Unhealthy 则不生成可执行的普通计划。
+Oracle Healthy 且状态为 LOW、MEDIUM 或 HIGH 时，`deployBps < minDeployBps` 必须标记 `requiresSwap = true`，不得静默改为 IDLE；达到门槛时标记 `requiresSwap = false`。`EXTREME_DEVIATION` 必须以 IDLE 为目标且 `requiresSwap = false`。Oracle 不健康时，Vault 必须在调用 Strategy 前以 `OracleUnhealthy()` 回滚；Strategy 若收到不健康快照也必须防御性回滚，不生成 `PositionPlan`，也不计算占位 `planHash`。
 
 `requiresSwap = true` 表示当前资产比例无法通过无 Swap 路径达到最低部署率。Bootstrap 必须以 `SwapRequired()` 回滚，由 Admin 调整初始 token 比例后重试；已初始化 Vault 的普通 `rebalance` 同样以 `SwapRequired()` 回滚，随后只有 Keeper/Admin 可以改用 `rebalanceWithSwap` 执行该计划。EVM 回滚不会保留状态更新或事件日志，因此不会发出 `VaultBootstrapped`、`RebalanceExecuted` 或 `SwapExecuted`；调用方通过回滚返回的 `SwapRequired()` 识别失败原因。
 
@@ -651,7 +661,7 @@ Spot 越界但 TWAP 目标中心尚未移动足够远时，不立即跟随 Spot 
 - `requiresSwap == false`；
 - Adapter、Pool、Token 顺序和最小输出检查通过。
 
-执行必须原子完成：同步费用、退出旧 Position、建立目标 Position 或进入 IDLE、归还未使用资产、验证资产守恒/Idle/单活 Position，然后更新计划版本和 `lastSuccessfulRebalanceAt`。失败交易不能更新时间戳。
+执行必须原子完成：同步费用、退出旧 Position、建立目标 Position 或进入 IDLE、归还未使用资产、验证资产守恒/Idle/单活 Position，然后提交 `positionPlan`，将 `lastCommittedRegime` 更新为执行计划的 `marketRegime`，并将 `planVersion` 更新为该计划的 `version`，同时更新 `lastSuccessfulRebalanceAt`。失败交易不能更新这些状态。
 
 ### 9.6 带 Swap Rebalance
 
@@ -675,7 +685,7 @@ Router、Token 对、Pool/Fee Tier、固定 exact-input Swap 方法和接收地�
 - 完整迁移后的 NAV 损失不超过 `maxMigrationLossBps`；
 - 单活 Position 检查通过。
 
-`ControlledSwapExecutor` 只执行并验证局部 Swap；迁移损失、部署率、Idle 和 Position 后置条件由 Vault 在建仓后统一校验。任一条件失败时，退出旧 Position、Swap、建立新 Position 和状态更新必须全部回滚。
+`ControlledSwapExecutor` 只执行并验证局部 Swap；迁移损失、部署率、Idle 和 Position 后置条件由 Vault 在建仓后统一校验。全部后置条件成功后，Vault 按普通 Rebalance 的同一规则提交 `positionPlan`、`lastCommittedRegime` 和递增后的 `planVersion`。任一条件失败时，退出旧 Position、Swap、建立新 Position 和状态更新必须全部回滚。
 
 Swap 方向、`previewDeposit`、 `amountIn`、`protocolMinOut`、`keeperMinAmountOut`、V2/V3 比例以及舍入公式的完整定义见 [SWAP_REBALANE_MATH.md](SWAP_REBALANE_MATH.md)。
 
@@ -688,7 +698,7 @@ Guardian/Admin 可在不依赖价格估值的情况下触发紧急退出：
 3. 从 Active Adapter 移除全部 LP liquidity；
 4. 不执行任何 Swap；
 5. 验证支持资产回到 Vault，旧 Position liquidity 为零；
-6. 设置 `activeVenue = IDLE`，关闭 Deposit 和 Rebalance。
+6. 设置 `activeVenue = IDLE`，使 `planVersion` 递增 1，保持 `lastCommittedRegime` 不变，并关闭 Deposit 和 Rebalance。
 
 Oracle 不健康时仍可执行该路径，但不能使用 TWAP NAV 作为成功条件；只能使用底层 AMM 的最小输出、实际余额增加和 Position 清零条件。
 
@@ -766,6 +776,8 @@ Bootstrap 成功后不可替换：
 - Observation 不足、报价为零或资产绑定错误时关闭价值相关操作。
 - TWAP 只提高操纵成本，不构成绝对安全保证。
 - `deviationBps` 不是波动率，也不用于宣称收益最优。
+- `lastCommittedRegime` 只由成功执行的健康 Strategy 计划更新；
+- 每次成功的 Position 结构变化必须使 `planVersion` 恰好递增 1，失败交易和非结构变化不得更新。
 
 
 
@@ -789,7 +801,7 @@ Bootstrap 成功后不可替换：
 - V2 费用只通过 LP Token 储备权益计价；V3 principal 与 claimable fees 不重复计价。
 - Donation 自动进入总资产，且不存在支持资产 rescue/sweep 权限。
 - `observe([twapWindowSeconds, shortTwapWindowSeconds, 0])`、负 Tick 向负无穷取整、报价方向和 decimals 处理经过测试。
-- `deviationBps` 由 Oracle 内部根据 `shortTwapTick` 和 `twapTick` 生成，Strategy 的阈值、Hysteresis、Cooldown 和 Range 规则可重复验证。
+- `deviationBps` 由 Oracle 内部根据 `shortTwapTick` 和 `twapTick` 生成；未初始化 Preview 以 `NotInitialized()` 回滚，Oracle 不健康时 Preview 和执行入口均以 `OracleUnhealthy()` 回滚，且都不生成占位计划；Strategy 使用 `planVersion == 0` 识别首次分类，之后只以 `lastCommittedRegime` 执行 Hysteresis；Position 结构变化的版本递增、Cooldown 和 Range 规则均经过测试。
 - 普通 Rebalance 不含 Swap；Swap Rebalance 仅限 Keeper/Admin 且全部后置条件原子校验。
 - 紧急退出不执行 Swap，能在 Oracle 不健康时清空 Active Position 并进入 IDLE。
 - 关键事件、错误和状态查询满足 [ARCHITECTURE.md](ARCHITECTURE.md) 的接口契约。

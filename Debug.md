@@ -38,6 +38,16 @@ Market Regime 滞后状态无持久化机制，Hysteresis 正确性依赖未声�
 Hysteresis 状态机的转移规则以 当前状态 为前提，但该状态既不在 Vault 存储中，也不在 Strategy 接口入参中。唯一候选来源是 positionPlan.marketRegime 上次成功执行的计划的 regime ，但这要求 Venue 和 Regime 严格双射 IDLE 和 EXTREME、V2 与 HIGH、V3高费 与 MEDIUM、V3低费 与 LOW）才能从 activeVenue 复原状态。该双射假设未写入任何不变量（INV-01~12 无此条），且被两条真实路径打破：  Guardian emergencyExitToIdle() 置 activeVenue = IDLE 但不经过任何计划（此时 regime 未必是 EXTREME）； 
 全部流通 shares 赎回触发的 IDLE 同样无计划。这两条路径后，"从哪个滞后状态恢复"未定义。
 
+> 原因：`positionPlan.marketRegime` 虽保存了最近成功计划的 Regime，但现有 Strategy 接口没有接收该历史值；同时，资产位置和 Hysteresis 历史被隐式绑定，Emergency Exit 或全部流通 shares 赎回进入 IDLE 后无法唯一恢复上次策略状态。
+
+修改：
+- Vault 新增 `lastCommittedRegime` 普通 storage，作为 Hysteresis 历史的唯一事实来源，不再从 `activeVenue` 或 `positionPlan.targetVenue` 推导。
+- `IMarketRegimeStrategy.getPlan` 新增 `MarketRegime lastCommittedRegime` 参数；Vault 在 Preview、普通 Rebalance 和带 Swap Rebalance 中传入该持久化值。
+- `planVersion == 0` 是无历史计划的唯一标志。首次生成计划时 Strategy 忽略 `lastCommittedRegime` 的默认枚举值，按完整进入阈值直接分类；后续计划只以 `lastCommittedRegime` 执行 Hysteresis。
+- 候选 `PositionPlan.version` 固定为当前 `planVersion + 1`。Bootstrap 或 Rebalance 成功执行策略计划后，同时提交 `positionPlan`、`lastCommittedRegime = positionPlan.marketRegime` 和候选版本。
+- Emergency Exit 与全部流通 shares 赎回导致的完整 Position 退出属于 Position 结构变化，因此 `planVersion` 递增 1，但 `lastCommittedRegime` 保持不变；Oracle 不健康、Preview 和失败交易也不得覆盖该历史值。
+- Deposit、未清空 Position 的部分 Redeem、费用同步、Donation、暂停和 Adapter `enabled` 变化不属于 Position 结构变化，不递增 `planVersion`。
+
 ## 问题 5
 emergencyExitToIdle() 无最小输出参数，文档中承诺的滑点保护也无表达
 你的 SPEC 承诺紧急退出使用"底层 AMM 的最小输出"作为成功判据，Adapter 接口也要求 minAmount0/minAmount1，但 Vault 层入口 emergencyExitToIdle() 不接受任何参数——最小输出值无来源。可选实现（内部常量、零值、配置参数）均未定义。若实现为零值，则该路径无任何输出下限保护；若为配置参数，则该参数未出现在任何配置结构体中
@@ -70,8 +80,25 @@ Guardian 在 IDLE 状态调用紧急退出 回滚则 Guardian 无法区分 失�
 ## 问题 14
 previewRebalance() 边界行为未定义 与执行入口相同路径 在异常状态下意味着回滚，但你要考虑到前端调用方需要区分 不可执行原因 ；PositionPlan 结构含 MarketRegime 枚举值 ORACLE_UNHEALTHY，这里暗示可以返回该状态的计划而非回滚 两种设计并存于文档的暗示中，没有进行裁定。未初始化 Vault 的 preview（无仓位无配置）同样未定义。
 
+> 原因：`previewRebalance()` 的零参数接口只能根据 Vault 当前已提交的资产和 Position 状态预览下一次 Rebalance。未初始化时尚不存在这些状态，初始计划又依赖 Bootstrap 调用者尚未提交的 `amount0/amount1`，因此任何返回值都只能是无执行意义的占位计划。
+
+修改：
+- `previewRebalance()` 仅适用于已初始化 Vault，并且必须先检查 `initialized == true`；未初始化时以 `NotInitialized()` 回滚。
+- `NotInitialized()` 检查早于 Oracle 读取和 Strategy 调用；该路径不得读取默认 `positionPlan`、生成 `planHash` 或返回占位 `PositionPlan`。
+- 初始化后的 Oracle 不健康分支继续以 `OracleUnhealthy()` 回滚；前端可以通过两个不同的 custom error 区分未初始化与 Oracle 异常。
+
 ## 问题 15
 getPlan 在 Oracle 不健康时的返回契约未定义 Strategy 是纯函数，MarketRegime 枚举含 ORACLE_UNHEALTHY，但 不生成可执行计划 未定义是 revert 还是返回带该枚举的计划。planHash 在该情形下如何计算 若返回结构体则必须有哈希，但该哈希不可用于执行 未定义。
+
+> 原因：旧设计把“健康 Oracle 下的市场偏离分类”和“Oracle 数据不可用”混入同一个 `MarketRegime` 枚举，但 `PositionPlan` 又被定义为可执行候选计划。这样一来，不健康分支既没有合法的目标 Venue、Range 和 `requiresSwap`，又会迫使实现者为不可执行状态构造无意义的 `planHash`，导致“返回占位计划”与“直接回滚”两种互斥语义并存。
+
+修改：
+- 从 `MarketRegime` 删除 Oracle 不健康成员；该枚举只保留 LOW、MEDIUM、HIGH 和 EXTREME 四种健康市场状态。
+- Oracle 健康性仅由 `OracleSnapshot.healthy` 表达，不作为 Hysteresis 状态，也不写入 `lastCommittedRegime`。
+- Vault 在调用 `getPlan()` 前检查 Oracle 快照；`healthy == false` 时以 `OracleUnhealthy()` 回滚且不得调用 Strategy。
+- Strategy 若防御性地收到 `healthy == false` 的快照，也必须以 `OracleUnhealthy()` 回滚，不返回 `PositionPlan`，不计算 `planHash`。
+- 该失败路径不得修改 `positionPlan`、`lastCommittedRegime`、`planVersion`、`lastSuccessfulRebalanceAt` 或资产位置。
+- `previewRebalance()` 使用同一规则；Redeem 和 Emergency Exit 不依赖 Strategy，仍按各自规则开放。
 
 ## 问题 16
 角色系统的两个基础问题无规格：
@@ -165,4 +192,7 @@ spotTick 声明的"安全检查 / Swap 风控"用途无实现
 
 ## 问题 41
 getPlan 生成计划的 version 取值规则未定义
+
+> 已随问题 4 解决：`planVersion` 初始为 0，候选 `PositionPlan.version` 必须等于当前 `planVersion + 1`；成功的 Position 结构变化提交候选版本或将现有版本递增 1，失败交易和非结构变化不更新。
+
 看一下这些问题 处理一下 完事之后可以 再找我

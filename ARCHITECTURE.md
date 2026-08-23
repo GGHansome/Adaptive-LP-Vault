@@ -210,8 +210,7 @@ enum MarketRegime {
     LOW_DEVIATION,
     MEDIUM_DEVIATION,
     HIGH_DEVIATION,
-    EXTREME_DEVIATION,
-    ORACLE_UNHEALTHY
+    EXTREME_DEVIATION
 }
 
 enum PauseFlag {
@@ -221,7 +220,7 @@ enum PauseFlag {
 }
 ```
 
-`VenueType` 描述资产位置，`MarketRegime` 描述 Oracle/Strategy 状态，暂停标志是独立维度，不能合并为一个状态枚举。
+`VenueType` 描述资产位置，`MarketRegime` 描述Strategy 市场状态，Oracle 健康性由 `OracleSnapshot.healthy` 独立表达；暂停标志是另一独立维度，三者不能合并为一个状态枚举。
 
 ### 4.2 部署配置类型
 
@@ -335,7 +334,7 @@ struct SwapPlan {
 }
 ```
 
-`planHash` 必须覆盖所有影响执行结果且可稳定复算的字段，包括目标 Venue、Range、Regime、版本和 `requiresSwap`，不得覆盖当前 `block.timestamp`。`SwapPlan` 是 Vault 在执行入口内构造、仅传给 `ControlledSwapExecutor` 的交易级对象，不是调用者可自由提交的完整目标结构。`expectedPlanHash` 和 `expectedZeroForOne` 是调用者对预期计划与 Swap 方向的确认值；Vault 在退出旧 Position 后重新生成计划并计算实际方向，不匹配即表示计划或方向已陈旧并回滚。`deadline` 由调用入口独立校验；调用者不能传入任意目标字段、Router、实际方向或 calldata。
+`planHash` 必须覆盖所有影响执行结果且可稳定复算的字段，包括目标 Venue、Range、Regime、版本和 `requiresSwap`，不得覆盖当前 `block.timestamp`。候选计划的 `version` 固定为当前 `planVersion + 1`；`SwapPlan` 是 Vault 在执行入口内构造、仅传给 `ControlledSwapExecutor` 的交易级对象，不是调用者可自由提交的完整目标结构。`expectedPlanHash` 和 `expectedZeroForOne` 是调用者对预期计划与 Swap 方向的确认值；Vault 在退出旧 Position 后重新生成计划并计算实际方向，不匹配即表示计划或方向已陈旧并回滚。`deadline` 由调用入口独立校验；调用者不能传入任意目标字段、Router、实际方向或 calldata。
 
 ### 4.5 运行时控制状态
 
@@ -390,8 +389,9 @@ struct AdapterConfig {
 | `activeVenue` | `VenueType` | `storage` | Bootstrap/Rebalance/Emergency Exit | 与有效 Position 一致 |
 | `activeAdapter` | `address` | `storage` | Bootstrap/Rebalance | 必须来自 Bootstrap 成功后已冻结的 Registry 绑定 |
 | `lastSuccessfulRebalanceAt` | `uint32` | `storage` | 成功 Position 变更 | 失败交易不更新 |
-| `planVersion` | `uint64` | `storage` | 成功计划执行 | 单调递增 |
-| `positionPlan` | `PositionPlan` | `storage` | 成功计划执行 | 与当前 `planVersion` 和资产位置一致 |
+| `lastCommittedRegime` | `MarketRegime` | `storage` | Bootstrap/成功策略计划执行 | 最近一次成功执行的健康策略状态；只能是 LOW、MEDIUM、HIGH 或 EXTREME |
+| `planVersion` | `uint64` | `storage` | 成功 Position 结构变化 | 初始为 0；每次成功变化递增 1，失败交易不更新 |
+| `positionPlan` | `PositionPlan` | `storage` | 成功策略计划执行 | 保存最近一次成功执行的 Strategy 计划；非策略 Position 变化后可与当前资产位置不同 |
 | `pauseState` | `PauseState` | `storage` | 角色操作或自动门控 | Redeem 不受影响 |
 
 Vault 不保存由 Registry 遍历产生的冗余资产总额。`totalAssets()` 每次读取 Idle 余额和当前 Active Adapter 快照，并调用 Accounting 计算。
@@ -467,7 +467,7 @@ stateDiagram-v2
     IDLE --> IDLE: redemption or donation
 ```
 
-暂停开关、Oracle 健康状态和资产位置独立存储。任何状态转换必须在同一交易内完成相应资产和 Position 校验。
+暂停开关、Oracle 健康状态、资产位置和 `lastCommittedRegime` 独立存储。任何状态转换必须在同一交易内完成相应资产和 Position 校验。
 
 ## 6. 接口契约
 
@@ -522,12 +522,11 @@ interface IAdaptiveLPVault {
 | `rebalance` | 任意地址 | 健康、计划哈希、deadline、Cooldown、`requiresSwap == false` | 原子退出旧 Position、建立新 Position 或 IDLE；`requiresSwap` 为 true 时以 `SwapRequired()` 回滚 |
 | `rebalanceWithSwap` | Keeper/Admin | 健康、`requiresSwap == true`、`expectedZeroForOne` 与 Vault 重算方向一致、`amountIn`/`keeperMinAmountOut`/`deadline` 有效、白名单和 NAV 限制 | Vault 内部构造受控 SwapPlan，执行换币后建立目标 Position |
 | `emergencyExitToIdle` | Guardian/Admin | 可退出 Active Position | 无 Swap 清空 Position，进入 IDLE |
+| `previewRebalance` | 任意地址 | 已初始化、Oracle 健康 | 返回基于当前状态的只读候选计划，不修改任何状态 |
 
 Bootstrap 使用部署时固定的 `minimumInitialNav` 与 `bootstrapRatioToleranceBps` 完成最低 NAV 和初始比例检查；
 
 所有写入口均应在失败时完全回滚。`redeem` 是唯一不要求 Oracle Healthy 的资产退出入口，Emergency Exit 不要求 TWAP NAV 成功但要求实际 Position 清零和资产返回。
-
-`previewRebalance()` 使用与执行入口相同的 Oracle、资产、Position 快照和 Strategy 路径返回当前 `PositionPlan`，供调用者读取 `planHash`、`targetVenue` 和 `requiresSwap`。该函数只读且不保存计划；`rebalance` 与 `rebalanceWithSwap` 执行时仍必须重新生成并严格校验当前计划。
 
 ### 6.2 Oracle 接口
 
@@ -560,13 +559,27 @@ interface IMarketRegimeStrategy {
         AssetSnapshot calldata assets,
         PositionSnapshot calldata currentPosition,
         VenueType currentVenue,
+        MarketRegime lastCommittedRegime,
         StrategyConfig calldata config,
         uint64 currentVersion
     ) external view returns (PositionPlan memory);
 }
 ```
 
-Strategy 必须是纯读取函数。Vault 在执行前重新取得 Oracle、资产和 Position 快照，不能直接执行用户提交的旧结构体。LOW、MEDIUM 或 HIGH 的候选仓位若无 Swap 部署率低于 `minDeployBps`，计划必须标记 `requiresSwap`；EXTREME 必须目标为 IDLE 且不要求 Swap。`requiresSwap == true` 时 Bootstrap 必须以 `SwapRequired()` 回滚并调整初始比例后重试；已初始化 Vault 的普通 `rebalance` 也必须回滚，只有 Keeper/Admin 可以改用 `rebalanceWithSwap`。V3 `targetCenterTick` 由 `twapTick` 对齐到距离最近的目标 Pool `tickSpacing` 整数倍得到，等距时固定向下选择。同 Venue Recenter 只允许在当前 Range 宽度与 Market Regime 不匹配，或 Spot 已越界且目标中心相对当前中心至少移动当前 Range 半宽的 `minRecenterBps` 时生成。
+Strategy 规则：
+
+- Strategy 是纯读取函数，且只生成四种健康 `MarketRegime` 的可执行候选计划。
+- Vault 在执行前重新取得 Oracle、资产和 Position 快照，并传入持久化的 `lastCommittedRegime` 与当前 `planVersion`；不得直接执行用户提交的旧结构体。
+- 当 `oracle.healthy == false` 时，Vault 以 `OracleUnhealthy()` 回滚且不得调用 Strategy。Strategy 若收到不健康快照，也必须防御性回滚，不得返回 `PositionPlan` 或计算 `planHash`。
+- 当 `currentVersion == 0` 时，不存在历史计划。Strategy 忽略 `lastCommittedRegime` 的默认枚举值，按 LOW → MEDIUM → HIGH → EXTREME 的完整进入阈值直接确定首次 Regime。
+- 当 `currentVersion > 0` 时，Strategy 以 `lastCommittedRegime` 为 Hysteresis 当前状态。
+- 返回计划的 `version` 等于 `currentVersion + 1`。
+- LOW、MEDIUM 或 HIGH 的候选仓位若无 Swap 部署率低于 `minDeployBps`，计划必须标记 `requiresSwap`；EXTREME 以 IDLE 为目标则不要求 Swap。
+- `requiresSwap == true` 时，Bootstrap 必须以 `SwapRequired()` 回滚并由 Admin 调整初始比例后重试；已初始化 Vault 的普通 `rebalance` 也必须回滚，只有 Keeper/Admin 可以改用 `rebalanceWithSwap`。
+- V3 `targetCenterTick` 由 `twapTick` 对齐到距离最近的目标 Pool `tickSpacing` 整数倍得到，等距时固定向下选择。
+- 同 Venue Recenter 只允许在以下任一条件满足时生成：
+  - 当前 Range 宽度与 Market Regime 要求不匹配；
+  - Spot 已越界，且目标中心相对当前中心至少移动当前 Range 半宽的 `minRecenterBps`。
 
 ### 6.4 Adapter 接口
 
@@ -684,7 +697,7 @@ error UnsupportedToken();
 error Reentrancy();
 ```
 
-错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。`SwapRequired()` 是回滚返回的 custom error，不是事件；当 Bootstrap 或普通 `rebalance` 遇到 `requiresSwap == true` 时使用该错误终止交易。
+错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。`NotInitialized()` 用于要求已初始化状态的入口，包括未初始化 Vault 上的 `previewRebalance()`；该检查必须早于 Oracle 读取和 Strategy 调用。`OracleUnhealthy()` 用于 Bootstrap、Deposit、Preview 和两类 Rebalance 的健康门控，也用于 Strategy 对不健康快照的防御性回滚；该错误路径不生成或返回 `PositionPlan`。`SwapRequired()` 是回滚返回的 custom error，不是事件；当 Bootstrap 或普通 `rebalance` 遇到 `requiresSwap == true` 时使用该错误终止交易。
 
 ## 8. 事件契约
 
@@ -808,14 +821,14 @@ sequenceDiagram
     Vault->>Oracle: snapshot()
     Oracle-->>Vault: healthy OracleSnapshot
     Vault->>Accounting: compute seed NAV and grossInitialShares
-    Vault->>Strategy: getPlan(seed asset snapshot)
-    Strategy-->>Vault: deterministic initial PositionPlan
+    Vault->>Strategy: getPlan(seed snapshots, lastCommittedRegime, planVersion = 0)
+    Strategy-->>Vault: deterministic initial PositionPlan with version = 1
     Vault->>Vault: validate ratio; revert SwapRequired if requiresSwap
     Vault->>Vault: transferFrom token0/token1
     Vault->>Vault: mint and lock grossInitialShares
     Vault->>Adapter: deposit if targetVenue is non-IDLE
     Adapter-->>Vault: used amounts and liquidity
-    Vault->>Vault: validate ACTIVE or EXTREME IDLE post-state; set initialized = true and freeze bindings
+    Vault->>Vault: validate ACTIVE or EXTREME IDLE post-state; commit positionPlan, lastCommittedRegime and planVersion = 1; set initialized = true and freeze bindings
     Vault-->>Admin: VaultBootstrapped
 ```
 
@@ -860,6 +873,7 @@ sequenceDiagram
     Adapter-->>Vault: token0/token1
     Vault->>Vault: add proportional Idle and validate outputs
     Vault->>Vault: burn shares and transfer assets
+    Vault->>Vault: if all circulating shares are redeemed, enter IDLE and increment planVersion without changing lastCommittedRegime
     Vault-->>User: Redeem
 ```
 
@@ -876,7 +890,7 @@ sequenceDiagram
 
     Caller->>Vault: rebalance(expectedPlanHash, deadline)
     Vault->>Oracle: snapshot()
-    Vault->>Strategy: getPlan(current snapshots)
+    Vault->>Strategy: getPlan(current snapshots, lastCommittedRegime, planVersion)
     Strategy-->>Vault: deterministic PositionPlan
     Vault->>Vault: validate deadline, hash and cooldown; revert SwapRequired if requiresSwap
     Vault->>OldAdapter: syncFees() and withdrawAll()
@@ -884,6 +898,7 @@ sequenceDiagram
     Vault->>NewAdapter: deposit() without swap
     NewAdapter-->>Vault: unused amounts and liquidity
     Vault->>Vault: validate conservation, idle and single position
+    Vault->>Vault: commit positionPlan, lastCommittedRegime and incremented planVersion
     Vault-->>Caller: RebalanceExecuted
 ```
 
@@ -901,7 +916,7 @@ sequenceDiagram
 
     Keeper->>Vault: rebalanceWithSwap(expectedPlanHash, expectedZeroForOne, amountIn, keeperMinAmountOut, deadline)
     Vault->>Oracle: snapshot()
-    Vault->>Strategy: getPlan(current snapshots)
+    Vault->>Strategy: getPlan(current snapshots, lastCommittedRegime, planVersion)
     Strategy-->>Vault: PositionPlan requiresSwap
     Vault->>Vault: validate hash, deadline and requiresSwap == true
     Vault->>OldAdapter: syncFees() and withdrawAll()
@@ -914,6 +929,7 @@ sequenceDiagram
     Vault->>NewAdapter: deposit() with adjusted assets
     NewAdapter-->>Vault: unused amounts and liquidity
     Vault->>Vault: validate NAV loss, deployment, idle, dust tolerance and position
+    Vault->>Vault: commit positionPlan, lastCommittedRegime and incremented planVersion
     Vault-->>Keeper: RebalanceExecuted and SwapExecuted
 ```
 
@@ -930,7 +946,7 @@ sequenceDiagram
     Vault->>Adapter: withdrawAll(min outputs)
     Adapter-->>Vault: token0/token1
     Vault->>Vault: verify position liquidity == 0
-    Vault->>Vault: activeVenue = IDLE; pause deposits and rebalances
+    Vault->>Vault: activeVenue = IDLE; increment planVersion; without changing lastCommittedRegime; pause deposits and rebalances
     Vault-->>Guardian: EmergencyExit
 ```
 
@@ -999,6 +1015,8 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | INV-10 | 失败交易不更新 Cooldown、版本或资产位置 | 原子回滚 |
 | INV-11 | 支持资产 Donation 不可被角色救援 | 不存在对应接口 |
 | INV-12 | Pause 不阻止正常双资产 Redeem | 赎回测试失败 |
+| INV-13 | `lastCommittedRegime` 只由成功执行的健康 Strategy 计划更新，不从 `activeVenue` 推导 | 状态机测试失败 |
+| INV-14 | 每次成功的 Position 结构变化使 `planVersion` 恰好递增 1，失败交易及非结构变化不更新 | 版本与原子性测试失败 |
 
 ### 11.2 测试矩阵
 
@@ -1006,12 +1024,12 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | --- | --- |
 | Accounting 单元测试 | raw units、decimals、负 Tick、NAV、Bootstrap/Deposit shares 舍入、Idle、迁移损失、零值和溢出边界 |
 | Oracle 单元测试 | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足、Pool 绑定、报价方向、Short TWAP/TWAP 偏离 |
-| Strategy 单元测试 | 四种 regime、进入/退出 Hysteresis、Range 对齐、越界与中心偏移 Recenter、部署率和稳定计划哈希 |
+| Strategy 单元测试 | Oracle 不健康快照回滚且不生成计划、`planVersion == 0` 的首次完整分类、四种历史 regime 的进入/退出 Hysteresis、`lastCommittedRegime` 传递、候选版本、Range 对齐、越界与中心偏移 Recenter、部署率和稳定计划哈希 |
 | V2 Adapter 测试 | 储备权益、费用已包含、部分退出、最小输出、Token 顺序 |
 | V3 Adapter 测试 | principal、tokens owed、fee growth 增量、领取后重读、Range、部分退出、旧 NFT 清理 |
 | Swap 测试 | 固定 Router/Token 方法、方向、过量资产修复范围、minOut、deadline、回调和授权清理 |
 | Deposit/Redeem 集成测试 | 只转实际数量、暂停赎回、Oracle 异常赎回、捐赠、单边/高 Idle、比例公平性 |
-| Rebalance 集成测试 | V2↔V3、V3↔V3、进入/退出 IDLE、`expectedPlanHash`、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
+| Rebalance 集成测试 | V2↔V3、V3↔V3、进入/退出 IDLE、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、Emergency Exit 与全部流通 shares 赎回后的 Regime 保留和版本递增、`expectedPlanHash`、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
 | Invariant/Fuzz | 资产守恒、shares 公平性、单活 Position、费用不重复、任意调用者不能越权 |
 | Mainnet Fork | 真实 canonical Pool TWAP、V2 Pair、V3 Position Manager、Router 和 Tick spacing |
 | 安全测试 | 重入、闪电贷 Spot 操纵、Sandwich、Adapter 恶意返回、权限和暂停滥用 |
