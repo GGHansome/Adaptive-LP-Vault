@@ -29,9 +29,8 @@ Adapter Registry 封存时序矛盾：Bootstrap 前还是 Bootstrap 后
 
 修改：
 - `AdapterRegistry` 是由 `AdaptiveLPVault` 继承并内部集成的源码模块，负责 Vault 内的地址簿、绑定校验和 operational 状态；不单独部署、没有独立地址，也不再作为系统图中的跨合约调用节点。绑定使用单一的 `_adapterByVenue` Mapping。
-- 删除手动 `seal()`、`sealed()`、独立 `sealed` 状态、`RegistrySealed` 错误和封存事件契约。`initialized` 是唯一的生命周期冻结边界：`initialized == false` 时 Admin 可以配置或修正绑定；`bootstrap()` 只在完整校验和全部资产/Position 操作成功后将其从 `false` 设置为 `true`，失败不会冻结；`VaultBootstrapped` 是绑定成功冻结的链上信号。
-- Bootstrap 前由 Admin 显式调用 `configureAdapter(VenueType venue, address adapter, address pool, uint24 feeTier)` 配置非 `IDLE` Venue；`bootstrap()` 不会自动调用该入口。配置入口校验 Adapter 合约代码、Adapter 的 Vault/Venue、Pool、Token 顺序和 Fee Tier 绑定，成功时将 `enabled` 初始化为 `true` 并发出 `AdapterConfigured`。
-- Bootstrap 成功后不得新增或替换 Adapter、Pool、Token 顺序或 Fee Tier；仅允许切换已注册 Adapter 的 `enabled` operational 状态。
+- 删除手动 `seal()`、`sealed()`、独立 `sealed` 状态、`RegistrySealed` 错误和封存事件契约。`initialized` 是唯一的生命周期冻结边界：`initialized == false` 时 Manager 可以配置或修正绑定；`bootstrap()` 只在完整校验和全部资产/Position 操作成功后将其从 `false` 设置为 `true`，失败不会冻结；`VaultBootstrapped` 是绑定成功冻结的链上信号。
+- Bootstrap 前由 Manager 显式调用 `configureAdapter(VenueType venue, address adapter, address pool, uint24 feeTier)` 配置非 `IDLE` Venue；`bootstrap()` 不会自动调用该入口。配置入口校验 Adapter 合约代码、Adapter 的 Vault/Venue、Pool、Token 顺序和 Fee Tier 绑定，成功时将 `enabled` 初始化为 `true` 并发出 `AdapterConfigured`。
 
 ## 问题 4
 Market Regime 滞后状态无持久化机制，Hysteresis 正确性依赖未声明的隐式假设
@@ -61,6 +60,19 @@ emergencyExitToIdle() 无最小输出参数，文档中承诺的滑点保护也�
 
 ## 问题 6
 你的 §6 标题为接口契约，但只覆盖 LP 资产流。Guardian 暂停、Admin 参数更新、角色授予/撤销、Registry 的 setAdapterEnabled/seal 虽有独立接口但调用权限与 Vault 的关系未定义 全部没有签名。事件契约定义了这些状态变化的广播，却没有对应的状态变更入口。后面你实现的时候就必须自行发明整个治理函数面，且无法从文档得知 参数更新的边界校验位置、批量更新语义、角色常量标识。
+
+> 合并范围：原问题 16 的角色标识与初始授权链，原问题 18 的 Bootstrap 前治理状态，原问题 36 的暂停写入问题，均属于同一运行时治理 ABI 缺失问题，在此统一处理。
+
+> 原因：产品文档只描述了角色能力，架构文档却没有把角色、暂停和继承式 Registry 入口组合到 Vault 的外部 ABI。与此同时，数值配置和 Registry 生命周期已经分别改为部署固定与 Bootstrap 自动冻结，旧的参数更新和手动 `seal()` 假设没有同步从该问题中剔除。
+
+修改：
+- 手动 `seal()` 已由问题 3 删除，`initialized = true` 是唯一 Registry 身份冻结边界。
+- `IAdaptiveLPVault` 在 Vault 同一地址上组合 OpenZeppelin Contracts v5 `IAccessControlDefaultAdminRules` 标准 ABI 与继承式 `IAdapterRegistry`。
+- 删除自管理的 `ADMIN_ROLE`，将原业务 Admin 重命名为 `MANAGER_ROLE = keccak256("MANAGER_ROLE")`；`KEEPER_ROLE` 和 `GUARDIAN_ROLE` 保持不变。`DEFAULT_ADMIN_ROLE` 是唯一根角色，只负责业务角色授予/撤销和自身标准继任流程，不自动获得任何 Vault 业务权限。
+- 新增 `AccessControlConfig(initialDefaultAdminDelay, initialDefaultAdmin)` 构造输入，并直接使用 `AccessControlDefaultAdminRules` 的单一 Default Admin、两阶段延迟转移、取消/接受和延迟调整流程。
+- 新增 `setPauseState(PauseState)`：仅 Bootstrap 后开放；Manager 可暂停或解除暂停，Guardian 只能把暂停位从 false 改为 true；相同状态回滚 `NoStateChangeRequired()`，成功后原子更新并发出一次 `PauseStateChanged`。
+- 未初始化阶段只开放 Manager 的 `configureAdapter`、`bootstrap`，以及 Default Admin 的标准角色和根管理员管理入口；`setPauseState`、`setAdapterEnabled`、Deposit、Rebalance 和 Emergency Exit 均以 `NotInitialized()` 回滚。暂停位初始全为 false，`bootstrap()` 不读取暂停状态。
+- `PRODUCT_SPEC.md` §10 使用 Default Admin、Manager、Guardian、Keeper 权限表明确各入口的生命周期和成功结果；`SWAP_REBALANE_MATH.md` 中原 Keeper/Admin 表述同步改为 Keeper/Manager。
 
 ## 问题 7
 observe() 的窗口由 Oracle 使用，但窗口数值被放进可治理更新的 StrategyConfig。Oracle 若在部署/初始化时固化窗口，则 Admin 更新 StrategyConfig.twapWindowSeconds 后 Oracle 行为不变——治理更新是无操作，ParameterUpdated 事件发出但系统无变化；若 Oracle 每次从 StrategyConfig 读窗口，则违背"部署时固定"且 Oracle 需要引用 Vault 配置 。在两份文档共同作用下，窗口存在两个互斥的事实来源
@@ -112,6 +124,8 @@ getPlan 在 Oracle 不健康时的返回契约未定义 Strategy 是纯函数，
 ADMIN_ROLE/KEEPER_ROLE/GUARDIAN_ROLE 的标识与是否采用 OZ AccessControl 风格；
 初始授权链——部署者是否自动成为 Admin、Guardian 能否由 Admin 授予/撤销 SPEC §2 未说 Guardian 的管理者是谁 。VaultRoles.sol 是规划文件但无内容契约。
 
+> 已并入问题 6 统一处理：采用 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules`；`DEFAULT_ADMIN_ROLE` 作为唯一根角色，原业务 Admin 重命名为 `MANAGER_ROLE`。构造函数显式接收 `initialDefaultAdmin` 与 `initialDefaultAdminDelay`，根角色使用基类的单账户、两阶段延迟转移和延迟调整流程，Default Admin 不自动取得业务权限。
+
 ## 问题 17
 "比例容差"没有参照系。三种候选基准对同一组 (amount0, amount1) 的接受/拒绝结果不同
 只要求价值匹配 TWAP（宽松）；
@@ -120,6 +134,8 @@ ADMIN_ROLE/KEEPER_ROLE/GUARDIAN_ROLE 的标识与是否采用 OZ AccessControl �
 
 ## 问题 18
 Bootstrap 前的治理状态未定义 谁可暂停未初始化 Vault；bootstrap 遇 depositPaused 的行为
+
+> 已并入问题 6 统一处理：未初始化阶段不允许写暂停或 Adapter operational 状态，暂停位保持默认全 false，`bootstrap()` 不读取暂停状态；该阶段只开放 Manager 的 Adapter 配置与 Bootstrap，以及 Default Admin 的标准角色和根管理员管理入口。
 
 ## 问题 19
 observe() 调用形状术语表与规范正文不一致
@@ -184,6 +200,8 @@ getAdapter(IDLE) 的返回值未定义
 ## 问题 36
 紧急退出"关闭 Deposit 和 Rebalance"的实现机制歧义
 "关闭 Deposit 和 Rebalance"未说明是通过写入暂停位（depositPaused/plainRebalancePaused/swapRebalancePaused = true）实现，还是仅依赖 IDLE 状态自身的门控。若写暂停位：紧急退出产生未声明的暂停副作用，且后续 IDLE→ACTIVE 恢复 rebalance 前需要角色先解除暂停（额外恢复步骤未写入任何流程）；若不写：步骤 6 的"关闭"对 Deposit 是冗余描述（已由 IDLE 门控）。两种读法行为不同。
+
+> 已随问题 6 解决：Emergency Exit 成功后显式将三个暂停位全部设为 true，暂停 storage 实际变化时发出 `PauseStateChanged`；后续恢复必须由 Manager 通过 `setPauseState` 显式解除所需暂停位。
 
 ## 问题 37
 Executor 在你的文档中被要求"验证计划哈希"，但它不接触 Strategy、不存储任何计划记录，也没有可对照的真值源——该哈希在 Executor 侧无法被有意义地验证 至多做非零检查，与"验证"语义不符 。真正有效的哈希校验发生在 Vault 侧（expectedPlanHash vs 重新生成计划）；Executor 侧的这条要求无实现语义。

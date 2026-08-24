@@ -28,7 +28,8 @@ flowchart TB
         Caller[Permissionless Caller]
         Keeper[Keeper]
         Guardian[Guardian]
-        Admin[Admin]
+        DefaultAdmin[Default Admin]
+        Manager[Manager]
     end
 
     subgraph Protocol[Adaptive LP Vault Protocol]
@@ -54,7 +55,8 @@ flowchart TB
     Caller --> Vault
     Keeper --> Vault
     Guardian --> Vault
-    Admin --> Vault
+    DefaultAdmin --> Vault
+    Manager --> Vault
     Vault --> Accounting
     Vault --> Oracle
     Vault --> Strategy
@@ -189,7 +191,7 @@ AdaptiveLPVault/
 | `test/integration` | 跨模块完整流程 | 覆盖原子回滚 |
 | `test/invariant` | 不变量和模糊测试 | 覆盖资产、shares、单活 Position |
 | `test/fork` | Mainnet/Fork 外部协议行为 | 验证真实 V2/V3 接口 |
-| `script` | 分阶段部署、Adapter 绑定和一次性 Bootstrap | 数值参数仅由 Deploy 写入；主网按 Deploy → Configure → Bootstrap 执行，`bootstrap()` 内部执行最终绑定校验 |
+| `script` | 分阶段部署、角色指派、Adapter 绑定和一次性 Bootstrap | 数值参数仅由 Deploy 写入；主网按 Deploy → Grant Roles → Configure → Bootstrap 执行，`bootstrap()` 内部执行最终绑定校验 |
 | `docs` | 发布后的文档副本 | 以根目录规范为源 |
 
 ## 4. 核心类型与枚举
@@ -239,6 +241,11 @@ struct VaultConfig {
     uint16 bootstrapRatioToleranceBps;
 }
 
+struct AccessControlConfig {
+    uint48 initialDefaultAdminDelay;
+    address initialDefaultAdmin;
+}
+
 struct OracleConfig {
     uint32 twapWindowSeconds;
     uint32 shortTwapWindowSeconds;
@@ -263,6 +270,8 @@ struct StrategyConfig {
 ```
 
 `VaultConfig`、`OracleConfig` 和 `StrategyConfig` 仅作为构造参数与内存传参结构，不作为整体状态变量写入普通 storage。各字段在部署时通过协议硬边界与字段关系校验后，分别写入所属合约的 Solidity `immutable` 状态变量；部署后任何角色均不得修改。
+
+`AccessControlConfig` 仅作为 Vault 构造参数传入 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules`。`initialDefaultAdmin` 必须非零；`initialDefaultAdminDelay` 是根管理员转移的初始等待时间，应在部署前校准，Mainnet 部署应采用非零值。
 
 ### 4.3 Oracle 与资产快照
 
@@ -392,7 +401,7 @@ struct AdapterConfig {
 | `lastCommittedRegime` | `MarketRegime` | `storage` | Bootstrap/成功策略计划执行 | 最近一次成功执行的健康策略状态；只能是 LOW、MEDIUM、HIGH 或 EXTREME |
 | `planVersion` | `uint64` | `storage` | 成功 Position 结构变化 | 初始为 0；每次成功变化递增 1，失败交易不更新 |
 | `positionPlan` | `PositionPlan` | `storage` | 成功策略计划执行 | 保存最近一次成功执行的 Strategy 计划；非策略 Position 变化后可与当前资产位置不同 |
-| `pauseState` | `PauseState` | `storage` | 角色操作或自动门控 | Redeem 不受影响 |
+| `pauseState` | `PauseState` | `storage` | `setPauseState` 或 Emergency Exit | 初始为全 false；Redeem 不受影响 |
 
 Vault 不保存由 Registry 遍历产生的冗余资产总额。`totalAssets()` 每次读取 Idle 余额和当前 Active Adapter 快照，并调用 Accounting 计算。
 
@@ -416,8 +425,6 @@ Oracle 在构造时完成窗口关系和协议硬边界校验。实现可以使�
 | `_adapterByVenue` | `mapping(VenueType => AdapterConfig)` | 普通 `storage` Mapping | `configureAdapter`；Bootstrap 后 `setAdapterEnabled` 仅修改 `enabled` | Key 只允许三个非 IDLE Venue；不得用于遍历资产会计 |
 
 `adapter == address(0)` 表示该 Venue 未注册。`IDLE` 不是 Adapter，`_adapterByVenue[IDLE]` 必须保持零值，`getAdapter(IDLE)` 返回 `address(0)`，`isEnterEnabled(IDLE)` 返回 `false`。`isEnterEnabled(venue)` 仅按 `adapter != address(0) && enabled` 派生 Registry 层结果；Vault 初始化、暂停、Oracle 健康和 Position 一致性由 Vault 入口另行校验。
-
-Admin 只能在 `initialized == false` 时新增或修正 Adapter 身份绑定；`bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓之前，在同一交易内重新校验三个非 IDLE Venue 的完整绑定，并仅在全部 Bootstrap 操作成功时通过 `initialized = true` 自动冻结身份字段。Bootstrap 失败不会冻结 Registry。`VaultBootstrapped` 作为绑定已成功冻结的链上信号。
 
 ### 5.4 Adapter 合约存储
 
@@ -474,7 +481,12 @@ stateDiagram-v2
 ### 6.1 Vault 接口
 
 ```solidity
-interface IAdaptiveLPVault {
+interface IAdaptiveLPVault is IAccessControlDefaultAdminRules, IAdapterRegistry {
+    function DEFAULT_ADMIN_ROLE() external view returns (bytes32);
+    function MANAGER_ROLE() external view returns (bytes32);
+    function KEEPER_ROLE() external view returns (bytes32);
+    function GUARDIAN_ROLE() external view returns (bytes32);
+
     function bootstrap(uint256 amount0, uint256 amount1, address receiver) external;
 
     function deposit(
@@ -501,6 +513,7 @@ interface IAdaptiveLPVault {
         uint32 deadline
     ) external;
 
+    function setPauseState(PauseState calldata newState) external;
     function emergencyExitToIdle() external;
 
     function previewRebalance() external view returns (PositionPlan memory);
@@ -511,22 +524,6 @@ interface IAdaptiveLPVault {
     function pauseState() external view returns (PauseState memory);
 }
 ```
-
-入口规则：
-
-| 函数 | 调用者 | 前置条件 | 资产流向与结果 |
-| --- | --- | --- | --- |
-| `bootstrap` | Admin | 未初始化、Oracle 健康、最低 NAV、配置完整 | 健康无 Swap 计划进入 ACTIVE，EXTREME 进入 IDLE，并铸造、锁定 shares；`requiresSwap` 为 true 时以 `SwapRequired()` 回滚 |
-| `deposit` | 任意 LP 用户 | 健康非 IDLE、双资产比例、未暂停 | 只转入实际数量，铸造公平 shares |
-| `redeem` | Shares 持有人或获授权 spender | shares 足够 | 按比例退出 Position 和 Idle，销毁 shares，返回双资产 |
-| `rebalance` | 任意地址 | 健康、计划哈希、deadline、Cooldown、`requiresSwap == false` | 原子退出旧 Position、建立新 Position 或 IDLE；`requiresSwap` 为 true 时以 `SwapRequired()` 回滚 |
-| `rebalanceWithSwap` | Keeper/Admin | 健康、`requiresSwap == true`、`expectedZeroForOne` 与 Vault 重算方向一致、`amountIn`/`keeperMinAmountOut`/`deadline` 有效、白名单和 NAV 限制 | Vault 内部构造受控 SwapPlan，执行换币后建立目标 Position |
-| `emergencyExitToIdle` | Guardian/Admin | 可退出 Active Position | 无 Swap 清空 Position，进入 IDLE |
-| `previewRebalance` | 任意地址 | 已初始化、Oracle 健康 | 返回基于当前状态的只读候选计划，不修改任何状态 |
-
-Bootstrap 使用部署时固定的 `minimumInitialNav` 与 `bootstrapRatioToleranceBps` 完成最低 NAV 和初始比例检查；
-
-所有写入口均应在失败时完全回滚。`redeem` 是唯一不要求 Oracle Healthy 的资产退出入口，Emergency Exit 不要求 TWAP NAV 成功但要求实际 Position 清零和资产返回。
 
 ### 6.2 Oracle 接口
 
@@ -539,7 +536,7 @@ interface ICanonicalV3Oracle {
 }
 ```
 
-Oracle 实现约束：
+Oracle 规则：
 
 - `snapshot()` 调用 canonical Pool 的 `observe([twapWindowSeconds, shortTwapWindowSeconds, 0])`；
 - 分别计算 `twapTick` 和 `shortTwapTick`，负数向负无穷取整；
@@ -575,7 +572,7 @@ Strategy 规则：
 - 当 `currentVersion > 0` 时，Strategy 以 `lastCommittedRegime` 为 Hysteresis 当前状态。
 - 返回计划的 `version` 等于 `currentVersion + 1`。
 - LOW、MEDIUM 或 HIGH 的候选仓位若无 Swap 部署率低于 `minDeployBps`，计划必须标记 `requiresSwap`；EXTREME 以 IDLE 为目标则不要求 Swap。
-- `requiresSwap == true` 时，Bootstrap 必须以 `SwapRequired()` 回滚并由 Admin 调整初始比例后重试；已初始化 Vault 的普通 `rebalance` 也必须回滚，只有 Keeper/Admin 可以改用 `rebalanceWithSwap`。
+- `requiresSwap == true` 时，Bootstrap 必须以 `SwapRequired()` 回滚并由 Manager 调整初始比例后重试；已初始化 Vault 的普通 `rebalance` 也必须回滚，只有 Keeper/Manager 可以改用 `rebalanceWithSwap`。
 - V3 `targetCenterTick` 由 `twapTick` 对齐到距离最近的目标 Pool `tickSpacing` 整数倍得到，等距时固定向下选择。
 - 同 Venue Recenter 只允许在以下任一条件满足时生成：
   - 当前 Range 宽度与 Market Regime 要求不匹配；
@@ -631,7 +628,9 @@ interface IAdapterRegistry {
 }
 ```
 
-`configureAdapter` 只能由 Admin 在 `initialized == false` 时调用，用于新增或修正非 IDLE Venue 的 `adapter`、`pool` 和 `feeTier` 绑定；成功配置时将 `enabled` 初始化为 `true` 并发出 `AdapterConfigured`。
+`IAdapterRegistry` 由 `AdaptiveLPVault` 在 Vault 同一地址上实现，不代表独立部署合约。`configureAdapter` 只能由 Manager 在 `initialized == false` 时调用，用于新增或修正非 IDLE Venue 的 `adapter`、`pool` 和 `feeTier` 绑定；成功配置时将 `enabled` 初始化为 `true` 并发出 `AdapterConfigured`。
+
+`setAdapterEnabled` 只能在 `initialized == true` 后调用。Guardian/Manager 可以把已注册 Adapter 设为 `enabled = false`，只有 Manager 可以重新设为 `true`；未注册或 `IDLE` Venue 以 `AdapterNotRegistered()` 回滚。通过角色和生命周期校验后，目标值与当前值相同则以 `NoStateChangeRequired()` 回滚。成功时发出 `AdapterStatusChanged`。禁用只阻止 Deposit 和后续进入该 Adapter，不得阻止现有 Position 的 Redeem、Rebalance 退出或 Emergency Exit。
 
 ### 6.6 Swap Executor 接口
 
@@ -650,7 +649,7 @@ interface IControlledSwapExecutor {
 }
 ```
 
-`ControlledSwapExecutor` 在部署或不可变初始化时固定 `vault`、Router、token0/token1、`swapPool`、Fee Tier、exact-input 方法和接收地址规则，Bootstrap 后不能由 Keeper/Admin 替换。执行器只接受 `vault` 调用，并验证计划哈希、Token 对、方向、实际可用余额、`minAmountOut >= protocolMinOut`、deadline、固定接收地址和精确授权；执行完成后按实际余额增量返回 `amountOut`，不得把 Router 返回值作为唯一结果。
+`ControlledSwapExecutor` 在部署或不可变初始化时固定 `vault`、Router、token0/token1、`swapPool`、Fee Tier、exact-input 方法和接收地址规则，Bootstrap 后不能由 Keeper/Manager 替换。执行器只接受 `vault` 调用，并验证计划哈希、Token 对、方向、实际可用余额、`minAmountOut >= protocolMinOut`、deadline、固定接收地址和精确授权；执行完成后按实际余额增量返回 `amountOut`，不得把 Router 返回值作为唯一结果。
 
 Executor 只承担局部 Swap 安全，不调用 Strategy、不退出或建立 Position，也不校验完整迁移损失。Vault 在 Swap 和目标建仓后重新读取两种资产与 Position，并验证部署率、Idle、NAV 损失和单活 Position；无 Swap 路径额外执行 `dustTolerance0/1` 范围内的逐 Token 资产守恒，带 Swap 路径不要求 token0/token1 分别守恒，只依赖 Executor 的实际余额增量和 `minAmountOut` 校验。完整公式见 [SWAP_REBALANE_MATH.md](SWAP_REBALANE_MATH.md)。
 
@@ -661,7 +660,12 @@ Executor 只承担局部 Swap 安全，不调用 Strategy、不退出或建立 P
 ```solidity
 error AlreadyInitialized();
 error NotInitialized();
-error Unauthorized();
+error AccessControlUnauthorizedAccount(address account, bytes32 neededRole);
+error AccessControlBadConfirmation();
+error AccessControlInvalidDefaultAdmin(address defaultAdmin);
+error AccessControlEnforcedDefaultAdminRules();
+error AccessControlEnforcedDefaultAdminDelay(uint48 schedule);
+error GuardianCannotUnpause();
 error Paused(PauseFlag flag);
 error OracleUnhealthy();
 error ObservationInsufficient();
@@ -695,7 +699,7 @@ error UnsupportedToken();
 error Reentrancy();
 ```
 
-错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。`NotInitialized()` 用于要求已初始化状态的入口，包括未初始化 Vault 上的 `previewRebalance()`；该检查必须早于 Oracle 读取和 Strategy 调用。`OracleUnhealthy()` 用于 Bootstrap、Deposit、Preview 和两类 Rebalance 的健康门控，也用于 Strategy 对不健康快照的防御性回滚；该错误路径不生成或返回 `PositionPlan`。`SwapRequired()` 是回滚返回的 custom error，不是事件；当 Bootstrap 或普通 `rebalance` 遇到 `requiresSwap == true` 时使用该错误终止交易。
+错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。角色授权和 `renounceRole` 调用者确认失败分别采用 OpenZeppelin `IAccessControl` 的 `AccessControlUnauthorizedAccount` 与 `AccessControlBadConfirmation`。`AccessControlInvalidDefaultAdmin`、`AccessControlEnforcedDefaultAdminRules` 和 `AccessControlEnforcedDefaultAdminDelay` 直接采用 `IAccessControlDefaultAdminRules` 的标准语义，用于非法根管理员、绕过单一根管理员/两阶段规则以及尚未满足延迟的操作；Vault 不定义额外的最后管理员错误或自定义根管理员计数错误。`GuardianCannotUnpause()` 用于 Guardian 尝试把任一暂停位从 true 改为 false。`NotInitialized()` 用于要求已初始化状态的入口，包括 `setPauseState`、`setAdapterEnabled`、Emergency Exit 和未初始化 Vault 上的 `previewRebalance()`；该检查必须早于这些入口的业务状态读取。`OracleUnhealthy()` 用于 Bootstrap、Deposit、Preview 和两类 Rebalance 的健康门控，也用于 Strategy 对不健康快照的防御性回滚；该错误路径不生成或返回 `PositionPlan`。`SwapRequired()` 是回滚返回的 custom error，不是事件；当 Bootstrap 或普通 `rebalance` 遇到 `requiresSwap == true` 时使用该错误终止交易。
 
 ## 8. 事件契约
 
@@ -703,7 +707,7 @@ error Reentrancy();
 
 ```solidity
 event VaultBootstrapped(
-    address indexed admin,
+    address indexed manager,
     uint256 amount0,
     uint256 amount1,
     uint256 grossInitialShares,
@@ -786,9 +790,19 @@ event AdapterConfigured(
     uint24 feeTier
 );
 event AdapterStatusChanged(VenueType indexed venue, address indexed adapter, bool enabled);
-event PauseStateChanged(bool depositPaused, bool plainRebalancePaused, bool swapRebalancePaused);
+event PauseStateChanged(
+    address indexed caller,
+    bool depositPaused,
+    bool plainRebalancePaused,
+    bool swapRebalancePaused
+);
+event RoleAdminChanged(bytes32 indexed role, bytes32 indexed previousAdminRole, bytes32 indexed newAdminRole);
 event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
 event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
+event DefaultAdminTransferScheduled(address indexed newAdmin, uint48 acceptSchedule);
+event DefaultAdminTransferCanceled();
+event DefaultAdminDelayChangeScheduled(uint48 newDelay, uint48 effectSchedule);
+event DefaultAdminDelayChangeCanceled();
 event EmergencyExit(address indexed caller, VenueType previousVenue, uint256 amount0, uint256 amount1);
 ```
 
@@ -798,7 +812,10 @@ event EmergencyExit(address indexed caller, VenueType previousVenue, uint256 amo
 - `RebalanceExecuted` 只在所有 post-condition 成功后发出；
 - 任何以 custom error 回滚的交易都不会保留事件日志，协议不定义失败事件；`SwapRequired()` 通过 revert data 返回；
 - `IdleStateChanged` 只反映资产位置变化，不用于表示暂停；
-- 角色变更和运行时控制状态变化不能静默跳过对应事件；
+- `RoleAdminChanged`、`RoleGranted` 和 `RoleRevoked` 采用 OpenZeppelin `IAccessControl` 标准语义；
+- `DefaultAdminTransferScheduled`、`DefaultAdminTransferCanceled`、`DefaultAdminDelayChangeScheduled` 和 `DefaultAdminDelayChangeCanceled` 采用 `IAccessControlDefaultAdminRules` 标准语义；
+- `PauseStateChanged` 只在 `setPauseState` 或 Emergency Exit 实际改变暂停 storage 时发出，自动门控和无状态变化调用不得发出；
+- `AdapterConfigured` 与 `AdapterStatusChanged` 由 Vault 地址上的继承式 Registry 入口发出；
 - Emergency Exit 不发 Swap 事件，因为该路径禁止 Swap。
 
 ## 9. 关键调用时序
@@ -807,14 +824,14 @@ event EmergencyExit(address indexed caller, VenueType previousVenue, uint256 amo
 
 ```mermaid
 sequenceDiagram
-    participant Admin
+    participant Manager
     participant Vault
     participant Oracle
     participant Accounting
     participant Strategy
     participant Adapter
 
-    Admin->>Vault: bootstrap(amount0, amount1, receiver)
+    Manager->>Vault: bootstrap(amount0, amount1, receiver)
     Vault->>Vault: validate complete inherited Adapter bindings
     Vault->>Oracle: snapshot()
     Oracle-->>Vault: healthy OracleSnapshot
@@ -827,7 +844,7 @@ sequenceDiagram
     Vault->>Adapter: deposit if targetVenue is non-IDLE
     Adapter-->>Vault: used amounts and liquidity
     Vault->>Vault: validate ACTIVE or EXTREME IDLE post-state; commit positionPlan, lastCommittedRegime and planVersion = 1; set initialized = true and freeze bindings
-    Vault-->>Admin: VaultBootstrapped
+    Vault-->>Manager: VaultBootstrapped
 ```
 
 ### 9.2 Deposit
@@ -944,8 +961,8 @@ sequenceDiagram
     Vault->>Adapter: withdrawAll()
     Adapter-->>Vault: token0/token1
     Vault->>Vault: verify position liquidity == 0
-    Vault->>Vault: activeVenue = IDLE; increment planVersion; without changing lastCommittedRegime; pause deposits and rebalances
-    Vault-->>Guardian: EmergencyExit
+    Vault->>Vault: activeVenue = IDLE; increment planVersion; preserve lastCommittedRegime; set all pause flags true
+    Vault-->>Guardian: EmergencyExit and PauseStateChanged if pause storage changed
 ```
 
 ## 10. 关键实现细节
@@ -1015,6 +1032,8 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | INV-12 | Pause 不阻止正常双资产 Redeem | 赎回测试失败 |
 | INV-13 | `lastCommittedRegime` 只由成功执行的健康 Strategy 计划更新，不从 `activeVenue` 推导 | 状态机测试失败 |
 | INV-14 | 每次成功的 Position 结构变化使 `planVersion` 恰好递增 1，失败交易及非结构变化不更新 | 版本与原子性测试失败 |
+| INV-15 | `DEFAULT_ADMIN_ROLE` 至多由一个账户持有，转移、放弃和延迟变更只能通过 `AccessControlDefaultAdminRules` 标准流程 | 权限操作回滚 |
+| INV-16 | Default Admin 不因根角色自动获得 Vault 业务权限，Guardian 只能收紧暂停和 Adapter 状态 | 权限操作回滚 |
 
 ### 11.2 测试矩阵
 
@@ -1030,7 +1049,7 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | Rebalance 集成测试 | V2↔V3、V3↔V3、进入/退出 IDLE、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、Emergency Exit 与全部流通 shares 赎回后的 Regime 保留和版本递增、`expectedPlanHash`、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
 | Invariant/Fuzz | 资产守恒、shares 公平性、单活 Position、费用不重复、任意调用者不能越权 |
 | Mainnet Fork | 真实 canonical Pool TWAP、V2 Pair、V3 Position Manager、Router 和 Tick spacing |
-| 安全测试 | 重入、闪电贷 Spot 操纵、Sandwich、Adapter 恶意返回、权限和暂停滥用 |
+| 安全测试 | 重入、闪电贷 Spot 操纵、Sandwich、Adapter 恶意返回、Default Admin 单账户约束、两阶段延迟转移/取消/接受、延迟变更、根角色无隐式业务权限、业务角色授予/撤销、Guardian 只能收紧控制、初始化前治理入口、暂停和 Adapter 状态滥用 |
 
 ## 12. 交付前检查
 

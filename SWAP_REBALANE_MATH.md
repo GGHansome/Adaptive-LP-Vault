@@ -60,7 +60,7 @@ V2 的 `used0/used1` 主要由 Pair 储备比例决定。V3 的 `used0/used1` �
 
 ## 3. Swap 输入数量
 
-Keeper/Admin 可以通过链下模拟准备 `amountIn`，但 Vault 不信任其计算结果。
+Keeper/Manager 可以通过链下模拟准备 `amountIn`，但 Vault 不信任其计算结果。
 
 Vault 必须验证：
 
@@ -169,7 +169,7 @@ $$
 
 为了避免 Swap 后才发现部署率不足，Keeper 计算 `x` 时必须使用 `protocolMinOut(x)` 作为最差输出，而不是使用理想的 `OracleQuoteOut(x)`。因此， `x` 在协议允许的最差成交结果下，也必须满足上一节的 `DeployBps` 和 `IdleBps` 条件。
 
-Keeper/Admin 可以额外提供更严格的 `keeperMinAmountOut`。实际传给 Router 的最低输出为：
+Keeper/Manager 可以额外提供更严格的 `keeperMinAmountOut`。实际传给 Router 的最低输出为：
 
 $$
 minAmountOut =
@@ -180,7 +180,7 @@ $$
 
 ## 5. Router 与固定 Swap 方法
 
-v1 的 Router、Token 对、Pool/Fee Tier、固定 Swap 方法和接收地址规则在 `ControlledSwapExecutor` 部署或不可变初始化时配置，并在 Bootstrap 时校验。Bootstrap 后不能由 Keeper/Admin 通过调用参数替换。
+v1 的 Router、Token 对、Pool/Fee Tier、固定 Swap 方法和接收地址规则在 `ControlledSwapExecutor` 部署或不可变初始化时配置，并在 Bootstrap 时校验。Bootstrap 后不能由 Keeper/Manager 通过调用参数替换。
 
 推荐使用固定的 exact-input、single-hop 方法：
 
@@ -190,7 +190,7 @@ v1 的 Router、Token 对、Pool/Fee Tier、固定 Swap 方法和接收地址规
 - 接收地址固定为 Vault 或受控 Executor；
 - 不接受任意 Router、任意路径、任意 calldata、任意回调接收方或无限授权。
 
-Keeper/Admin 提交交易级的 `expectedPlanHash`、`expectedZeroForOne`、`amountIn`、`keeperMinAmountOut` 和 `deadline`。Vault 执行时重新根据 `previewDeposit` 推导方向，必须与该确认值一致。
+Keeper/Manager 提交交易级的 `expectedPlanHash`、`expectedZeroForOne`、`amountIn`、`keeperMinAmountOut` 和 `deadline`。Vault 执行时重新根据 `previewDeposit` 推导方向，必须与该确认值一致。
 
 ## 6. Executor 与 Vault 的职责
 
