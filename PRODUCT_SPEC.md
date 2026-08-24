@@ -230,8 +230,8 @@ $$
 
 - 同步 Active Adapter 的费用并读取销毁前资产快照。
 - 按 `x/S` 从 Active Adapter 部分退出，而不是优先消耗全部 Idle；
-- 同时按同一比例分配 Idle token0/token1；
-- 验证两种实际输出不低于用户最小输出；
+- 将按比例退出的 Position 资产与按同一比例分配的 Idle token0/token1 合并为最终 `amount0Out/amount1Out`；
+- 在 Vault 层验证最终 `amount0Out >= minAmount0Out` 且 `amount1Out >= minAmount1Out`；
 - 销毁 shares 后转账给 `receiver`。
 
 如果除 `minimumLockedShares` 外的流通 shares 全部赎回，Vault 必须退出所有 LP Position 并进入 IDLE；该完整退出属于 Position 结构变化，必须使 `planVersion` 递增 1，但保持 `lastCommittedRegime` 不变。锁定 shares、`dustTolerance0/1` 范围内的舍入余额和捐赠余额按既定会计继续存在。该状态不能重新 Bootstrap。
@@ -700,7 +700,7 @@ Guardian/Admin 可在不依赖价格估值的情况下触发紧急退出：
 5. 验证支持资产回到 Vault，旧 Position liquidity 为零；
 6. 设置 `activeVenue = IDLE`，使 `planVersion` 递增 1，保持 `lastCommittedRegime` 不变，并关闭 Deposit 和 Rebalance。
 
-Oracle 不健康时仍可执行该路径，但不能使用 TWAP NAV 作为成功条件；只能使用底层 AMM 的最小输出、实际余额增加和 Position 清零条件。
+Oracle 不健康时仍可执行该路径，但不能使用 TWAP NAV 作为成功条件。Emergency Exit 不设置业务层最小输出；成功条件仅为退出资产实际返回 Vault、旧 Position liquidity 清零和状态一致性检查通过。
 
 ## 10. 暂停、权限与部署配置
 
@@ -763,7 +763,7 @@ Bootstrap 成功后不可替换：
 ### 11.3 外部调用安全
 
 - Deposit、Redeem、Rebalance 和 Emergency Exit 使用非重入保护。
-- 所有 AMM 操作包含最小输出和截止时间。
+- 最小输出只在发生最终用户资产交付或 Swap 的 Vault 入口校验；
 - 外部调用后重新读取余额、费用和 Position 状态。
 - 不支持任意回调、任意 Router 或无限授权残留。
 - 失败交易不得留下部分 shares、旧 Position 与新 Position 并存或状态/资产不一致。

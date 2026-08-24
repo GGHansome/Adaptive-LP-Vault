@@ -596,12 +596,10 @@ interface IPositionAdapter {
     function deposit(uint256 amount0, uint256 amount1, PositionPlan calldata plan)
         external
         returns (uint256 used0, uint256 used1, uint256 liquidity);
-    function withdraw(uint256 shares, uint256 totalShares, uint256 minAmount0, uint256 minAmount1)
+    function withdraw(uint256 shares, uint256 totalShares)
         external
         returns (uint256 amount0, uint256 amount1);
-    function withdrawAll(uint256 minAmount0, uint256 minAmount1)
-        external
-        returns (uint256 amount0, uint256 amount1);
+    function withdrawAll() external returns (uint256 amount0, uint256 amount1);
 }
 ```
 
@@ -611,7 +609,7 @@ Adapter 规则：
 - `previewDeposit()` 必须只读，并与真实 `deposit()` 使用相同的 V2 储备比例或 V3 liquidity 数学；Strategy、Swap Rebalance 预览和最终建仓不得各自实现不一致的比例算法；
 - `snapshot()` 必须报告完整 principal + claimable fee，且不重复计价；
 - V3 `syncFees()` 必须结晶并领取全部可领取费用到 Vault，领取后重新读取的 `snapshot()` 中 `claimableFee0/1` 必须为零；V2 `syncFees()` 为 no-op；
-- `withdraw` 按 Vault 传入的 shares 比例执行，不能自行改变赎回比例；
+- `withdraw` 按 Vault 传入的 shares 比例执行，不能自行改变赎回比例；`withdraw`/`withdrawAll` 不接收用户最小输出参数，Vault 必须将按比例退出的 Position 资产与对应 Idle 资产合并后，再使用 `redeem` 的 `minAmount0Out/minAmount1Out` 校验最终输出；
 - 禁用 Adapter 仍允许 `withdraw`/`withdrawAll`；
 - Adapter 不得向 msg.sender 或任意外部地址发送 Vault 资产，接收方由 Vault 控制。
 
@@ -869,9 +867,9 @@ sequenceDiagram
     Vault->>Adapter: syncFees() and snapshot()
     Vault->>Accounting: compute fraction from pre-burn supply
     Accounting-->>Vault: proportional amounts
-    Vault->>Adapter: withdraw(shares, totalShares, min0, min1)
+    Vault->>Adapter: withdraw(shares, totalShares)
     Adapter-->>Vault: token0/token1
-    Vault->>Vault: add proportional Idle and validate outputs
+    Vault->>Vault: add proportional Idle and validate final outputs against minAmount0Out/minAmount1Out
     Vault->>Vault: burn shares and transfer assets
     Vault->>Vault: if all circulating shares are redeemed, enter IDLE and increment planVersion without changing lastCommittedRegime
     Vault-->>User: Redeem
@@ -943,7 +941,7 @@ sequenceDiagram
 
     Guardian->>Vault: emergencyExitToIdle()
     Vault->>Adapter: syncFees()
-    Vault->>Adapter: withdrawAll(min outputs)
+    Vault->>Adapter: withdrawAll()
     Adapter-->>Vault: token0/token1
     Vault->>Vault: verify position liquidity == 0
     Vault->>Vault: activeVenue = IDLE; increment planVersion; without changing lastCommittedRegime; pause deposits and rebalances

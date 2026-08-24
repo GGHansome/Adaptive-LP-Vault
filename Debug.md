@@ -52,6 +52,13 @@ Hysteresis 状态机的转移规则以 当前状态 为前提，但该状态既�
 emergencyExitToIdle() 无最小输出参数，文档中承诺的滑点保护也无表达
 你的 SPEC 承诺紧急退出使用"底层 AMM 的最小输出"作为成功判据，Adapter 接口也要求 minAmount0/minAmount1，但 Vault 层入口 emergencyExitToIdle() 不接受任何参数——最小输出值无来源。可选实现（内部常量、零值、配置参数）均未定义。若实现为零值，则该路径无任何输出下限保护；若为配置参数，则该参数未出现在任何配置结构体中
 
+> 原因：Adapter 的 Position 退出步骤与 Vault 的最终资产输出保护被混为一层。`redeem` 的 `minAmount0Out/minAmount1Out` 约束 Position 退出资产与用户按比例取得的 Idle 资产之和，不能直接作为 Adapter 局部退出的最低输出；Emergency Exit 的首要目标则是无条件清空全部 Position，不应由业务层最小输出阻塞。
+
+修改：
+- `IPositionAdapter.withdraw` 删除 `minAmount0/minAmount1`，只接收 `shares` 和 `totalShares`；`IPositionAdapter.withdrawAll` 删除两个最小输出参数，改为无参数完整退出。
+- Vault 将按比例退出的 Position 资产与对应 Idle 资产合并为最终 `amount0Out/amount1Out` 后统一校验。
+- `emergencyExitToIdle()` 保持无参数，并调用无参数 `withdrawAll()`；该路径不设置业务层最小输出，只以资产实际返回 Vault、旧 Position liquidity 清零和状态一致性作为成功条件。
+
 ## 问题 6
 你的 §6 标题为接口契约，但只覆盖 LP 资产流。Guardian 暂停、Admin 参数更新、角色授予/撤销、Registry 的 setAdapterEnabled/seal 虽有独立接口但调用权限与 Vault 的关系未定义 全部没有签名。事件契约定义了这些状态变化的广播，却没有对应的状态变更入口。后面你实现的时候就必须自行发明整个治理函数面，且无法从文档得知 参数更新的边界校验位置、批量更新语义、角色常量标识。
 
@@ -186,6 +193,8 @@ lastSuccessfulRebalanceAt 在 Bootstrap 成功时是否设置未定义
 
 ## 问题 39
 Adapter withdraw 最小输出与用户 redeem 最小输出的映射规则未定义
+
+> 已随问题 5 解决：`IPositionAdapter.withdraw` 已删除 `minAmount0/minAmount1`，因此不再把用户的最终最小输出映射或透传给 Adapter。`redeem` 的 `minAmount0Out/minAmount1Out` 名称和接口保持不变；Vault 先合并按比例退出的 Position 资产与用户对应的 Idle 资产，得到最终 `amount0Out/amount1Out`，再统一执行最小输出校验。`withdrawAll()` 同样改为无参数完整退出。
 
 ## 问题 40
 spotTick 声明的"安全检查 / Swap 风控"用途无实现
