@@ -5,9 +5,8 @@
 
 修改:
 - `ARCHITECTURE.md` §6.1 的 `rebalanceWithSwap` 增加 `bool expectedZeroForOne`，接口由 4 个参数改为 5 个参数。
-- §6.1 入口规则表补充：`expectedZeroForOne` 必须与 Vault 重算出的方向一致。
+- `expectedZeroForOne` 必须与 Vault 重算出的方向一致。
 - Swap Rebalance 时序图补充 `expectedZeroForOne`，并明确 Vault 将其与推导方向进行比较。
-- `PRODUCT_SPEC.md` 和 `SWAP_REBALANE_MATH.md` 已有五参数约定，因此无需修改。
 - `expectedZeroForOne` 仅用于校验调用者预期方向是否陈旧；实际执行方向仍由 Vault 根据最新余额和 `previewDeposit` 推导，方向不匹配时回滚 `InvalidSwapDirection()`。
 
 ## 问题 2
@@ -34,17 +33,18 @@ Adapter Registry 封存时序矛盾：Bootstrap 前还是 Bootstrap 后
 
 ## 问题 4
 Market Regime 滞后状态无持久化机制，Hysteresis 正确性依赖未声明的隐式假设
-Hysteresis 状态机的转移规则以 当前状态 为前提，但该状态既不在 Vault 存储中，也不在 Strategy 接口入参中。唯一候选来源是 positionPlan.marketRegime 上次成功执行的计划的 regime ，但这要求 Venue 和 Regime 严格双射 IDLE 和 EXTREME、V2 与 HIGH、V3高费 与 MEDIUM、V3低费 与 LOW）才能从 activeVenue 复原状态。该双射假设未写入任何不变量（INV-01~12 无此条），且被两条真实路径打破：  Guardian emergencyExitToIdle() 置 activeVenue = IDLE 但不经过任何计划（此时 regime 未必是 EXTREME）； 
+Hysteresis 状态机的转移规则以 当前状态 为前提，但该状态既不在 Vault 存储中，也不在 Strategy 接口入参中。唯一候选来源是 positionPlan.marketRegime 上次成功执行的计划的 regime ，但这要求 Venue 和 Regime 严格双射 IDLE 和 EXTREME、V2 与 HIGH、V3高费 与 MEDIUM、V3低费 与 LOW）才能从 activeVenue 复原状态。该双射假设未写入任何不变量（INV-01~12 无此条），且被两条真实路径打破：  Guardian emerge ncyExitToIdle() 置 activeVenue = IDLE 但不经过任何计划（此时 regime 未必是 EXTREME）； 
 全部流通 shares 赎回触发的 IDLE 同样无计划。这两条路径后，"从哪个滞后状态恢复"未定义。
 
 > 原因：`positionPlan.marketRegime` 虽保存了最近成功计划的 Regime，但现有 Strategy 接口没有接收该历史值；同时，资产位置和 Hysteresis 历史被隐式绑定，Emergency Exit 或全部流通 shares 赎回进入 IDLE 后无法唯一恢复上次策略状态。
 
 修改：
-- Vault 新增 `lastCommittedRegime` 普通 storage，作为 Hysteresis 历史的唯一事实来源，不再从 `activeVenue` 或 `positionPlan.targetVenue` 推导。
-- `IMarketRegimeStrategy.getPlan` 新增 `MarketRegime lastCommittedRegime` 参数；Vault 在 Preview、普通 Rebalance 和带 Swap Rebalance 中传入该持久化值。
-- `planVersion == 0` 是无历史计划的唯一标志。首次生成计划时 Strategy 忽略 `lastCommittedRegime` 的默认枚举值，按完整进入阈值直接分类；后续计划只以 `lastCommittedRegime` 执行 Hysteresis。
-- 候选 `PositionPlan.version` 固定为当前 `planVersion + 1`。Bootstrap 或 Rebalance 成功执行策略计划后，同时提交 `positionPlan`、`lastCommittedRegime = positionPlan.marketRegime` 和候选版本。
-- Emergency Exit 与全部流通 shares 赎回导致的完整 Position 退出属于 Position 结构变化，因此 `planVersion` 递增 1，但 `lastCommittedRegime` 保持不变；Oracle 不健康、Preview 和失败交易也不得覆盖该历史值。
+- Vault 使用 `lastExecutedPlan` storage 保存最近一次成功执行的完整 Strategy 计划；`lastExecutedPlan.marketRegime` 是 Hysteresis 历史的唯一事实来源，不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导。
+- `IMarketRegimeStrategy.getPlan` 接收 `MarketRegime lastCommittedRegime` 参数；Vault 在 Preview、普通 Rebalance 和带 Swap Rebalance 中将 `lastExecutedPlan.marketRegime` 作为该参数传入。
+- `planVersion == 0` 是无历史计划的唯一标志。首次生成计划时 Strategy 忽略 `lastCommittedRegime` 参数的默认枚举值，按完整进入阈值直接分类；`planVersion > 0` 时使用传入的 `lastExecutedPlan.marketRegime` 执行 Hysteresis。
+- 候选 `PositionPlan.version` 固定为当前 `planVersion + 1`。Bootstrap 或 Rebalance 成功执行策略计划后，将 `lastExecutedPlan` 写为执行计划，并将 `planVersion` 写为该计划的 `version`。
+- Emergency Exit 与全部流通 shares 赎回导致的完整 Position 退出属于 Position 结构变化，因此 `planVersion` 递增 1，但 `lastExecutedPlan` 保持不变；Oracle 不健康、Preview 和失败交易也不得覆盖该计划及其 `marketRegime`。
+- 任一合法 `PositionPlan` 的 `targetVenue` 与 `marketRegime` 严格双射：`IDLE` ↔ `EXTREME_DEVIATION`、`UNISWAP_V2` ↔ `HIGH_DEVIATION`、`UNISWAP_V3_HIGH_FEE` ↔ `MEDIUM_DEVIATION`、`UNISWAP_V3_LOW_FEE` ↔ `LOW_DEVIATION`；该约束不要求非策略退出后的当前 `activeVenue` 与历史计划目标一致。
 - Deposit、未清空 Position 的部分 Redeem、费用同步、Donation、暂停和 Adapter `enabled` 变化不属于 Position 结构变化，不递增 `planVersion`。
 
 ## 问题 5
