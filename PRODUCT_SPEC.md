@@ -860,7 +860,7 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 
 Swap 和目标 Adapter 建仓完成后，Vault 必须重新读取实际状态并验证：
 
-- 实际 Swap 输出和 Executor 的余额增量满足最低输出要求；
+- 实际 Swap 输出和 Executor 的余额增量满足 `minAmountOut` 最低输出要求；
 - `deployBps >= minDeployBps`，且 `idleBps <= maxHealthyIdleBps`；
 - 完整迁移后的 NAV 损失不超过 `maxMigrationLossBps`；
 - 资产位置和余额守恒成立，允许的舍入差异仅限 `dustTolerance0/1`；
@@ -968,7 +968,8 @@ Bootstrap 成功后不可替换：
 ### 11.3 外部调用安全
 
 - Deposit、Redeem、Rebalance 和 Emergency Exit 使用非重入保护。
-- 最小输出只在发生最终用户资产交付或 Swap 的 Vault 入口校验；
+- `minAmount0Out` 和 `minAmount1Out` 仅用于 `redeem` 的最终双资产交付；`protocolMinOut` 和 `keeperMinAmountOut` 仅用于 `rebalanceWithSwap` 的 Swap；Bootstrap、Deposit、Adapter 资产变更方法和 Emergency Exit 不接受业务层 `minOut` 参数；
+- `deadline` 仅用于 `rebalance` 的计划有效期，以及 `rebalanceWithSwap` 和 `ControlledSwapExecutor` 的 Swap 有效期；Bootstrap、Deposit、Redeem、Adapter 资产变更方法和 Emergency Exit 不要求调用者提供 `deadline`；
 - 外部调用后重新读取余额、费用和 Position 状态。
 - 不支持任意回调、任意 Router 或无限授权残留。
 - 失败交易不得留下部分 shares、旧 Position 与新 Position 并存或状态/资产不一致。

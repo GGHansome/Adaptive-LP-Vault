@@ -77,8 +77,22 @@ emergencyExitToIdle() 无最小输出参数，文档中承诺的滑点保护也�
 ## 问题 7
 observe() 的窗口由 Oracle 使用，但窗口数值被放进可治理更新的 StrategyConfig。Oracle 若在部署/初始化时固化窗口，则 Admin 更新 StrategyConfig.twapWindowSeconds 后 Oracle 行为不变——治理更新是无操作，ParameterUpdated 事件发出但系统无变化；若 Oracle 每次从 StrategyConfig 读窗口，则违背"部署时固定"且 Oracle 需要引用 Vault 配置 。在两份文档共同作用下，窗口存在两个互斥的事实来源
 
+> 原因：TWAP 观察窗口同时出现在 Strategy 配置和 Oracle 使用路径中，且两者的可变性约定不一致，可能导致治理更新只改变配置而不改变 Oracle 行为。
+
+修改：
+- 将 `twapWindowSeconds` 和 `shortTwapWindowSeconds` 从 `StrategyConfig` 移至独立的 `OracleConfig`。
+- 由 `CanonicalV3Oracle` 在构造时校验并写入 `immutable`；部署后不提供治理更新入口。
+- `OracleSnapshot` 中的窗口字段仅作为 Oracle immutable 配置的只读回显，不得独立存储或由调用者提供；一致性测试在实现阶段补充。
+
 ## 问题 8
 canEnter 是独立存储位还是 enabled 的视图派生 如 enabled && vaultInitialized 未定义；没有任何入口写它，但事件携带它。若为独立位，谁在何时置位/复位未定义；若为派生值，事件中包含冗余字段且结构体不应声明为存储配置。
+
+> 原因：旧 `AdapterConfig` 同时包含 `enabled` 和 `canEnter`，但没有定义 `canEnter` 的存储位置、派生规则、写入入口和事件语义。
+
+修改：
+- 删除 `canEnter` 独立字段，`enabled` 作为 Adapter 的运行状态 storage 字段。
+- `isEnterEnabled(venue)` 仅由 Adapter 已注册且 `enabled == true` 派生，不包含 `vaultInitialized`；初始化、暂停、Oracle 健康和 Position 一致性由 Vault 入口单独校验。
+- `AdapterStatusChanged` 仅广播 `enabled`，不再携带没有独立来源的 `canEnter`。
 
 ## 问题 9
 protocolMinOut 在 token1→token0 方向需要 Q0（token1 数量按 tick 报价为 token0 数量），但 Oracle 接口只定义了 quoteToken0InToken1。你在实现的时候要么自行实现反向报价 取整方向未规定——作为最小输出下限时必须保守向上，规格未说明 ，要么用 Q1 求逆
@@ -160,6 +174,12 @@ Deposit 实际数量 d0/d1 的推导算法未定义双侧 max 的截断与舍入
 ## 问题 24
 "所有 AMM 操作包含最小输出和截止时间"与 bootstrap/deposit/Adapter 接口参数面不符
 
+> 原因：原文把最小输出和 `deadline` 写成所有 AMM 操作的统一要求，但 Bootstrap、Deposit、Adapter 资产变更方法和 Emergency Exit 没有对应参数；Redeem 与 Swap 的保护也分别位于 Vault 最终交付和 Swap 执行路径。
+
+修改：
+- 在 `PRODUCT_SPEC.md` §11.3 明确适用范围：Redeem 仅校验最终用户双资产输出，Swap 校验 `protocolMinOut`、`keeperMinAmountOut` 和 `deadline`；Bootstrap、Deposit、Adapter 资产变更方法和 Emergency Exit 不暴露业务层 `minOut` 或 `deadline`。
+- 将 `ARCHITECTURE.md` 测试矩阵中 Adapter 的“最小输出”改为实际退出数量与余额变化，并将 Redeem 最小输出测试归入 Deposit/Redeem 集成测试。
+
 ## 问题 25
 Swap 接收地址二义性："Vault 或受控 Executor"未裁定，余额增量校验对象随之不明
 Swap 输出接收方在"Vault"与"受控 Executor"两个选项间未裁定。若接收方是 Executor 输出 token 滞留 Executor，后续 Adapter 建仓需要 Executor→Vault 的二次转账（该流程、授权与清理均未定义），且"实际余额增量"应度量 Executor 余额；若接收方是 Vault：增量度量 Vault 余额，MATH §6 "带 Swap 路径的 Executor 实际余额增量满足 minAmountOut" 的表述指代错位（增量发生在 Vault 而非 Executor）。两种读法下的后置校验位置、资金流与授权模型均不同。
@@ -174,6 +194,8 @@ IdleStateChanged 事件的触发点集合未定义
 ## 问题 28
 治理参数更新后 positionPlan 陈旧且 planVersion 不递增，Deposit 继续按旧计划建仓
 
+> 已并入问题 2 统一处理：将配置和策略参数改为部署时固定的 `immutable`，删除运行时参数更新入口及 `ParameterUpdated` 语义，因此不再存在治理参数更新后旧 `positionPlan` 继续执行的问题。若需使用不同参数，必须部署新的 Vault。
+
 ## 问题 29
 token1Decimals > 18 无约束，份额锚定与取整粒度退化
 
@@ -186,6 +208,8 @@ Cooldown 与 Emergency Exit 的交互未显式对齐
 ## 问题 32
 ParameterUpdated 事件的参数转型语义未定义int24 参数与 bytes32 标识
 
+> 已并入问题 2 统一处理：删除 `ParameterUpdated` 事件和参数更新路径，所有部署配置在部署时固定；运行时状态变化使用各自的类型化事件，因此不再需要定义 `int24` 参数或 `bytes32` 标识的通用转型语义。
+
 ## 问题 33
  OracleSnapshot.observedAt 与三个价格字段的标度/参考量未定义
 价格字段未定义标度：是 1 raw unit token0 的 token1 报价、还是 10^token0Decimals（1 整个 token0）的报价、还是 X96 定点——三种标度在同一字段名下均可行；observedAt 无任何使用处与语义说明。另外 AssetSnapshot.nav1 在 Oracle 不健康时（无法计算 TWAP 报价）的取值（回滚？零？）也未定义。
@@ -196,6 +220,8 @@ getAdapter(IDLE) 的返回值未定义
 ## 问题 35
 继承式 Registry 与系统图/接口的部署语义不一致
 你的Registry 是继承进 Vault 的内部模块 无独立地址、无跨合约调用 ，但系统图与 §6.5 的完整外部接口形状 含 seal() 等入口 均按独立合约表达。图示的调用边在继承式实现中不存在；IAdapterRegistry 若仅由 Vault 自身实现，其接口语义 外部可调用性、权限边界 需重新说明。
+
+> 已并入问题 3 和问题 6 统一处理：`AdapterRegistry` 作为 `AdaptiveLPVault` 的继承式内部模块，`IAdapterRegistry` ABI 由 Vault 自身实现；系统图改为 Vault 直接连接 Adapter，删除独立 Registry、`seal()`/`sealed()` 及相关接口和事件，Bootstrap 成功时由 `initialized = true` 冻结身份字段。
 
 ## 问题 36
 紧急退出"关闭 Deposit 和 Rebalance"的实现机制歧义
@@ -212,7 +238,7 @@ lastSuccessfulRebalanceAt 在 Bootstrap 成功时是否设置未定义
 ## 问题 39
 Adapter withdraw 最小输出与用户 redeem 最小输出的映射规则未定义
 
-> 已随问题 5 解决：`IPositionAdapter.withdraw` 已删除 `minAmount0/minAmount1`，因此不再把用户的最终最小输出映射或透传给 Adapter。`redeem` 的 `minAmount0Out/minAmount1Out` 名称和接口保持不变；Vault 先合并按比例退出的 Position 资产与用户对应的 Idle 资产，得到最终 `amount0Out/amount1Out`，再统一执行最小输出校验。`withdrawAll()` 同样改为无参数完整退出。
+> 已并入问题 5 统一处理：`IPositionAdapter.withdraw` 已删除 `minAmount0/minAmount1`，因此不再把用户的最终最小输出映射或透传给 Adapter。`redeem` 的 `minAmount0Out/minAmount1Out` 名称和接口保持不变；Vault 先合并按比例退出的 Position 资产与用户对应的 Idle 资产，得到最终 `amount0Out/amount1Out`，再统一执行最小输出校验。`withdrawAll()` 同样改为无参数完整退出。
 
 ## 问题 40
 spotTick 声明的"安全检查 / Swap 风控"用途无实现
@@ -220,6 +246,6 @@ spotTick 声明的"安全检查 / Swap 风控"用途无实现
 ## 问题 41
 getPlan 生成计划的 version 取值规则未定义
 
-> 已随问题 4 解决：`planVersion` 初始为 0，候选 `PositionPlan.version` 必须等于当前 `planVersion + 1`；成功的 Position 结构变化提交候选版本或将现有版本递增 1，失败交易和非结构变化不更新。
+> 已并入问题 4 统一处理：`planVersion` 初始为 0，候选 `PositionPlan.version` 必须等于当前 `planVersion + 1`；成功的 Position 结构变化提交候选版本或将现有版本递增 1，失败交易和非结构变化不更新。
 
 看一下这些问题 处理一下 完事之后可以 再找我
