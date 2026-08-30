@@ -26,6 +26,10 @@
 
 ## 2. 部署评估与资产偏差
 
+`_assessDeployment(plan, amount0, amount1, twapTick)` 是 Vault 内部只读函数，不属于外部 ABI。
+
+对于非 IDLE 计划，Vault 必须先验证 `isEnterEnabled(plan.targetVenue) == true`，再调用目标 Adapter 的 `previewDeposit()`；禁用时以 `AdapterDisabled()` 回滚。该运行时门控不改变以下部署率、Swap 方向或舍入公式；IDLE 计划不检查 Adapter 状态，也不调用 Adapter。
+
 目标 Adapter 必须提供与真实 `deposit()` 使用相同数学的只读预览能力：
 
 ```solidity
@@ -117,12 +121,12 @@ $$
 然后对模拟余额执行部署评估：
 
 ```text
-simulatedAssessment = assessDeployment(currentPlan, H0(x), H1(x))
+simulatedAssessment = _assessDeployment(currentPlan, H0(x), H1(x), twapTickBefore)
 used0 = simulatedAssessment.used0
 used1 = simulatedAssessment.used1
 ```
 
-每次 `assessDeployment` 只调用一次目标 Adapter 的 `previewDeposit()`。首次评估使用 `T0/T1`，本次评估使用模拟 Swap 后的 `H0/H1`，两者输入不同。
+每次 `_assessDeployment` 只调用一次目标 Adapter 的 `previewDeposit()`。首次评估使用 `T0/T1`，结果记为 `initialDeployBps`；本次评估使用模拟 Swap 后的 `H0/H1`，结果记为 `simulatedDeployBps(x)`。两者使用相同公式，但输入资产和检查阶段不同。
 
 $$
 DeployableNAV_1(x) = used_1 + Q_1(used_0; twapTickBefore)
@@ -133,7 +137,7 @@ NAV_{after,sim}(x) = H_1(x) + Q_1(H_0(x); twapTickBefore)
 $$
 
 $$
-DeployBps(x) =
+simulatedDeployBps(x) =
 \left\lfloor
 \frac{DeployableNAV_1(x) \times BPS}
 {NAV_{after,sim}(x)}
@@ -156,12 +160,14 @@ $$
 `amountIn` 必须满足：
 
 $$
-DeployBps(x) \ge minDeployBps
+simulatedDeployBps(x) \ge minDeployBps
 $$
 
 $$
 IdleBps(x) \le maxHealthyIdleBps
 $$
+
+带 Swap Rebalance 的首次评估使用 `initialDeployBps < minDeployBps` 识别 Swap 必要性；对 `amountIn` 的模拟校验使用 `simulatedDeployBps(x) >= minDeployBps` 判断最差输出下能否建立目标 Position。
 
 同时，`simulatedAssessment.requiresSwap` 必须为 `false`，其 `direction` 不得与首次部署评估方向相反。
 
@@ -169,17 +175,17 @@ Keeper 可以在链下寻找合适的 `x`。Vault 只验证值是否安全、方
 
 ## 4. `protocolMinOut` 与 Keeper 最低输出
 
-定义方向报价：
+定义向上取整的方向报价：
 
 $$
-OracleQuoteOut(x) =
+OracleQuoteOutUp(x) =
 \begin{cases}
 Q_1(x; twapTickBefore), & token0 \rightarrow token1 \\
 Q_0(x; twapTickBefore), & token1 \rightarrow token0
 \end{cases}
 $$
 
-其中 `Q1` 和 `Q0` 必须处理 Pool 内部 Token 顺序、Vault Token 顺序、raw units 和 decimals。
+两个报价函数均处理 Pool 内部 Token 顺序、Vault Token 顺序、raw units 和 decimals。
 
 允许的最大价格偏差为 `maxSwapSlippageBps` 时，协议最低输出为：
 
@@ -187,12 +193,14 @@ $$
 protocolMinOut(x) =
 \left\lceil
 \frac{
-OracleQuoteOut(x) \times (BPS-maxSwapSlippageBps)
+OracleQuoteOutUp(x) \times (BPS-maxSwapSlippageBps)
 }{BPS}
 \right\rceil
 $$
 
-为了避免 Swap 后才发现部署率不足，Keeper 计算 `x` 时必须使用 `protocolMinOut(x)` 作为最差输出，而不是使用理想的 `OracleQuoteOut(x)`。因此， `x` 在协议允许的最差成交结果下，也必须满足上一节的 `DeployBps` 和 `IdleBps` 条件。
+该计算先对方向报价向上取整，再对 BPS 滑点折算向上取整。与仅在最终结果处取整的精确有理数公式相比，结果相同或最多高一个输出 Token raw unit。
+
+为了避免 Swap 后才发现部署率不足，Keeper 计算 `x` 时必须使用 `protocolMinOut(x)` 作为最差输出，而不是使用未折算滑点的方向报价。因此， `x` 在协议允许的最差成交结果下，也必须满足上一节的 `DeployBps` 和 `IdleBps` 条件。
 
 Keeper/Manager 可以额外提供更严格的 `keeperMinAmountOut`。实际传给 Router 的最低输出为：
 
@@ -274,6 +282,7 @@ unused1 = 0 USDC
 
 以下情况必须回滚：
 
+- 非 IDLE 目标 Adapter 的 `isEnterEnabled(targetVenue) == false`；
 - 首次 `DeploymentAssessment.requiresSwap == false`；
 - `expectedPlanHash` 与重新生成的当前计划不匹配；
 - `expectedDirection == NONE`，或与首次 `DeploymentAssessment.direction` 不一致；

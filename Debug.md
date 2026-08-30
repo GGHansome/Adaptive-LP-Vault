@@ -97,15 +97,41 @@ canEnter 是独立存储位还是 enabled 的视图派生 如 enabled && vaultIn
 ## 问题 9
 protocolMinOut 在 token1→token0 方向需要 Q0（token1 数量按 tick 报价为 token0 数量），但 Oracle 接口只定义了 quoteToken0InToken1。你在实现的时候要么自行实现反向报价 取整方向未规定——作为最小输出下限时必须保守向上，规格未说明 ，要么用 Q1 求逆
 
+> 原因：双向报价接口与 `protocolMinOut` 的分阶段取整语义没有同步到架构和数学契约。
+
+修改：
+- `OracleConfig` 增加 `token0`、`token1` 和 `canonicalPool`；`CanonicalV3Oracle` 将其写入 immutable，并按 Vault Token 顺序提供 `quoteToken0InToken1` 和 `quoteToken1InToken0`，两者通过 `roundUp` 参数选择向下或向上取整。
+- `protocolMinOut` 先取得向上取整的方向报价，再对 BPS 滑点折算向上取整；相对仅在最终结果处取整的精确有理数公式，结果相同或最多高一个输出 Token raw unit。
+- 产品验收与架构测试矩阵补充双向报价、Token 顺序和两段取整测试。
+
 ## 问题 10
-事件契约中的 PlanGenerated 在系统里没有任何合法的发出点 预览是 view 不能发 执行成功时计划已被执行（RebalanceExecuted 携带 planHash） 执行失败即回滚（事件不存在）。若意图是在 RebalanceExecuted 之外补充 planHash→(venue, regime, requiresSwap) 的映射广播，则应说明与 RebalanceExecuted 的关系及是否在同一交易内成对发出。
+原事件契约中的 `PlanGenerated` 在系统里没有任何合法的发出点 预览是 view 不能发 执行成功时计划已被执行（RebalanceExecuted 携带 planHash） 执行失败即回滚（事件不存在）。若意图是在 RebalanceExecuted 之外补充 planHash→(venue, regime, requiresSwap) 的映射广播，则应说明与 RebalanceExecuted 的关系及是否在同一交易内成对发出。
+
+修改：
+- 将 `PlanGenerated` 重命名为 `PositionPlanCommitted`。
+- Bootstrap、普通 Rebalance 和带 Swap Rebalance 成功提交 `lastExecutedPlan` 后发出 `PositionPlanCommitted`。
 
 ## 问题 11
 deployBps 同名指标在两处使用不同分母 NAV_1 vs NAV_after,sim ，分别用于策略标记 requiresSwap（执行前）与 Swap 路径校验（执行中），但你文档未声明二者是不同阶段的不同检查、也未给出关系（由于 Swap 滑点，NAV_after,sim ≤ NAV_1，故执行期比值 ≥ 策略期比值，非冗余）。这很容易将两公式混用或误判为矛盾。
 
+> 原因：首次部署评估与最差 Swap 输出模拟复用了无阶段后缀的 `deployBps` 名称，容易使实现混用 `T0/T1` 与 `H0/H1` 的资产快照和分母。
+
+修改：
+- 首次部署评估结果命名为 `initialDeployBps`，输入为 `T0/T1`，用于生成 `requiresSwap` 和 `direction`。
+- 最差 Swap 输出模拟结果命名为 `simulatedDeployBps(x)`，输入为 `H0(x)/H1(x)`，用于校验 Keeper 提交的 `amountIn`。
+- 两者复用 `_assessDeployment` 的同一部署率公式，并在产品流程、数学公式和架构时序中分别标明阶段，满足`initialDeployBps < minDeployBps`和`simulatedDeployBps(x) >= minDeployBps`。
+
 ## 问题 12
 "Active Position 有效"在 Adapter 被禁用时的判定未定义
  Guardian 禁用当前 Active Adapter 后：仓位仍存在（禁用只阻止进入），但存款前置"Active Position 有效"是否因此为假？若 有效 含 Adapter enabled ，存款自动关闭 合理 若不含，用户资金继续注入一个被 Guardian 判定异常的 Adapter。规格未定义判定式。
+
+> 原因：旧规格把 Position 的结构有效性与 Adapter 的运行时进入权限混在“Active Position 有效”一句中，同时只说明禁用不阻止退出，没有裁定向现有 Position 增加 liquidity 是否属于进入。
+
+修改：
+- Active Position 的结构有效性不包含 Adapter `enabled`；禁用当前 Adapter 不改变资产计价、`activeVenue`、`planVersion`、`lastExecutedPlan` 或暂停 storage。
+- `enabled` 统一表示是否允许建立或增加 liquidity。Deposit、迁入目标 Venue 和同 Venue V3 Recenter 在调用 `previewDeposit()`、`deposit()` 或转入用户 Token 前必须检查目标 Adapter，禁用时以 `AdapterDisabled()` 回滚。
+- 已禁用的当前 Adapter 仍允许 `snapshot()`、`syncFees()`、Redeem、迁出和 Emergency Exit；非 IDLE 目标被禁用时 Preview 和两类 Rebalance 回滚，目标为 IDLE 时不检查 Adapter 状态。
+- 产品验收与架构测试矩阵补充禁用后的 Deposit、计价、Redeem、迁出、目标建仓和状态不变测试；Swap 数学仅补充进入门控前置条件，公式不变。
 
 ## 问题 13
 Guardian 在 IDLE 状态调用紧急退出 回滚则 Guardian 无法区分 失败因已安全 与 失败因异常 ；成功则发出 EmergencyExit 事件但无任何状态变化 。锁定 shares 全部赎回后的不可重启 IDLE 壳同理。

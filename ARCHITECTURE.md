@@ -257,6 +257,9 @@ struct AccessControlConfig {
 }
 
 struct OracleConfig {
+    address token0;
+    address token1;
+    address canonicalPool;
     uint32 twapWindowSeconds;
     uint32 shortTwapWindowSeconds;
 }
@@ -280,6 +283,8 @@ struct StrategyConfig {
 ```
 
 `VaultConfig`、`OracleConfig` 和 `StrategyConfig` 仅作为构造参数与内存传参结构，不作为整体状态变量写入普通 storage。各字段在部署时通过协议硬边界与字段关系校验后，分别写入所属合约的 Solidity `immutable` 状态变量；部署后任何角色均不得修改。
+
+`OracleConfig.token0/token1` 使用 Vault 的 Token 顺序；`canonicalPool` 的内部 Token 与对应 Uniswap 顺序可以不同，但其资产对必须与这两个地址一致。
 
 `AccessControlConfig` 仅作为 Vault 构造参数传入 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules`。`initialDefaultAdmin` 必须非零；`initialDefaultAdminDelay` 是根管理员转移的初始等待时间，应在部署前校准，Mainnet 部署应采用非零值。
 
@@ -385,7 +390,7 @@ struct AdapterConfig {
 }
 ```
 
-`AdapterConfig` 归属于 Vault 继承的 `AdapterRegistry`，是 `_adapterByVenue` Mapping 的值类型。`venue` 必须与 Mapping Key 一致；Bootstrap 成功后身份绑定字段冻结，只有 `enabled` 可以继续修改。
+`AdapterConfig` 归属于 Vault 继承的 `AdapterRegistry`，是 `_adapterByVenue` Mapping 的值类型。`venue` 必须与 Mapping Key 一致；Bootstrap 成功后身份绑定字段冻结，只有 `enabled` 可以继续修改。`enabled` 只表示是否允许建立或增加 liquidity，不属于 Active Position 的结构有效性。
 
 ## 5. 存储归属与状态转换
 
@@ -429,11 +434,13 @@ Vault 不保存由 Registry 遍历产生的冗余资产总额。`totalAssets()` 
 
 | 存储项                      | 类型       | 存储方式        | 写入时机      | 约束                                                       |
 | ------------------------ | -------- | ----------- | --------- | -------------------------------------------------------- |
+| `canonicalPool`          | `address` | `immutable` | Oracle 构造 | 固定 canonical Uniswap V3 Pool；部署后不可替换                      |
+| `token0/token1`          | `address` | `immutable` | Oracle 构造 | 与 Vault 的 immutable Token 地址及顺序一致；两者必须组成 canonical Pool 资产对 |
 | `twapWindowSeconds`      | `uint32` | `immutable` | Oracle 构造 | 大于零且不超过协议硬上限；部署后不可修改                                     |
 | `shortTwapWindowSeconds` | `uint32` | `immutable` | Oracle 构造 | `0 < shortTwapWindowSeconds < twapWindowSeconds`；部署后不可修改 |
 
 
-Oracle 在构造时完成窗口关系和协议硬边界校验。实现可以使用两个独立的 `immutable` 字段承载，而不要求把整个 `OracleConfig` 结构体写入普通 storage。
+Oracle 在构造时完成 canonical Pool、Vault Token 顺序、窗口关系和协议硬边界校验。实现可以使用独立的 `immutable` 字段承载，而不要求把整个 `OracleConfig` 结构体写入普通 storage。
 
 ### 5.3 Registry 存储
 
@@ -505,7 +512,7 @@ stateDiagram-v2
 
 
 
-暂停开关、Oracle 健康状态、当前资产位置和 `lastExecutedPlan.marketRegime` 表示的 Hysteresis 历史彼此独立。任何状态转换必须在同一交易内完成相应资产和 Position 校验。
+暂停开关、Adapter 进入状态、Oracle 健康状态、当前资产位置和 `lastExecutedPlan.marketRegime` 表示的 Hysteresis 历史彼此独立。禁用当前 Active Adapter 不触发资产位置转换；任何实际状态转换必须在同一交易内完成相应资产和 Position 校验。
 
 ## 6. 接口契约
 
@@ -561,21 +568,41 @@ interface IAdaptiveLPVault is IAccessControlDefaultAdminRules, IAdapterRegistry 
 }
 ```
 
+`_assessDeployment` 是 Vault 内部只读函数，不属于 `IAdaptiveLPVault` ABI：
+
+```solidity
+function _assessDeployment(
+    PositionPlan memory plan,
+    uint256 amount0,
+    uint256 amount1,
+    int24 twapTick
+) internal view returns (DeploymentAssessment memory assessment);
+```
+
 ### 6.2 Oracle 接口
 
 ```solidity
 interface ICanonicalV3Oracle {
     function snapshot() external view returns (OracleSnapshot memory);
-    function quoteToken0InToken1(uint256 amount0, int24 tick) external pure returns (uint256 amount1);
+    function quoteToken0InToken1(uint256 amount0, int24 tick, bool roundUp)
+        external
+        view
+        returns (uint256 amount1);
+    function quoteToken1InToken0(uint256 amount1, int24 tick, bool roundUp)
+        external
+        view
+        returns (uint256 amount0);
     function isHealthy() external view returns (bool);
     function canonicalPool() external view returns (address);
+    function token0() external view returns (address);
+    function token1() external view returns (address);
 }
 ```
 
 Oracle 架构边界：
 
 - `snapshot()` 只从部署时绑定的 canonical Pool 读取数据；不得使用目标 Venue 或调用者提供的替代价格；
-- `quoteToken0InToken1()` 是无状态报价函数，使用固定的 token 顺序和全精度数学；
+- `quoteToken0InToken1()` 和 `quoteToken1InToken0()` 使用固定的 Vault Token 顺序和全精度数学；`roundUp == false` 时向下取整，`roundUp == true` 时向上取整；
 - Oracle 负责输出 `OracleSnapshot` 和健康状态，不负责决定策略状态或目标 Venue；
 
 ### 6.3 Strategy 接口
@@ -626,8 +653,9 @@ Adapter 架构边界：
 
 - 所有资产变更方法只接受 Vault 调用；Adapter 不铸造或销毁 shares，也不修改 Vault 的策略状态；
 - `previewDeposit()` 必须只读，并与真实 `deposit()` 使用一致的底层 AMM 计算路径；`amount0Max/amount1Max` 是使用上限，返回的 `used0/used1` 是实际使用数量；
+- Vault 仅可在非 IDLE 目标满足 `isEnterEnabled(targetVenue) == true` 后调用 `previewDeposit()` 或 `deposit()`；用户 Deposit 使用当前 `activeVenue` 作为目标；
 - `snapshot()` 返回完整的 Position 资产快照，费用和本金不得在同一会计路径中重复计价；
-- `withdraw()` 和 `withdrawAll()` 必须将资产返回 Vault 控制的地址；Adapter 禁用后仍必须支持退出现有 Position；
+- `snapshot()`、`syncFees()`、`withdraw()` 和 `withdrawAll()` 不受 Adapter `enabled` 限制，并必须继续支持已禁用 Active Adapter 的计价和退出；`withdraw()` 和 `withdrawAll()` 必须将资产返回 Vault 控制的地址；
 
 ### 6.5 Registry 接口
 
@@ -652,7 +680,8 @@ interface IAdapterRegistry {
 Registry 架构边界：
 
 - `configureAdapter()` 只负责 Bootstrap 前的 Adapter 身份绑定；Bootstrap 成功后，Adapter、Pool、Token 和 Fee Tier 等身份字段冻结；
-- `setAdapterEnabled()` 只改变已绑定 Adapter 的运行状态，不改变身份绑定；
+- `setAdapterEnabled()` 只改变已绑定 Adapter 的运行状态，不改变身份绑定、Position、计划版本或暂停状态；
+- `enabled == false` 禁止用户 Deposit、迁入该 Venue 和同 Venue V3 Recenter，仍允许资产读取、费用同步、Redeem、迁出和 Emergency Exit；
 
 ### 6.6 Swap Executor 接口
 
@@ -726,7 +755,7 @@ error UnsupportedToken();
 error Reentrancy();
 ```
 
-错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。角色授权和 `renounceRole` 调用者确认失败分别采用 OpenZeppelin `IAccessControl` 的 `AccessControlUnauthorizedAccount` 与 `AccessControlBadConfirmation`。`AccessControlInvalidDefaultAdmin`、`AccessControlEnforcedDefaultAdminRules` 和 `AccessControlEnforcedDefaultAdminDelay` 直接采用 `IAccessControlDefaultAdminRules` 的标准语义，用于非法根管理员、绕过单一根管理员/两阶段规则以及尚未满足延迟的操作；Vault 不定义额外的最后管理员错误或自定义根管理员计数错误。`GuardianCannotUnpause()` 用于 Guardian 尝试把任一暂停位从 true 改为 false。`NotInitialized()` 用于要求已初始化状态的入口，包括 `setPauseState`、`setAdapterEnabled`、Emergency Exit 和未初始化 Vault 上的 `previewRebalance()`；该检查必须早于这些入口的业务状态读取。`OracleUnhealthy()` 用于 Bootstrap、Deposit、Preview 和两类 Rebalance 的健康门控，该错误路径不生成或返回 `PositionPlan`。`SwapRequired()` 是回滚返回的 custom error，不是事件；当 Bootstrap 或普通 `rebalance` 的 `DeploymentAssessment.requiresSwap` 为 true 时使用该错误终止交易。
+错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。角色授权和 `renounceRole` 调用者确认失败分别采用 OpenZeppelin `IAccessControl` 的 `AccessControlUnauthorizedAccount` 与 `AccessControlBadConfirmation`。`AccessControlInvalidDefaultAdmin`、`AccessControlEnforcedDefaultAdminRules` 和 `AccessControlEnforcedDefaultAdminDelay` 直接采用 `IAccessControlDefaultAdminRules` 的标准语义，用于非法根管理员、绕过单一根管理员/两阶段规则以及尚未满足延迟的操作；Vault 不定义额外的最后管理员错误或自定义根管理员计数错误。`GuardianCannotUnpause()` 用于 Guardian 尝试把任一暂停位从 true 改为 false。`NotInitialized()` 用于要求已初始化状态的入口，包括 `setPauseState`、`setAdapterEnabled`、Emergency Exit 和未初始化 Vault 上的 `previewRebalance()`；该检查必须早于这些入口的业务状态读取。`OracleUnhealthy()` 用于 Bootstrap、Deposit、Preview 和两类 Rebalance 的健康门控，该错误路径不生成或返回 `PositionPlan`。`AdapterDisabled()` 用于当前 Active Adapter 已禁用的 Deposit，以及非 IDLE 候选目标 Adapter 已禁用的 Bootstrap、Preview 和两类 Rebalance；检查必须发生在对应 Adapter 的 `previewDeposit()`、`deposit()` 或用户 Token 转入之前，不阻止从已禁用旧 Adapter 读取、同步费用或退出。`SwapRequired()` 是回滚返回的 custom error，不是事件；当 Bootstrap 或普通 `rebalance` 的 `DeploymentAssessment.requiresSwap` 为 true 时使用该错误终止交易。
 
 ## 8. 事件契约
 
@@ -758,7 +787,7 @@ event Redeem(
     uint256 amount1
 );
 
-event PlanGenerated(
+event PositionPlanCommitted(
     bytes32 indexed planHash,
     uint64 indexed version,
     VenueType targetVenue,
@@ -864,6 +893,7 @@ sequenceDiagram
     Vault->>Accounting: compute seed NAV and grossInitialShares
     Vault->>Strategy: getPlan(seed snapshots, default lastCommittedRegime, planVersion = 0)
     Strategy-->>Vault: deterministic initial PositionPlan with version = 1
+    Vault->>Vault: require target Adapter enter enabled if targetVenue is non-IDLE
     Vault->>Adapter: previewDeposit(seed amounts, plan) if targetVenue is non-IDLE
     Adapter-->>Vault: used0/used1
     Vault->>Vault: build DeploymentAssessment; validate ratio; revert SwapRequired if assessment.requiresSwap
@@ -872,7 +902,7 @@ sequenceDiagram
     Vault->>Adapter: deposit if targetVenue is non-IDLE
     Adapter-->>Vault: used amounts and liquidity
     Vault->>Vault: validate ACTIVE or EXTREME IDLE post-state; commit lastExecutedPlan and planVersion = 1; set initialized = true and freeze bindings
-    Vault-->>Manager: VaultBootstrapped
+    Vault-->>Manager: PositionPlanCommitted and VaultBootstrapped
 ```
 
 ### 9.2 Deposit
@@ -886,6 +916,7 @@ sequenceDiagram
     participant Accounting
 
     User->>Vault: deposit(max0, max1, minSharesOut)
+    Vault->>Vault: validate initialized, deposit pause and non-IDLE activeVenue; require isEnterEnabled(activeVenue)
     Vault->>Oracle: snapshot()
     Vault->>Adapter: syncFees() and snapshot()
     Vault->>Accounting: compute amounts and shares from pre-state
@@ -935,6 +966,7 @@ sequenceDiagram
     Vault->>Oracle: snapshot()
     Vault->>Strategy: getPlan(current snapshots, lastExecutedPlan.marketRegime as lastCommittedRegime, planVersion)
     Strategy-->>Vault: deterministic PositionPlan
+    Vault->>Vault: require target Adapter enter enabled if targetVenue is non-IDLE
     Vault->>NewAdapter: previewDeposit(current assets, plan) if targetVenue is non-IDLE
     NewAdapter-->>Vault: used0/used1
     Vault->>Vault: build DeploymentAssessment; validate deadline, hash and cooldown; revert SwapRequired if assessment.requiresSwap
@@ -944,7 +976,7 @@ sequenceDiagram
     NewAdapter-->>Vault: unused amounts and liquidity
     Vault->>Vault: validate conservation, idle and single position
     Vault->>Vault: commit lastExecutedPlan and incremented planVersion
-    Vault-->>Caller: RebalanceExecuted
+    Vault-->>Caller: PositionPlanCommitted and RebalanceExecuted
 ```
 
 ### 9.5 Swap Rebalance
@@ -963,22 +995,23 @@ sequenceDiagram
     Vault->>Oracle: snapshot()
     Vault->>Strategy: getPlan(current snapshots, lastExecutedPlan.marketRegime as lastCommittedRegime, planVersion)
     Strategy-->>Vault: PositionPlan
+    Vault->>Vault: require target Adapter enter enabled
     Vault->>NewAdapter: previewDeposit(current assets, plan)
     NewAdapter-->>Vault: used0/used1
-    Vault->>Vault: build DeploymentAssessment; validate hash, deadline, assessment.requiresSwap and expectedDirection
+    Vault->>Vault: build initial DeploymentAssessment (initialDeployBps) from T0/T1; validate hash, deadline, assessment.requiresSwap and expectedDirection
     Vault->>OldAdapter: syncFees() and withdrawAll()
     OldAdapter-->>Vault: token0/token1
     Vault->>Vault: verify actual balances against assessed assets; simulate worst-case post-swap balances
     Vault->>NewAdapter: previewDeposit(simulated post-swap balances, plan)
     NewAdapter-->>Vault: simulated used0/used1
-    Vault->>Vault: validate amountIn, simulated deployment and idle; construct SwapPlan
+    Vault->>Vault: validate amountIn, simulatedDeployBps and idle; construct SwapPlan
     Vault->>SwapExecutor: executeSwap(validated SwapPlan, protocolMinOut)
     SwapExecutor-->>Vault: actual amountOut
     Vault->>NewAdapter: deposit() with adjusted assets
     NewAdapter-->>Vault: unused amounts and liquidity
     Vault->>Vault: validate NAV loss, deployment, idle, dust tolerance and position
     Vault->>Vault: commit lastExecutedPlan and incremented planVersion
-    Vault-->>Keeper: RebalanceExecuted and SwapExecuted
+    Vault-->>Keeper: PositionPlanCommitted, RebalanceExecuted and SwapExecuted
 ```
 
 ### 9.6 Emergency Exit
@@ -1004,8 +1037,10 @@ sequenceDiagram
 
 - `observe([twapWindowSeconds, shortTwapWindowSeconds, 0])` 返回三个累计 Tick；分别计算 `twapTick` 和 `shortTwapTick`。
 - 负的非整除结果必须向负无穷取整，而不是 Solidity 默认的向零截断。
-- 用 `TickMath.getSqrtRatioAtTick` 计算报价，使用 `FullMath.mulDiv` 防止中间乘法溢出。
-- `Q1(amount0; tick)` 必须明确 raw units 和 token decimals；不得把人类可读小数直接送入 raw-unit 数学。
+- 用 `TickMath.getSqrtRatioAtTick` 计算 `Q1/Q0` 双向报价，使用全精度乘除防止中间乘法溢出。
+- `Q1` 输入 token0 raw units 并返回 token1 raw units；`Q0` 输入 token1 raw units 并返回 token0 raw units。
+- canonical Uniswap V3 Pool 按地址从小到大定义 Pool token0/token1；在资产对绑定已验证的前提下，报价函数以输入 Token 作为 `baseToken`：`baseToken < quoteToken` 时按 Pool token0 → token1 报价，否则按 Pool token1 → token0 反向报价。
+- 报价使用全精度乘除；`roundUp == false` 时返回精确商的向下取整结果，`roundUp == true` 时返回精确商的向上取整结果；`protocolMinOut` 的方向报价和 BPS 滑点折算分别向上取整。
 - Oracle 使用 `shortTwapTick` 和 `twapTick` 计算 `deviationBps`；NAV 仍使用 `twapTick`，`spotTick` 保留用于 Range 越界和 Swap 风控。
 
 
@@ -1075,6 +1110,7 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | INV-15 | `DEFAULT_ADMIN_ROLE` 至多由一个账户持有，转移、放弃和延迟变更只能通过 `AccessControlDefaultAdminRules` 标准流程 | 权限操作回滚           |
 | INV-16 | Default Admin 不因根角色自动获得 Vault 业务权限，Guardian 只能收紧暂停和 Adapter 状态                      | 权限操作回滚           |
 | INV-17 | 任一合法 `PositionPlan` 的 `targetVenue` 与 `marketRegime` 严格双射：`IDLE` ↔ `EXTREME_DEVIATION`、`UNISWAP_V2` ↔ `HIGH_DEVIATION`、`UNISWAP_V3_HIGH_FEE` ↔ `MEDIUM_DEVIATION`、`UNISWAP_V3_LOW_FEE` ↔ `LOW_DEVIATION` | 计划校验失败 |
+| INV-18 | 禁用 Adapter 不移除现有 Position 的计价与退出能力，但阻止 Deposit、迁入和同 Venue Recenter 增加其 liquidity | `AdapterDisabled()` |
 
 
 
@@ -1085,16 +1121,16 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | 测试层                 | 必测场景                                                                                                                                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Accounting 单元测试     | raw units、decimals、负 Tick、NAV、Bootstrap/Deposit shares 舍入、Idle、迁移损失、零值和溢出边界                                                                                                                                               |
-| Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足、Pool 绑定、报价方向、Short TWAP/TWAP 偏离                                                                                                                                                     |
+| Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足、Pool 绑定、`Q1/Q0` 双向报价、Vault/Pool Token 顺序、向上/向下取整、Short TWAP/TWAP 偏离                                                                                                                                                     |
 | Strategy 单元测试       | Oracle 不健康快照回滚且不生成计划、`planVersion == 0` 的首次完整分类、四种历史 regime 的进入/退出 Hysteresis、`lastExecutedPlan.marketRegime` 作为 `lastCommittedRegime` 参数传递、Venue/Regime 严格双射、候选版本、Range 对齐、越界与中心偏移 Recenter、稳定计划哈希                                                                                 |
 | V2 Adapter 测试       | 储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、部分退出、实际退出数量与余额变化、Token 顺序                                                                                                                                                         |
 | V3 Adapter 测试       | principal、tokens owed、fee growth 增量、领取后重读、`amount0Max/amount1Max` 与实际 `used0/used1`、Range、部分退出、实际退出数量与余额变化、旧 NFT 清理                                                                                                                               |
-| Swap 测试             | 固定 Router/Token 方法、方向、过量资产修复范围、minOut、deadline、回调和授权清理                                                                                                                                                                    |
-| Deposit/Redeem 集成测试 | 只转实际数量、暂停赎回、Oracle 异常赎回、Redeem 最小双资产输出、捐赠、单边/高 Idle、比例公平性                                                                                                                                                                                |
-| Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、Emergency Exit 与全部流通 shares 赎回后的 `lastExecutedPlan.marketRegime` 保留和版本递增、`expectedPlanHash`、`expectedDirection`、模拟 Swap 后评估、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
+| Swap 测试             | 固定 Router/Token 方法、方向、过量资产修复范围、方向报价与 BPS 滑点折算的两段向上取整、minOut、deadline、回调和授权清理                                                                                                                                                                    |
+| Deposit/Redeem 集成测试 | 只转实际数量、暂停赎回、Oracle 异常赎回、Redeem 最小双资产输出、捐赠、单边/高 Idle、比例公平性、当前 Active Adapter 禁用时 Deposit 在 Adapter 调用和 Token 转入前回滚、禁用后资产仍计价且 Redeem 成功                                                                                                                                                                                |
+| Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Emergency Exit 与全部流通 shares 赎回后的 `lastExecutedPlan.marketRegime` 保留和版本递增、`expectedPlanHash`、`expectedDirection`、模拟 Swap 后评估、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
 | Invariant/Fuzz      | 资产守恒、shares 公平性、单活 Position、费用不重复、任意调用者不能越权                                                                                                                                                                               |
 | Mainnet Fork        | 真实 canonical Pool TWAP、V2 Pair、V3 Position Manager、Router 和 Tick spacing                                                                                                                                                  |
-| 安全测试                | 重入、闪电贷 Spot 操纵、Sandwich、Adapter 恶意返回、Default Admin 单账户约束、两阶段延迟转移/取消/接受、延迟变更、根角色无隐式业务权限、业务角色授予/撤销、Guardian 只能收紧控制、初始化前治理入口、暂停和 Adapter 状态滥用                                                                                |
+| 安全测试                | 重入、闪电贷 Spot 操纵、Sandwich、Adapter 恶意返回、Default Admin 单账户约束、两阶段延迟转移/取消/接受、延迟变更、根角色无隐式业务权限、业务角色授予/撤销、Guardian 只能收紧控制、初始化前治理入口、暂停和 Adapter 状态滥用、禁用 Active Adapter 不修改资产位置/计划版本/历史计划/暂停 storage                                                                                |
 
 
 
