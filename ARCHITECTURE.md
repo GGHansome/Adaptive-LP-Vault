@@ -248,7 +248,6 @@ struct VaultConfig {
     address swapExecutor;
     uint256 minimumLockedShares;
     uint256 minimumInitialNav;
-    uint16 bootstrapRatioToleranceBps;
 }
 
 struct AccessControlConfig {
@@ -275,7 +274,6 @@ struct StrategyConfig {
     int24 narrowRangeHalfWidth;
     int24 wideRangeHalfWidth;
     uint16 minRecenterBps;
-    uint16 minDeployBps;
     uint16 maxHealthyIdleBps;
     uint16 maxSwapSlippageBps;
     uint16 maxMigrationLossBps;
@@ -408,13 +406,12 @@ struct AdapterConfig {
 | `swapExecutor`                                  | `address`      | `immutable` | 构造                                 | 固定 `ControlledSwapExecutor` 合约；部署后不可替换             |
 | `minimumLockedShares`                           | `uint256`      | `immutable` | 构造                                 | Bootstrap 时铸造给 Vault 自身，永久锁定                       |
 | `minimumInitialNav`                             | `uint256`      | `immutable` | 构造                                 | Bootstrap 最低 NAV；调用者不能覆盖                           |
-| `bootstrapRatioToleranceBps`                    | `uint16`       | `immutable` | 构造                                 | Bootstrap 比例容差；调用者不能覆盖                             |
 | `minRebalanceCooldown`                          | `uint32`       | `immutable` | 构造                                 | 部署时校验；部署后不可修改                                      |
 | `enterMediumBps/exitMediumBps`                  | `uint24`       | `immutable` | 构造                                 | 满足完整 Hysteresis 阈值关系；部署后不可修改                       |
 | `enterHighBps/exitHighBps`                      | `uint24`       | `immutable` | 构造                                 | 满足完整 Hysteresis 阈值关系；部署后不可修改                       |
 | `enterExtremeBps/exitExtremeBps`                | `uint24`       | `immutable` | 构造                                 | 满足完整 Hysteresis 阈值关系；部署后不可修改                       |
 | `narrowRangeHalfWidth/wideRangeHalfWidth`       | `int24`        | `immutable` | 构造                                 | `0 < narrow < wide`；部署后不可修改                        |
-| `minRecenterBps/minDeployBps/maxHealthyIdleBps` | `uint16`       | `immutable` | 构造                                 | 分别通过协议硬边界校验；部署后不可修改                                |
+| `minRecenterBps/maxHealthyIdleBps`                | `uint16`       | `immutable` | 构造                                 | `maxHealthyIdleBps <= BPS`；`minDeployBps` 由 `BPS - maxHealthyIdleBps` 派生储                                |
 | `maxSwapSlippageBps/maxMigrationLossBps`        | `uint16`       | `immutable` | 构造                                 | 不超过协议硬上限；部署后不可修改                                   |
 | `initialized`                                   | `bool`         | `storage`   | Bootstrap 成功                       | 只能从 false 到 true                                   |
 | `activeVenue`                                   | `VenueType`    | `storage`   | Bootstrap/Rebalance/Emergency Exit | 与有效 Position 一致                                    |
@@ -498,22 +495,28 @@ Swap 输出接收方固定为 `vault`。Router allowance 只在执行期间按�
 
 ### 5.7 状态转换约束
 
+Vault 的生命周期、资产位置和运行时控制彼此独立。
+
+生命周期仅由 `initialized` 表达：
+
 ```mermaid
 stateDiagram-v2
     [*] --> UNINITIALIZED
-    UNINITIALIZED --> IDLE: bootstrap() with EXTREME plan
-    UNINITIALIZED --> ACTIVE: bootstrap() with healthy plan and no-swap assessment
+    UNINITIALIZED --> OPEN: bootstrap() succeeds
+```
+
+已初始化 Vault 的资产位置仍由 `activeVenue` 表达：
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE: bootstrap() with EXTREME plan
+    [*] --> ACTIVE: bootstrap() with healthy plan and no-swap assessment
     ACTIVE --> ACTIVE: recenter or migrate
     ACTIVE --> IDLE: extreme plan or emergency exit
     IDLE --> ACTIVE: valid non-IDLE plan
-    ACTIVE --> IDLE: all circulating shares redeemed
-    IDLE --> IDLE: redemption or donation
 ```
 
-
-
-暂停开关、Adapter 进入状态、Oracle 健康状态、当前资产位置和 `lastExecutedPlan.marketRegime` 表示的 Hysteresis 历史彼此独立。禁用当前 Active Adapter 不触发资产位置转换；任何实际状态转换必须在同一交易内完成相应资产和 Position 校验。
-
+`PAUSED` 不是生命周期或资产位置。暂停开关、Adapter 进入状态、Oracle 健康状态、当前资产位置和 `lastExecutedPlan.marketRegime` 表示的 Hysteresis 历史彼此独立；单独改变这些运行时控制不得触发生命周期或资产位置转换。
 ## 6. 接口契约
 
 
@@ -726,7 +729,6 @@ error Paused(PauseFlag flag);
 error OracleUnhealthy();
 error ObservationInsufficient();
 error InvalidAssetPair();
-error InvalidBootstrapRatio();
 error MinimumNavNotMet();
 error ZeroAmount();
 error InvalidDepositRatio();
@@ -871,7 +873,7 @@ event EmergencyExit(address indexed caller, VenueType previousVenue, uint256 amo
 - `DefaultAdminTransferScheduled`、`DefaultAdminTransferCanceled`、`DefaultAdminDelayChangeScheduled` 和 `DefaultAdminDelayChangeCanceled` 采用 `IAccessControlDefaultAdminRules` 标准语义；
 - `PauseStateChanged` 只在 `setPauseState` 或 Emergency Exit 实际改变暂停 storage 时发出，自动门控和无状态变化调用不得发出；
 - `AdapterConfigured` 与 `AdapterStatusChanged` 由 Vault 地址上的继承式 Registry 入口发出；
-- Emergency Exit 不发 Swap 事件，因为该路径禁止 Swap。
+- Emergency Exit 不发 Swap 事件，因为该路径禁止 Swap；只有调用前 `activeVenue != IDLE` 且全部 Position 成功清空时发出 `EmergencyExit`，调用前已为 IDLE 时不发出该事件；
 
 ## 9. 关键调用时序
 
@@ -946,8 +948,7 @@ sequenceDiagram
     Vault->>Adapter: withdraw(shares, totalShares)
     Adapter-->>Vault: token0/token1
     Vault->>Vault: add proportional Idle and validate final outputs against minAmount0Out/minAmount1Out
-    Vault->>Vault: burn shares and transfer assets
-    Vault->>Vault: if all circulating shares are redeemed, enter IDLE and increment planVersion without changing lastExecutedPlan
+    Vault->>Vault: burn shares and transfer assets; retain the locked-share portion of the current Position or Idle assets
     Vault-->>User: Redeem
 ```
 
@@ -1023,12 +1024,19 @@ sequenceDiagram
     participant Adapter
 
     Guardian->>Vault: emergencyExitToIdle()
-    Vault->>Adapter: syncFees()
-    Vault->>Adapter: withdrawAll()
-    Adapter-->>Vault: token0/token1
-    Vault->>Vault: verify position liquidity == 0
-    Vault->>Vault: activeVenue = IDLE; increment planVersion; preserve lastExecutedPlan; set all pause flags true
-    Vault-->>Guardian: EmergencyExit and PauseStateChanged if pause storage changed
+    alt activeVenue != IDLE
+        Vault->>Adapter: syncFees()
+        Vault->>Adapter: withdrawAll()
+        Adapter-->>Vault: token0/token1
+        Vault->>Vault: verify conservation and position liquidity == 0
+        Vault->>Vault: activeVenue = IDLE; increment planVersion; preserve lastExecutedPlan
+        Vault->>Vault: set all pause flags true
+        Vault-->>Guardian: EmergencyExit and PauseStateChanged if pause storage changed
+    else activeVenue == IDLE
+        Vault->>Vault: skip Adapter; preserve position, venue, version and history
+        Vault->>Vault: set all pause flags true
+        Vault-->>Guardian: PauseStateChanged only if pause storage changed
+    end
 ```
 
 ## 10. 关键实现细节
@@ -1125,12 +1133,12 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | Strategy 单元测试       | Oracle 不健康快照回滚且不生成计划、`planVersion == 0` 的首次完整分类、四种历史 regime 的进入/退出 Hysteresis、`lastExecutedPlan.marketRegime` 作为 `lastCommittedRegime` 参数传递、Venue/Regime 严格双射、候选版本、Range 对齐、越界与中心偏移 Recenter、稳定计划哈希                                                                                 |
 | V2 Adapter 测试       | 储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、部分退出、实际退出数量与余额变化、Token 顺序                                                                                                                                                         |
 | V3 Adapter 测试       | principal、tokens owed、fee growth 增量、领取后重读、`amount0Max/amount1Max` 与实际 `used0/used1`、Range、部分退出、实际退出数量与余额变化、旧 NFT 清理                                                                                                                               |
-| Swap 测试             | 固定 Router/Token 方法、方向、过量资产修复范围、方向报价与 BPS 滑点折算的两段向上取整、minOut、deadline、回调和授权清理                                                                                                                                                                    |
+| Swap 测试             | 固定 Router/Token 方法、方向、过量资产修复范围、方向报价与 BPS 滑点折算的两段向上取整、派生部署阈值、minOut、deadline、回调和授权清理                                                                                                                                                                    |
 | Deposit/Redeem 集成测试 | 只转实际数量、暂停赎回、Oracle 异常赎回、Redeem 最小双资产输出、捐赠、单边/高 Idle、比例公平性、当前 Active Adapter 禁用时 Deposit 在 Adapter 调用和 Token 转入前回滚、禁用后资产仍计价且 Redeem 成功                                                                                                                                                                                |
-| Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Emergency Exit 与全部流通 shares 赎回后的 `lastExecutedPlan.marketRegime` 保留和版本递增、`expectedPlanHash`、`expectedDirection`、模拟 Swap 后评估、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
+| Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Emergency Exit 的 ACTIVE 撤仓分支、IDLE 幂等分支、全部流通 shares 赎回保留锁定份额对应资产、`activeVenue`/`planVersion`/`lastExecutedPlan` 不因 Redeem 改变、`expectedPlanHash`、`expectedDirection`、模拟 Swap 后评估、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
 | Invariant/Fuzz      | 资产守恒、shares 公平性、单活 Position、费用不重复、任意调用者不能越权                                                                                                                                                                               |
 | Mainnet Fork        | 真实 canonical Pool TWAP、V2 Pair、V3 Position Manager、Router 和 Tick spacing                                                                                                                                                  |
-| 安全测试                | 重入、闪电贷 Spot 操纵、Sandwich、Adapter 恶意返回、Default Admin 单账户约束、两阶段延迟转移/取消/接受、延迟变更、根角色无隐式业务权限、业务角色授予/撤销、Guardian 只能收紧控制、初始化前治理入口、暂停和 Adapter 状态滥用、禁用 Active Adapter 不修改资产位置/计划版本/历史计划/暂停 storage                                                                                |
+| 安全测试                | 重入、闪电贷 Spot 操纵、Sandwich、Adapter 恶意返回、Default Admin 单账户约束、两阶段延迟转移/取消/接受、延迟变更、根角色无隐式业务权限、业务角色授予/撤销、Guardian 只能收紧控制、初始化前治理入口、暂停和 Adapter 状态滥用、暂停位与 Adapter `enabled` 作为独立运行时控制的组合、禁用 Active Adapter 不修改资产位置/计划版本/历史计划/暂停 storage                                                                                |
 
 
 

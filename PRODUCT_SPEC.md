@@ -91,13 +91,13 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | Claimable Fees             | 已归属于 Position 但尚未转入 Vault 的 token0/token1 手续费                             | V2 已包含在储备权益；V3 fee growth / tokens owed | 只可在一个计价路径中出现                              |
 | Total Assets               | Idle 加 Active Adapter 对 Vault 的完整资产报告                                     | `T0 = I0 + A0`、`T1 = I1 + A1`           | 不得额外扫描未知 Adapter 或重复添加费用                  |
 | NAV                        | 按 canonical TWAP 将全部资产折算为 token1 的价值                                      | `NAV1 = T1 + Q1(T0; twapTick)`          | 仅用于定价和风控，不代表可立即换成 token1                  |
-| TWAP                       | canonical V3 Pool 在 `twapWindowSeconds` 内的 arithmetic mean tick 对应的几何平均价格 | `observe([twapWindowSeconds, 0])`       | 用于 NAV、目标 Range 和偏离基准，不是现价或统计波动率          |
-| Short TWAP Tick            | canonical V3 Pool 在 `shortTwapWindowSeconds` 内的 arithmetic mean tick      | `observe([shortTwapWindowSeconds, 0])`  | 只用于偏离信号，不单独作为 NAV                         |
+| TWAP                       | canonical V3 Pool 在 `twapWindowSeconds` 内的 arithmetic mean tick 对应的几何平均价格 | 一次 `observe([twapWindowSeconds, shortTwapWindowSeconds, 0])`，取 `tickCumulatives[2] - tickCumulatives[0]` | 用于 NAV、目标 Range 和偏离基准，不是现价或统计波动率          |
+| Short TWAP Tick            | canonical V3 Pool 在 `shortTwapWindowSeconds` 内的 arithmetic mean tick      | 同一次 `observe([twapWindowSeconds, shortTwapWindowSeconds, 0])`，取 `tickCumulatives[2] - tickCumulatives[1]` | 只用于偏离信号，不单独作为 NAV                         |
 | Spot Tick                  | canonical Pool 当前 `slot0().tick`                                          | 同一 Oracle 读取                            | 用于 Range 越界和安全检查，不参与 `deviationBps` 或 NAV |
 | DEVIATION / `deviationBps` | 短周期 TWAP 价格相对 TWAP 价格的绝对偏离，单位为基点                                          | Oracle 内部计算                             | 不接受外部输入；不得命名为 volatility                  |
 | Oracle Healthy             | Oracle 地址、资产顺序、观察历史、窗口、Tick 和报价均满足可用性检查                                   | Oracle 健康检查                             | 与 `EXTREME_DEVIATION` 独立；极端偏离可以仍然健康       |
 | Market Regime              | Strategy 根据健康 Oracle 快照和滞后规则输出的策略状态                                       | LOW/MEDIUM/HIGH/EXTREME                 | 不是收益评级或风险免责                               |
-| Last Executed Regime / `lastExecutedPlan.marketRegime` | 最近一次成功执行的健康 Strategy 计划所提交的 Regime，作为 Hysteresis 历史 | Vault 持久化的 `lastExecutedPlan` | 不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导；Emergency Exit、全部流通 shares 赎回和 Oracle 不健康不覆盖 |
+| Last Executed Regime / `lastExecutedPlan.marketRegime` | 最近一次成功执行的健康 Strategy 计划所提交的 Regime，作为 Hysteresis 历史 | Vault 持久化的 `lastExecutedPlan` | 不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导；Emergency Exit、Redeem 和 Oracle 不健康不覆盖 |
 | Plan Version / `planVersion` | Position 结构状态的单调版本；候选计划使用下一版本 | Vault 持久化状态 | `0` 仅表示首次计划尚未成功；成功结构变化后递增 |
 | Position Plan              | 目标 Venue、Market Regime、V3 Range 和计划版本的结构目标                                  | Strategy 确定性生成                          | Rebalance 调用者只能提交期望哈希和 deadline，不能改写内容    |
 | Last Executed Plan / `lastExecutedPlan` | 最近一次成功执行的完整 Strategy 计划 | Vault 持久化状态 | 非策略 Position 变化后可与当前资产位置不同；其 `marketRegime` 是 Hysteresis 历史 |
@@ -147,18 +147,22 @@ flowchart LR
 
 
 
-### 5.1 生命周期状态
+### 5.1 生命周期与资产位置
 
+Vault 的状态由生命周期、资产位置和运行时控制三个独立维度表达。
 
-| 状态              | 进入条件                                 | 允许操作                               | 退出条件                               |
-| --------------- | ------------------------------------ | ---------------------------------- | ---------------------------------- |
-| `UNINITIALIZED` | 合约部署后                                | Manager Bootstrap、只读查询               | Bootstrap 成功后只能进入 `IDLE` 或有效 Venue |
-| `IDLE`          | Bootstrap 生成 EXTREME 计划、运行中极端偏离或紧急退出 | 赎回、只读查询、有效无 Swap/Swap Rebalance 建仓 | Strategy 生成健康非 IDLE 计划并成功建仓        |
-| `ACTIVE`        | 存在唯一有效 Active Position               | 赎回、健康存款、符合条件的 Rebalance            | 迁移、紧急退出或 Position 失效               |
-| `PAUSED`        | 任一独立暂停开关打开                           | 仍可赎回；依暂停类型关闭入口                     | 对应暂停开关关闭且健康门控恢复                    |
+**生命周期阶段**仅由 `initialized` 派生：
 
+| 阶段 | 唯一判定 | 进入条件 | 退出条件 |
+| --- | --- | --- | --- |
+| `UNINITIALIZED` | `initialized == false` | 合约部署后 | Bootstrap 成功后进入 `OPEN` |
+| `OPEN` | `initialized == true` | Bootstrap 成功后 | 无；`initialized` 只能从 false 变为 true |
 
-`PAUSED` 不是资产位置。合约必须独立存储 `activeVenue`、`depositPaused`、`plainRebalancePaused` 和 `swapRebalancePaused`。
+**资产位置**由 `activeVenue` 和 Position 不变量表达：
+
+- `activeVenue == IDLE` 表示所有 Adapter 的有效 liquidity 为零；
+- `activeVenue != IDLE` 表示只有当前 Venue 对应 Adapter 可以持有唯一有效 Position；
+- `IDLE` 和 `ACTIVE` 均可与 `OPEN` 组合。
 
 ### 5.2 Bootstrap
 
@@ -171,8 +175,7 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 - 上述绑定校验失败时，整笔交易回滚；
 - Oracle Healthy，观察窗口有足够历史；
 - 初始 token0 和 token1 均大于零；
-- 初始 `NAV1` 不低于 `minimumInitialNav`；
-- 初始资产比例在 `bootstrapRatioToleranceBps` 内。
+- 初始 `NAV1` 不低于 `minimumInitialNav`。
 
 执行规则：
 
@@ -188,8 +191,6 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 10. 验证部署率、资产守恒和 Position 唯一性。
 11. 将初始计划写入 `lastExecutedPlan` ，并将 `planVersion` 写为 `1`。
 12. 将 `initialized` 置为 `true`，并发出 `PositionPlanCommitted` 和 `VaultBootstrapped` 事件。
-
-Vault 不提供锁定 shares 的转出或救援机制。
 
 Bootstrap 完成后的遵从规则如下：
 
@@ -255,13 +256,12 @@ $$
 - 在 Vault 层验证最终 `amount0Out >= minAmount0Out` 且 `amount1Out >= minAmount1Out`；
 - 销毁 shares 后转账给 `receiver`。
 
-如果除 `minimumLockedShares` 外的流通 shares 全部赎回，Vault 按以下规则收尾：
+如果除 `minimumLockedShares` 外的流通 shares 全部赎回，Vault 不发生生命周期或资产位置转换：
 
-- 退出所有 LP Position 并进入 IDLE；
-- 将 `planVersion` 递增 1，因为完整退出属于 Position 结构变化；具体规则见第 9.2 节。
-- 保持 `lastExecutedPlan` 不变，使其 `marketRegime` 继续作为 Hysteresis 历史；
-- 锁定 shares、`dustTolerance0/1` 范围内的舍入余额和捐赠余额继续遵循既定会计；
-- 不得重新 Bootstrap。
+- 仍按 `x/S` 从当前 Active Adapter 部分退出，保留 `minimumLockedShares` 对应的剩余 Position；如果当前资产位置为 IDLE，则保持 IDLE；
+- `activeVenue`、`planVersion` 和 `lastExecutedPlan` 保持不变；
+- 按既定 Position 一致性和资产守恒规则校验剩余 Position；
+- 后续 Deposit、Redeem 和 Rebalance 继续按照已初始化 Vault 的既定规则执行。
 
 ### 5.5 Donation
 
@@ -369,6 +369,8 @@ $$
 - 必须满足 `grossInitialShares > minimumLockedShares`；
 - 必须满足 `receiverShares > 0`；
 - 该公式在首次建仓前计算，无论初始计划进入 ACTIVE 还是 IDLE 都保持不变。
+
+`minimumLockedShares` 在 Bootstrap 时铸造给 Vault 自身，作为永久锚定资本；`totalSupply()` 始终不得低于该数量。
 
 **后续 Deposit**
 
@@ -698,7 +700,6 @@ Vault 提供 `previewRebalance()` 策略只读接口。规则如下：
 - V3 Recenter；
 - 策略进入或退出 IDLE；
 - Emergency Exit；
-- activeVenue 非 `IDLE` 状态下全部流通 shares 赎回导致的完整 Position 退出。
 
 以下操作不得更新 `planVersion`：
 
@@ -789,9 +790,10 @@ $$
 
 生成部署评估规则如下:
 
-- MarketRegime 为 LOW、MEDIUM 或 HIGH 时，如果 `initialDeployBps < minDeployBps`，标记 `requiresSwap = true`；
-- `initialDeployBps >= minDeployBps`，标记 `requiresSwap = false`；
-- `EXTREME_DEVIATION` 以 IDLE 为目标，返回 `requiresSwap = false` 和 `direction = NONE`，不用满足 `initialDeployBps >= minDeployBps`；
+- `minDeployBps` 由唯一配置的 `maxHealthyIdleBps` 派生：`minDeployBps = BPS - maxHealthyIdleBps`；
+- 对 MarketRegime 为 LOW、MEDIUM 或 HIGH 的非 IDLE 计划，如果 `initialDeployBps < minDeployBps`，标记 `requiresSwap = true`；
+- `initialDeployBps >= minDeployBps` 时，标记 `requiresSwap = false`；
+- `EXTREME_DEVIATION` 以 IDLE 为目标，返回 `requiresSwap = false` 和 `direction = NONE`，不受部署率边界约束；
 - 非 IDLE 计划的 `direction` 由 `used0/used1` 与未使用余额确定，完整规则见 [SWAP_REBALANE_MATH.md](SWAP_REBALANE_MATH.md)。
 
 按以上规则返回包含 `requiresSwap`、`direction`、`used0`、`used1` 的 `DeploymentAssessment`：
@@ -860,7 +862,7 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 带 Swap Rebalance 必须在一笔交易内原子完成：
 
 1. 生成当前候选 `PositionPlan`；
-2. 检查目标 Adapter 已启用，再对当前 `T0/T1` 执行首次部署评估，校验 `initialDeployBps < minDeployBps`、`requiresSwap == true` 以及 `direction == expectedDirection`；
+2. 检查目标 Adapter 已启用，再对当前 `T0/T1` 执行首次部署评估，使用派生值 `minDeployBps = BPS - maxHealthyIdleBps` 校验 `initialDeployBps < minDeployBps`、`requiresSwap == true` 以及 `direction == expectedDirection`；
 3. 同步费用并捕获迁移前 TWAP 和 NAV，退出旧 Position 后重新读取实际余额；
 4. 检查 `amountIn`，根据最差 `protocolMinOut` 模拟 Swap 后余额并计算 `simulatedDeployBps(x)`，验证不会换过头且满足部署率和 Idle 限制，再构造临时 `SwapPlan`；
 5. 调用 `ControlledSwapExecutor.executeSwap()` 执行固定 exact-input Swap；
@@ -871,7 +873,8 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 Swap 和目标 Adapter 建仓完成后，Vault 必须重新读取实际状态并验证：
 
 - 实际 Swap 输出和 Executor 的余额增量满足 `minAmountOut` 最低输出要求；
-- `deployBps >= minDeployBps`，且 `idleBps <= maxHealthyIdleBps`；
+- `deployBps >= minDeployBps`，其中 `minDeployBps = BPS - maxHealthyIdleBps`；
+- `idleBps <= maxHealthyIdleBps`；
 - 完整迁移后的 NAV 损失不超过 `maxMigrationLossBps`；
 - 资产位置和余额守恒成立，允许的舍入差异仅限 `dustTolerance0/1`；
 
@@ -879,14 +882,22 @@ Swap 方向、`previewDeposit`、 `amountIn`、`protocolMinOut`、`keeperMinAmou
 
 ### 9.5 Emergency Exit to IDLE
 
-Guardian/Manager 可在不依赖价格估值的情况下触发紧急退出 `emergencyExitToIdle()`：
+Guardian/Manager 可在不依赖价格估值的情况下触发幂等紧急退出 `emergencyExitToIdle()`。
 
-1. 调用 `syncFees()` 结晶并领取全部可领取手续费；
-2. 从 Active Adapter 移除全部 LP liquidity；
-3. 验证资产守恒，旧 Position liquidity 为零；
-4. 设置 `activeVenue = IDLE`；
-5. 将 `planVersion` 递增 1，并保持 `lastExecutedPlan` 不变，使其 `marketRegime` 继续作为 Hysteresis 历史；
-6. 将 `depositPaused`、`plainRebalancePaused` 和 `swapRebalancePaused` 全部设为 true， 发出 `PauseStateChanged`事件；
+当调用前 `activeVenue != IDLE` 时：
+
+1. 调用当前 Active Adapter 的 `syncFees()` 并领取全部可领取手续费；
+2. 移除全部 LP liquidity，并验证资产守恒和旧 Position liquidity 为零；
+3. 设置 `activeVenue = IDLE`；
+4. 将 `planVersion` 递增 1，并保持 `lastExecutedPlan` 不变，使其 `marketRegime` 继续作为 Hysteresis 历史。
+
+当调用前 `activeVenue == IDLE` 时：
+
+- 不调用任何 Adapter；
+- 不修改 `activeVenue`、`planVersion`、`lastExecutedPlan` 或 `lastSuccessfulRebalanceAt`；
+- 不发出 `EmergencyExit` 或资产位置事件。
+
+两个分支最后都必须把 `depositPaused`、`plainRebalancePaused` 和 `swapRebalancePaused` 设为 true。只有暂停 storage 实际变化时才发出 `PauseStateChanged`；只有调用前 `activeVenue != IDLE` 且全部 Position 成功清空时才发出 `EmergencyExit`。如果调用前已经 IDLE 且三个暂停位均为 true，调用成功但不修改状态，也不发出事件。
 
 ## 10. 暂停与权限控制
 
@@ -915,7 +926,7 @@ Vault 直接继承 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules`：
 
 - Oracle 不健康、IDLE、完全单边、Idle 超限、Adapter 禁用或异常、Position 不一致时，只在对应入口实时回滚；
 - 自动门控不写入暂停 storage，也不发出 `PauseStateChanged`；
-- Emergency Exit 成功后，必须显式把三个暂停位全部设为 true；
+- Emergency Exit 成功后，必须显式把三个暂停位全部设为 true；ACTIVE 与 IDLE 分支的 Adapter 调用和事件行为遵循第 9.5 节；
 - 只有暂停 storage 实际变化时，才额外发出 `PauseStateChanged`；
 - 后续恢复必须由 Manager 显式执行。
 
@@ -938,7 +949,7 @@ Vault 直接继承 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules`：
 | `setPauseState` | Guardian/Manager | 仅初始化后 | 原子写入三个暂停位并发出 `PauseStateChanged`；只有 Manager 可以解除暂停 |
 | `setAdapterEnabled(venue, false)` | Guardian/Manager | 仅初始化后 | 禁止在该 Adapter 建立或增加 liquidity，并发出 `AdapterStatusChanged`；现有 Position 仍计价且可读取、Redeem 和退出，不改变 Position、计划版本或暂停状态 |
 | `setAdapterEnabled(venue, true)` | Manager | 仅初始化后 | 恢复在该 Adapter 建立或增加 liquidity，并发出 `AdapterStatusChanged` |
-| `emergencyExitToIdle` | Guardian/Manager | 仅初始化后 | 不依赖 Oracle 健康且不执行 Swap；清空 Position、进入 IDLE，并将三个暂停位设为 true |
+| `emergencyExitToIdle` | Guardian/Manager | 仅初始化后 | 不依赖 Oracle 健康且不执行 Swap；非 IDLE 时清空 Position、进入 IDLE 并递增版本，已在 IDLE 时不调用 Adapter；两个分支均将三个暂停位设为 true |
 | `previewRebalance` | 任意地址 | 仅初始化后 | 返回基于当前状态的只读候选计划和部署评估；非 IDLE 目标 Adapter 禁用时以 `AdapterDisabled()` 回滚，不修改任何状态 |
 
 ### 10.4 依赖封存
@@ -1014,7 +1025,7 @@ Bootstrap 成功后不可替换：
 
 - 固定 token0/token1、canonical Oracle、Adapter 和 shares 语义已在链上验证；
 - Bootstrap 只能成功一次；
-- Bootstrap 的最低 NAV、比例、锁定 shares 和回滚语义完整。
+- Bootstrap 的最低 NAV、最低部署率、锁定 shares 和回滚语义完整。
 
 治理与权限：
 
@@ -1049,7 +1060,7 @@ Rebalance、退出与接口：
 - 普通 Rebalance 不含 Swap；
 - Preview、普通 Rebalance 和 Swap Rebalance 在非 IDLE 目标 Adapter 禁用时均以 `AdapterDisabled()` 回滚，但允许从已禁用的旧 Adapter 迁出；
 - Swap Rebalance 仅限 Keeper/Manager，且全部后置条件原子校验；
-- 紧急退出不执行 Swap，并能在 Oracle 不健康时清空 Active Position、进入 IDLE；
+- 紧急退出不执行 Swap，并能在 Oracle 不健康时清空 Active Position、进入 IDLE；已在 IDLE 时调用不访问 Adapter、不改变 Position 版本或历史计划，重复调用只在需要时收紧暂停位；
 - 关键事件、错误和状态查询满足 [ARCHITECTURE.md](ARCHITECTURE.md) 的接口契约。
 
 

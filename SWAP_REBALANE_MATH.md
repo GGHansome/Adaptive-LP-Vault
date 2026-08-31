@@ -72,6 +72,7 @@ $$
 
 `DeploymentAssessment` 按以下规则生成：
 
+- `minDeployBps` 是派生值，定义为 `BPS - maxHealthyIdleBps`，不作为独立配置或独立事实来源；
 - `deployBps < minDeployBps` 时，`requiresSwap = true`；否则为 `false`；
 - `unused0 > dustTolerance0` 且 `unused1 <= dustTolerance1` 时，`direction = ZERO_FOR_ONE`；
 - `unused1 > dustTolerance1` 且 `unused0 <= dustTolerance0` 时，`direction = ONE_FOR_ZERO`；
@@ -167,7 +168,7 @@ $$
 IdleBps(x) \le maxHealthyIdleBps
 $$
 
-带 Swap Rebalance 的首次评估使用 `initialDeployBps < minDeployBps` 识别 Swap 必要性；对 `amountIn` 的模拟校验使用 `simulatedDeployBps(x) >= minDeployBps` 判断最差输出下能否建立目标 Position。
+带 Swap Rebalance 的首次评估使用 `initialDeployBps < minDeployBps` 识别 Swap 必要性；对 `amountIn` 的模拟校验使用同一派生阈值 `simulatedDeployBps(x) \ge minDeployBps` 判断最差输出下能否建立目标 Position。
 
 同时，`simulatedAssessment.requiresSwap` 必须为 `false`，其 `direction` 不得与首次部署评估方向相反。
 

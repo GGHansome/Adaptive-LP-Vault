@@ -19,6 +19,7 @@ minimumInitialNav 与 bootstrapRatioToleranceBps 无配置字段承载
 - `minimumInitialNav` 与 `bootstrapRatioToleranceBps` 纳入 `VaultConfig`，不再单独定义 `BootstrapConfig`；`VaultConfig` 只作为部署构造输入和内存传参结构，不作为整体状态变量写入普通 storage。
 - 两个字段在部署前完成校准，并在 Vault 构造时执行协议硬边界和字段关系校验；随后分别写入 Vault 的 Solidity `immutable` 状态变量。它们只在唯一一次 `bootstrap()` 中读取，调用者不能覆盖。
 - 删除 `BootstrapConfig`、`updateBootstrapConfig`、`bootstrapConfig()` 查询及对应的 `ParameterUpdated` 语义；这两个字段不是治理参数，部署后永久不可修改。如需采用不同值，必须部署新的 Vault。
+- `bootstrapRatioToleranceBps` 后续按问题 17 删除；上述配置和生命周期结论最终仅适用于 `minimumInitialNav`。
 
 ## 问题 3
 Adapter Registry 封存时序矛盾：Bootstrap 前还是 Bootstrap 后
@@ -43,7 +44,7 @@ Hysteresis 状态机的转移规则以 当前状态 为前提，但该状态既�
 - `IMarketRegimeStrategy.getPlan` 接收 `MarketRegime lastCommittedRegime` 参数；Vault 在 Preview、普通 Rebalance 和带 Swap Rebalance 中将 `lastExecutedPlan.marketRegime` 作为该参数传入。
 - `planVersion == 0` 是无历史计划的唯一标志。首次生成计划时 Strategy 忽略 `lastCommittedRegime` 参数的默认枚举值，按完整进入阈值直接分类；`planVersion > 0` 时使用传入的 `lastExecutedPlan.marketRegime` 执行 Hysteresis。
 - 候选 `PositionPlan.version` 固定为当前 `planVersion + 1`。Bootstrap 或 Rebalance 成功执行策略计划后，将 `lastExecutedPlan` 写为执行计划，并将 `planVersion` 写为该计划的 `version`。
-- Emergency Exit 与全部流通 shares 赎回导致的完整 Position 退出属于 Position 结构变化，因此 `planVersion` 递增 1，但 `lastExecutedPlan` 保持不变；Oracle 不健康、Preview 和失败交易也不得覆盖该计划及其 `marketRegime`。
+- Emergency Exit 在非 IDLE 时清空 Position 并递增 `planVersion`，但在 IDLE 时不改变 Position；`lastExecutedPlan` 始终保持不变。Oracle 不健康、Preview 和失败交易也不得覆盖该计划及其 `marketRegime`。
 - 任一合法 `PositionPlan` 的 `targetVenue` 与 `marketRegime` 严格双射：`IDLE` ↔ `EXTREME_DEVIATION`、`UNISWAP_V2` ↔ `HIGH_DEVIATION`、`UNISWAP_V3_HIGH_FEE` ↔ `MEDIUM_DEVIATION`、`UNISWAP_V3_LOW_FEE` ↔ `LOW_DEVIATION`；该约束不要求非策略退出后的当前 `activeVenue` 与历史计划目标一致。
 - Deposit、未清空 Position 的部分 Redeem、费用同步、Donation、暂停和 Adapter `enabled` 变化不属于 Position 结构变化，不递增 `planVersion`。
 
@@ -120,6 +121,7 @@ deployBps 同名指标在两处使用不同分母 NAV_1 vs NAV_after,sim ，分�
 - 首次部署评估结果命名为 `initialDeployBps`，输入为 `T0/T1`，用于生成 `requiresSwap` 和 `direction`。
 - 最差 Swap 输出模拟结果命名为 `simulatedDeployBps(x)`，输入为 `H0(x)/H1(x)`，用于校验 Keeper 提交的 `amountIn`。
 - 两者复用 `_assessDeployment` 的同一部署率公式，并在产品流程、数学公式和架构时序中分别标明阶段，满足`initialDeployBps < minDeployBps`和`simulatedDeployBps(x) >= minDeployBps`。
+- 后续裁定：仅保留 `maxHealthyIdleBps` 作为配置；`minDeployBps` 不再进入 `StrategyConfig` 或 Vault storage，始终由 `BPS - maxHealthyIdleBps` 派生。
 
 ## 问题 12
 "Active Position 有效"在 Adapter 被禁用时的判定未定义
@@ -135,6 +137,12 @@ deployBps 同名指标在两处使用不同分母 NAV_1 vs NAV_after,sim ，分�
 
 ## 问题 13
 Guardian 在 IDLE 状态调用紧急退出 回滚则 Guardian 无法区分 失败因已安全 与 失败因异常 ；成功则发出 EmergencyExit 事件但无任何状态变化 。锁定 shares 全部赎回后的不可重启 IDLE 壳同理。
+
+修改：
+- `emergencyExitToIdle()` 仅在调用前 `activeVenue != IDLE` 时同步费用、完整撤仓、递增一次 `planVersion` 并发出 `EmergencyExit`；已在 IDLE 时跳过 Adapter，不改变 `activeVenue`、`planVersion`、`lastExecutedPlan` 或 `lastSuccessfulRebalanceAt`，也不发出退出或资产位置事件。
+- 两个分支都将三个暂停位设为 true；仅暂停 storage 实际变化时发出 `PauseStateChanged`。
+- 全部流通 shares 赎回不触发生命周期或资产位置转换；Redeem 仍按销毁前 `x/S` 部分退出 Position，保留 `minimumLockedShares` 对应的 Position 或 Idle 资产，`activeVenue`、`planVersion` 和 `lastExecutedPlan` 不变。
+- 产品验收与架构测试覆盖 ACTIVE/IDLE 两种 Emergency Exit 分支、重复调用、事件和版本不变，以及全部流通 shares 赎回后的锚定资产保留行为。
 
 ## 问题 14
 previewRebalance() 边界行为未定义 与执行入口相同路径 在异常状态下意味着回滚，但你要考虑到前端调用方需要区分 不可执行原因 ；PositionPlan 结构含 MarketRegime 枚举值 ORACLE_UNHEALTHY，这里暗示可以返回该状态的计划而非回滚 两种设计并存于文档的暗示中，没有进行裁定。未初始化 Vault 的 preview（无仓位无配置）同样未定义。
@@ -172,6 +180,13 @@ ADMIN_ROLE/KEEPER_ROLE/GUARDIAN_ROLE 的标识与是否采用 OZ AccessControl �
 要求能被目标仓位吸收（可能很严，V3 窄区间比例倾斜）；
 要求价值对半。
 
+> 原因：`bootstrapRatioToleranceBps` 与现有部署率检查重复，并且没有唯一、独立的比例语义。
+
+修改：
+- 删除 `bootstrapRatioToleranceBps` 的配置字段、immutable 存储与 Bootstrap 前置条件，并删除 `InvalidBootstrapRatio()`。
+- LOW、MEDIUM 和 HIGH 继续以 `initialDeployBps >= minDeployBps` 作为唯一 Bootstrap 部署率要求，不满足时以 `SwapRequired()` 回滚。
+- `EXTREME_DEVIATION` 进入 IDLE，不执行比例或部署率检查；仍要求初始 token0/token1 均大于零且 `NAV1 >= minimumInitialNav`。
+
 ## 问题 18
 Bootstrap 前的治理状态未定义 谁可暂停未初始化 Vault；bootstrap 遇 depositPaused 的行为
 
@@ -181,9 +196,19 @@ Bootstrap 前的治理状态未定义 谁可暂停未初始化 Vault；bootstrap
 observe() 调用形状术语表与规范正文不一致
 你的术语表描述为两次独立二元素 observe，规范正文定义为单次三元素调用。数学上等价 observe 纯读 ，但调用形状是接口契约的一部分 gas、错误路径、secondsAgos 数组构造 ，验收清单  明确以三元素形状为测试对象。
 
+修改：
+- 统一以单次 `observe([twapWindowSeconds, shortTwapWindowSeconds, 0])` 作为 canonical V3 Pool 的调用契约。
+- 更新 `PRODUCT_SPEC.md` 术语表：TWAP 使用 `tickCumulatives[2] - tickCumulatives[0]`，Short TWAP 使用 `tickCumulatives[2] - tickCumulatives[1]`；规范正文、架构正文和验收清单保持一致。
+
 ## 问题 20
 PAUSED 作为伪状态混入生命周期状态表，与自身声明矛盾
 你在同一节内先用状态表把 PAUSED 表述为与 IDLE/ACTIVE 并列的生命周期状态 含进入/退出条件 ，两行后又声明它不是状态而是独立维度。ARCH 状态图与后一种读法一致。表内 "PAUSED 的退出条件" 健康门控恢复 还引入了"自动解除暂停"的暗示，与 §10.1 暂停只能由角色操作 或入口检查式自动门控 的语义混淆。
+
+修改：
+- 状态模型拆为三个独立维度：生命周期仅含 `UNINITIALIZED` 和已初始化的 `OPEN`；资产位置由 `activeVenue` 表达为 `IDLE` 或 `ACTIVE`；运行时控制包含三个暂停位和每个 Adapter 的 `enabled`。
+- 删除 `PAUSED` 生命周期状态。暂停位只能由有权角色写入，自动门控不写暂停 storage；暂停位变化不得修改生命周期、资产位置、`planVersion` 或 `lastExecutedPlan`。
+- `totalSupply() == minimumLockedShares` 只表示没有流通 shares，不改变 `OPEN` 生命周期，也不阻止后续按既定规则进行 Redeem、Rebalance 或 Deposit。
+- 架构和产品文档分别描述生命周期、资产位置和暂停控制，并补充组合状态测试。
 
 ## 问题 21
 narrow/wideRangeHalfWidth 的 "对齐 spacing" 校验对象未定义
