@@ -30,7 +30,7 @@ Adapter Registry 封存时序矛盾：Bootstrap 前还是 Bootstrap 后
 修改：
 - `AdapterRegistry` 是由 `AdaptiveLPVault` 继承并内部集成的源码模块，负责 Vault 内的地址簿、绑定校验和 operational 状态；不单独部署、没有独立地址，也不再作为系统图中的跨合约调用节点。绑定使用单一的 `_adapterByVenue` Mapping。
 - 删除手动 `seal()`、`sealed()`、独立 `sealed` 状态、`RegistrySealed` 错误和封存事件契约。`initialized` 是唯一的生命周期冻结边界：`initialized == false` 时 Manager 可以配置或修正绑定；`bootstrap()` 只在完整校验和全部资产/Position 操作成功后将其从 `false` 设置为 `true`，失败不会冻结；`VaultBootstrapped` 是绑定成功冻结的链上信号。
-- Bootstrap 前由 Manager 显式调用 `configureAdapter(VenueType venue, address adapter, address pool, uint24 feeTier)` 配置非 `IDLE` Venue；`bootstrap()` 不会自动调用该入口。配置入口校验 Adapter 合约代码、Adapter 的 Vault/Venue、Pool、Token 顺序和 Fee Tier 绑定，成功时将 `enabled` 初始化为 `true` 并发出 `AdapterConfigured`。
+- Bootstrap 前由 Manager 显式调用 `configureAdapter(VenueType venue, address adapter)` 注册已独立部署的非 `IDLE` Adapter；`bootstrap()` 不会自动部署或配置 Adapter。配置入口读取并校验 Adapter 的 Pool、Token 顺序、Fee Tier 和 `tickSpacing` 绑定，成功时将 `enabled` 初始化为 `true` 并缓存已验证的 `tickSpacing`，再发出 `AdapterConfigured`。
 
 ## 问题 4
 Market Regime 滞后状态无持久化机制，Hysteresis 正确性依赖未声明的隐式假设
@@ -214,9 +214,22 @@ PAUSED 作为伪状态混入生命周期状态表，与自身声明矛盾
 narrow/wideRangeHalfWidth 的 "对齐 spacing" 校验对象未定义
 半宽以通用 tick 数配置，但两个目标 V3 池的 tickSpacing 不同。 均可对齐 spacing 无法作为配置时校验这里对齐哪个？，只能在每次按目标池对齐时计算——参数表把它写成配置约束，实现者会尝试在 updateStrategyConfig 时校验并遇到歧义。
 
+修改：
+- 采用 spacing 步数语义，将 `narrowRangeHalfWidth` 和 `wideRangeHalfWidth` 重命名为 `narrowRangeHalfWidthSteps` 和 `wideRangeHalfWidthSteps`；它们分别表示低费率和高费率目标 Pool 的 spacing 间隔数量。
+- Adapter 继续独立部署；`configureAdapter` 改为 `configureAdapter(VenueType venue, address adapter)`。Vault 从 Adapter 的 immutable 绑定读取并验证 Pool、Token、Fee Tier 和 `tickSpacing`，不再从调用者参数直接获取这些绑定值；spacing 不合法时以 `InvalidTickSpacing()` 回滚。
+- `_adapterByVenue` 只缓存 Adapter 地址、`enabled` 和已验证的 `tickSpacing`；Pool 与 Fee Tier 继续由 Adapter 的 immutable binding 提供。Bootstrap 成功后 Adapter 身份和 spacing 缓存冻结，只有 `enabled` 可以改变。
+- `lowHalfWidthTicks = narrowRangeHalfWidthSteps × lowFeeTickSpacing`，`highHalfWidthTicks = wideRangeHalfWidthSteps × highFeeTickSpacing`；LOW 和 MEDIUM 分别使用对应的有效半宽，且 Bootstrap 必须验证 `lowHalfWidthTicks < highHalfWidthTicks`。
+- 对齐后的中心与有效半宽生成 Range；乘法溢出、非法 Tick 或超出 Uniswap V3 最小/最大 Tick 时回滚 `InvalidTickRange()`，不夹紧或移动目标中心。
+- 原问题中关于 `updateStrategyConfig` 的假设不再适用；Range 步数是部署后不可修改的策略参数，涉及 spacing 的最终校验在 Adapter 配置和 Bootstrap 阶段完成。
+
 ## 问题 22
 redeem 接口无 owner 参数，"获授权 spender"入口规则无法实现
 入口规则表允许"获授权 spender"代持有人赎回，但接口没有 owner 参数——spender 调用时 Vault 无从得知应对谁的 shares 余额销毁、检查谁的授权。ERC-4626 的标准解法是 redeem(shares, receiver, owner) 三地址参数；本接口的 4 参数形状只能支持 msg.sender 即持有人自赎。声称的权限模型与接口形状矛盾。
+
+修改：
+- `IAdaptiveLPVault.redeem` 增加 `address owner`，形成 `redeem(shares, minAmount0Out, minAmount1Out, receiver, owner)`；`owner` 是被销毁 shares 的持有人，`msg.sender` 是实际调用者，`receiver` 是最终双资产接收者。
+- `owner == msg.sender` 时执行持有人自赎；否则校验并消费 `allowance(owner, msg.sender)`，`type(uint256).max` allowance 按 ERC-20 语义保持不变；shares 始终从 `owner` 销毁，授权 spender 可以指定任意 `receiver`。
+- 架构文档同步更新 `Redeem` 事件、ERC-20 余额/授权标准错误语义、赎回时序、不变量和集成测试要求；现有赎回数学、暂停/Oracle 门控和资产流不变。
 
 ## 问题 23
 Deposit 实际数量 d0/d1 的推导算法未定义双侧 max 的截断与舍入路径不唯一

@@ -171,7 +171,7 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 前置条件：
 
 - Vault 尚未初始化；
-- `bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓前，重新校验 token0/token1、canonical Oracle、Swap Executor 和所有 v1 Adapter 的完整绑定；
+- `bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓前，重新校验 token0/token1、canonical Oracle、Swap Executor 和所有 v1 Adapter 的完整 immutable 绑定及 `tickSpacing` 缓存；
 - 上述绑定校验失败时，整笔交易回滚；
 - Oracle Healthy，观察窗口有足够历史；
 - 初始 token0 和 token1 均大于零；
@@ -235,9 +235,9 @@ $$
 
 ### 5.4 Redeem
 
-用户提交 `shares`、`minAmount0Out`、`minAmount1Out` 和 `receiver`。赎回不执行 Swap，不以 Oracle 价值判断是否允许，并且不因三个业务暂停开关而关闭。
+调用者提交 `shares`、`minAmount0Out`、`minAmount1Out`、`receiver` 和 `owner`。`owner` 是被销毁 shares 的持有人，`receiver` 是接收最终 token0/token1 的地址，`msg.sender` 是实际调用者；`owner != msg.sender` 检查并消费 `owner` 授予 `msg.sender` 的 shares allowance。赎回不执行 Swap，不以 Oracle 价值判断是否允许，并且不因三个业务暂停开关而关闭。
 
-设销毁前总供应量为 `S`，用户销毁 `x` shares：
+设销毁前总供应量为 `S`，`owner` 销毁 `x` shares：
 
 $$
  f = \frac{x}{S}
@@ -250,11 +250,12 @@ $$
 
 执行规则：
 
+- 校验 `owner` 的 shares 余额；`msg.sender != owner` 时按 ERC-20 规则消费 `allowance(owner, msg.sender)`；
 - 调取 `syncFees()` 同步 Active Adapter 的费用并读取销毁前资产快照。
 - 按 `x/S` 从 Active Adapter 部分退出，而不是优先消耗全部 Idle；
 - 将按比例退出的 Position 资产与按同一比例分配的 Idle token0/token1 合并为最终 `amount0Out/amount1Out`；
 - 在 Vault 层验证最终 `amount0Out >= minAmount0Out` 且 `amount1Out >= minAmount1Out`；
-- 销毁 shares 后转账给 `receiver`。
+- 从 `owner` 销毁 shares 后，将最终 token0/token1 转账给 `receiver`。
 
 如果除 `minimumLockedShares` 外的流通 shares 全部赎回，Vault 不发生生命周期或资产位置转换：
 
@@ -501,20 +502,19 @@ Donation 直接增加 `I0/I1`，没有对应 `sharesMinted`。因此 Donation �
 
 ### 7.1 AdapterRegistry 配置
 
-`AdapterRegistry` 由 `AdaptiveLPVault` 继承实现，只负责 Adapter 身份绑定；初始化前，将三个非 IDLE Venue 分别绑定到唯一的 Adapter、Pool 和 Fee Tier；
+`AdapterRegistry` 由 `AdaptiveLPVault` 继承实现，只负责绑定已独立部署的 Adapter；初始化前，将三个非 IDLE Venue 分别绑定到唯一的 Adapter。Adapter 自身在部署时固定保存其 Vault、Venue、Pool、Token、Fee Tier、Tick Spacing` 和（V3）Position Manager。
 
-`configureAdapter(venue, adapter, pool, feeTier)` 的调用规则如下：
+`configureAdapter(venue, adapter)` 的调用规则如下：
 
 - 仅 Manager 可在 `initialized == false` 时调用；
-- 调用时必须验证 Venue、Adapter、Pool、Token 顺序和 Fee Tier 的绑定关系；
-- 成功后写入 `_adapterByVenue`，将 `enabled` 设为 `true`，并发出 `AdapterConfigured`；
-- 验证失败时整笔交易回滚；
+- 调用时必须验证 Adapter 合约代码、Vault、Venue、Pool、Token 顺序、Fee Tier 和 `tickSpacing` 的绑定关系；V3 Adapter 的 `tickSpacing` 必须为正且与其 Pool 的实际 `tickSpacing()` 一致，V2 Adapter 的 Fee Tier 和 `tickSpacing` 固定为零；验证失败时以 `InvalidTickSpacing()` 或对应绑定错误回滚；
+- 成功后将 Adapter 地址、经过验证的 `tickSpacing` 缓存和 `enabled = true` 写入 `_adapterByVenue`，并发出 `AdapterConfigured`；
 - 该方法不转移资产、不创建 Position，也不改变 shares 或策略状态；
 - 初始化前可重复调用，以修正绑定。
 
 Bootstrap 对 Registry 执行最终封存：
 
-- 重新验证全部绑定并冻结身份字段；
+- 重新验证全部 Adapter immutable 绑定与 Registry 的 `tickSpacing` 缓存，并冻结 Adapter 身份和 spacing 缓存；
 - 此后只能通过 `setAdapterEnabled(venue, enabled)` 改变运行状态；
 - `enabled` 表示是否允许在该 Adapter 建立或增加 liquidity，包括用户 Deposit、迁入该 Venue 和同 Venue V3 Recenter；
 - 任一非 IDLE 目标在调用 `previewDeposit()` 或 `deposit()` 前必须满足 `isEnterEnabled(targetVenue) == true`，否则以 `AdapterDisabled()` 回滚；
@@ -533,7 +533,7 @@ V2 Position 覆盖全价格区间，不存在 Tick Range，但仍承担 AMM 价�
 
 ### 7.3 Uniswap V3 Adapter
 
-V3 Adapter 必须固定绑定一个 Pool、Fee Tier、Position Manager、token0/token1 和 Vault，并管理一个 NFT Position。Position 包含：
+V3 Adapter 必须固定绑定一个 Pool、Fee Tier、Pool、Tick Spacing、Position Manager、token0/token1 和 Vault，并管理一个 NFT Position。Position 包含：
 
 - `tokenId`；
 - `tickLower`、`tickUpper`；
@@ -660,8 +660,9 @@ Oracle 不健康时：
 - 当前 Oracle Snapshot；
 - 当前 `activeVenue` 和 Position Snapshot；
 - Vault 资产比例、Idle 比例和暂停状态；
-- `lastExecutedPlan.marketRegime` 作为持久化的 Hysteresis 历史
+- `lastExecutedPlan.marketRegime` 作为持久化的 Hysteresis 历史；
 - 当前 `planVersion`；
+- 已配置并验证的低费率 Pool 和高费率 Pool `tickSpacing`；
 - 部署时固定且受硬边界约束的策略参数。
 
 Strategy 输出完整的 `PositionPlan`，其内容包含：`targetVenue`、`marketRegime`、V3 Tick Range、`version` 和 `planHash`。
@@ -746,6 +747,21 @@ Strategy 根据 `planVersion` 选择 Hysteresis 的分类方式：
 
 ### 9.1.3 Position V3 Range 计算与 Recenter
 
+Strategy 使用由 Vault 从已验证 Adapter 配置构造的目标 Pool spacing：
+
+- `LOW_DEVIATION` 的目标 Venue 是 `UNISWAP_V3_LOW_FEE`，使用低费率 Pool 的 `tickSpacing`；
+- `MEDIUM_DEVIATION` 的目标 Venue 是 `UNISWAP_V3_HIGH_FEE`，使用高费率 Pool 的 `tickSpacing`；
+- `narrowRangeHalfWidthSteps` 和 `wideRangeHalfWidthSteps` 表示目标 Pool 的 spacing 间隔数量，不是 raw Tick 数量；两个值都必须大于零；
+- 有效半宽按以下公式计算：
+
+$$
+lowHalfWidthTicks = narrowRangeHalfWidthSteps \times lowFeeTickSpacing
+$$
+
+$$
+highHalfWidthTicks = wideRangeHalfWidthSteps \times highFeeTickSpacing
+$$
+
 Strategy 按以下规则确定 `targetCenterTick`：
 
 - 以 `twapTick` 为价格中心参考；
@@ -755,26 +771,27 @@ Strategy 按以下规则确定 `targetCenterTick`：
 
 根据当前 Market Regime 生成目标 Range：
 
-- `LOW_DEVIATION` 使用以 TWAP Tick 为中心的窄 Range `narrowRangeHalfWidth`；
-- `MEDIUM_DEVIATION` 使用以 TWAP Tick 为中心的宽 Range `wideRangeHalfWidth`；
-- `tickLower < tickUpper`；
-- `tickLower`、`tickUpper` 均为 `tickSpacing` 的整数倍；
-- Range 必须覆盖 TWAP Tick；
-- Range 不能超出 Uniswap V3 最小/最大 Tick。
+- `LOW_DEVIATION` 使用 `tickLower = targetCenterTick - lowHalfWidthTicks` 和 `tickUpper = targetCenterTick + lowHalfWidthTicks`；
+- `MEDIUM_DEVIATION` 使用 `tickLower = targetCenterTick - highHalfWidthTicks` 和 `tickUpper = targetCenterTick + highHalfWidthTicks`；
+- `tickLower < tickUpper`，且 `tickLower`、`tickUpper` 均为目标 Pool `tickSpacing` 的整数倍；由于 `targetCenterTick` 和有效半宽均由目标 spacing 的整数倍构成，边界不再执行二次取整；
+- 生成的 `tickLower` 小于 Uniswap V3 `MIN_TICK` 或 `tickUpper` 大于 `MAX_TICK` 时以 `InvalidTickRange()` 回滚，不夹紧或移动 `targetCenterTick`；
+- Range 必须覆盖 `twapTick`；
+- Bootstrap 的最终校验必须满足 `lowHalfWidthTicks < highHalfWidthTicks`，确保窄 Range 的实际 Tick 宽度严格小于宽 Range。
 
 对于已存在的同 Venue V3 Position，先计算以下 Recenter 参数：
 
 - `currentRangeWidth = currentTickUpper - currentTickLower`；
 - `currentRangeHalfWidth = currentRangeWidth / 2`；
 - `currentCenterTick = currentTickLower + currentRangeHalfWidth`；
-- `centerDelta = abs(targetCenterTick - currentCenterTick)`。
+- `centerDelta = abs(targetCenterTick - currentCenterTick)`；
+- 当前 Market Regime 要求的目标 Range 宽度为对应有效半宽的两倍。
 
 只有满足以下任一条件时才允许 Recenter：
 
 - 当前 Range 宽度与当前 Market Regime 要求的目标宽度不一致；
 - 当前 Spot Tick 已离开现有 Range，并且 `centerDelta >= currentRangeHalfWidth * minRecenterBps / BPS`。
 
-Spot 越界但 TWAP 目标中心尚未移动足够远时，不立即跟随 Spot 重建仓位。Tick 对齐后的新 Range 必须与旧 Range 不同，否则以 `NoStateChangeRequied` 回滚。
+Spot 越界但 TWAP 目标中心尚未移动足够远时，不立即跟随 Spot 重建仓位。Tick 对齐后的新 Range 必须与旧 Range 不同，否则以 `NoStateChangeRequired` 回滚。
 
 #### 9.2 部署评估 与 `requiresSwap`
 
@@ -844,7 +861,7 @@ $$
 
 固定的 Swap 基础设施：`ControlledSwapExecutor` 在部署或不可变初始化时固定.
 
-`maxSwapSlippageBps` 是部署时固定的协议滑点上限，任何调用者都不能覆盖。Vault 使用本次迁移开始时捕获的 canonical TWAP 计算协议最低输出 `protocolMinOut`；方向报价和滑点折算均向上取整。Vault 将 `minAmountOut = max(protocolMinOut, keeperMinAmountOut)` 写入本次 `SwapPlan`，并把 `SwapPlan` 与 `protocolMinOut` 传给 `ControlledSwapExecutor`。Executor 不自行选择报价或降低滑点边界，而是验证 `SwapPlan.minAmountOut >= protocolMinOut`，再按固定配置执行 Swap。
+`maxSwapSlippageBps` 是部署时固定的协议滑点上限，任何调用者都不能覆盖。Vault 使用本次迁移开始时捕获的 canonical TWAP 计算协议最低输出 `protocolMinOut`；方向报价和滑点折算均向上取整。Vault 将 `minAmountOut = max(protocolMinOut, keeperMinAmountOut)` 写入本次 `SwapPlan`。
 
 Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 
@@ -940,10 +957,10 @@ Vault 直接继承 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules`：
 | `beginDefaultAdminTransfer` / `cancelDefaultAdminTransfer` | 当前 Default Admin | 初始化前后均可 | 计划或取消根管理员转移 |
 | `acceptDefaultAdminTransfer` | 待接任账户 | 初始化前后均可 | 完成两阶段根管理员转移；不自动授予任何业务角色 |
 | `changeDefaultAdminDelay` / `rollbackDefaultAdminDelay` | 当前 Default Admin | 初始化前后均可 | 计划或回滚根管理员转移延迟变更 |
-| `configureAdapter` | Manager | 仅初始化前 | 新增或修正 Adapter 身份绑定，将 `enabled` 初始化为 true，并发出 `AdapterConfigured` |
+| `configureAdapter` | Manager | 仅初始化前 | 注册已独立部署的 Adapter，验证其绑定并缓存 `tickSpacing`，将 `enabled` 初始化为 true，并发出 `AdapterConfigured` |
 | `bootstrap` | Manager | 仅初始化前；只能成功一次 | 健康且部署评估无需 Swap 时进入 ACTIVE，EXTREME 进入 IDLE，铸造并锁定 shares，冻结 Adapter 身份绑定；部署评估的 `requiresSwap` 为 true 时以 `SwapRequired()` 回滚 |
 | `deposit` | 任意 LP 用户 | 仅初始化后 | 仅在当前 Active Adapter 已启用时转入实际数量并铸造公平 shares |
-| `redeem` | Shares 持有人或获授权 spender | 仅初始化后 | 按比例退出 Position 和 Idle，销毁 shares 并返回双资产；不要求 Oracle 健康，不受暂停或 Adapter 禁用影响 |
+| `redeem` | Shares 持有人或获授权 spender | 仅初始化后 | 按比例退出 Position 和 Idle，从显式 `owner` 销毁 shares，并向 `receiver` 返回双资产；非 owner 调用者必须消费足额 shares allowance；不要求 Oracle 健康，不受暂停或 Adapter 禁用影响 |
 | `rebalance` | 任意地址 | 仅初始化后 | 原子退出旧 Position，建立已启用的新 Position 或进入 IDLE；部署评估的 `requiresSwap` 为 true 时以 `SwapRequired()` 回滚 |
 | `rebalanceWithSwap` | Keeper/Manager | 仅初始化后 | Vault 内部构造受控 SwapPlan，执行换币后在已启用的目标 Adapter 建立 Position |
 | `setPauseState` | Guardian/Manager | 仅初始化后 | 原子写入三个暂停位并发出 `PauseStateChanged`；只有 Manager 可以解除暂停 |
@@ -958,7 +975,7 @@ Bootstrap 成功后不可替换：
 
 - canonical Oracle Pool 和 Oracle 合约；
 - Swap Executor、固定 Router、Token 对、Pool/Fee Tier 和固定 Swap 方法；
-- Adapter 地址、Pool、Token 和 Fee Tier 绑定；
+- Adapter 地址、immutable 绑定；
 - shares 的会计语义和赎回规则。
 
 未来新增 Venue 或改变会计语义必须部署新 Vault 并执行显式迁移，不得静默升级现有 shares。
@@ -982,7 +999,7 @@ Bootstrap 成功后不可替换：
 - Deposit 使用存款前 NAV 和总供应量。
 - Shares 铸造向下舍入，零 shares 回滚。
 - 已有持有人在 Deposit 前产生的收益不被新用户分享。
-- Redeem 使用销毁前供应量，并按同一比例退出 Idle 与 Position。
+- Redeem 使用销毁前供应量，并按同一比例退出 Idle 与 Position；shares 必须从显式 `owner` 销毁，非 owner 调用者必须消费 `allowance(owner, msg.sender)`。
 
 
 
@@ -992,7 +1009,7 @@ Bootstrap 成功后不可替换：
 - `minAmount0Out` 和 `minAmount1Out` 仅用于 `redeem` 的最终双资产交付；`protocolMinOut` 和 `keeperMinAmountOut` 仅用于 `rebalanceWithSwap` 的 Swap；Bootstrap、Deposit、Adapter 资产变更方法和 Emergency Exit 不接受业务层 `minOut` 参数；
 - `deadline` 仅用于 `rebalance` 的计划有效期，以及 `rebalanceWithSwap` 和 `ControlledSwapExecutor` 的 Swap 有效期；Bootstrap、Deposit、Redeem、Adapter 资产变更方法和 Emergency Exit 不要求调用者提供 `deadline`；
 - 外部调用后重新读取余额、费用和 Position 状态。
-- 不支持任意回调、任意 Router 或无限授权残留。
+- 不支持任意回调、任意 Router 或 Adapter/Executor 对外部合约的无限授权残留；shares 的用户 allowance 按本节 `owner` 规则处理。
 - 失败交易不得留下部分 shares、旧 Position 与新 Position 并存或状态/资产不一致。
 
 
@@ -1039,7 +1056,7 @@ Bootstrap 成功后不可替换：
 会计与用户操作：
 
 - Deposit 只提取实际数量，按存款前 NAV 铸造 shares；当前 Active Adapter 禁用时在任何 Adapter 外部调用和 Token 转入前以 `AdapterDisabled()` 回滚，其他健康门控同样有效；
-- Redeem 在暂停和 Oracle 异常时仍能按比例返回双资产；
+- Redeem 在暂停和 Oracle 异常时仍能按比例返回双资产；持有人自赎不消费 allowance，授权 spender 代赎从显式 `owner` 销毁 shares、消费足额 allowance，并可将双资产发送给指定 `receiver`；余额或 allowance 不足时整笔回滚；
 - V2 费用只通过 LP Token 储备权益计价；
 - V3 principal 与 claimable fees 不重复计价；
 - Donation 自动进入总资产，且不存在支持资产 rescue/sweep 权限。
@@ -1053,6 +1070,7 @@ Oracle 与策略：
 - 未初始化 Preview 以 `NotInitialized()` 回滚；
 - Oracle 不健康时，Preview 和执行入口均以 `OracleUnhealthy()` 回滚，且不生成占位计划；
 - Strategy 使用 `planVersion == 0` 识别首次分类；之后 Vault 将 `lastExecutedPlan.marketRegime` 作为 `lastCommittedRegime` 参数传入 Strategy 执行 Hysteresis；
+- `narrowRangeHalfWidthSteps` 和 `wideRangeHalfWidthSteps` 按对应 Pool 的 `tickSpacing` 换算，低费率与高费率 Pool 的 spacing 来源及缓存一致，非法或越界 Range 以 `InvalidTickRange()` 回滚；
 - Position 结构变化的版本递增、Cooldown 和 Range 规则均经过测试。
 
 Rebalance、退出与接口：
