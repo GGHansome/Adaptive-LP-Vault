@@ -282,6 +282,8 @@ struct StrategyConfig {
 
 `VaultConfig`、`OracleConfig` 和 `StrategyConfig` 仅作为构造参数与内存传参结构，不作为整体状态变量写入普通 storage。各字段在部署时通过协议硬边界与字段关系校验后，分别写入所属合约的 Solidity `immutable` 状态变量；部署后任何角色均不得修改。
 
+`VaultConfig.token0Decimals/token1Decimals` 必须分别等于两个固定 Token 的 `IERC20Metadata.decimals()` 返回值，且两者均不得大于 18；不一致或超限时以 `InvalidTokenDecimals(token, configured, actual)` 拒绝部署。
+
 `OracleConfig.token0/token1` 使用 Vault 的 Token 顺序；`canonicalPool` 的内部 Token 与对应 Uniswap 顺序可以不同，但其资产对必须与这两个地址一致。
 
 `AccessControlConfig` 仅作为 Vault 构造参数传入 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules`。`initialDefaultAdmin` 必须非零；`initialDefaultAdminDelay` 是根管理员转移的初始等待时间，应在部署前校准，Mainnet 部署应采用非零值。
@@ -408,13 +410,13 @@ struct AdapterConfig {
 | 存储项                                             | 类型             | 存储方式        | 写入时机                               | 约束                                                 |
 | ----------------------------------------------- | -------------- | ----------- | ---------------------------------- | -------------------------------------------------- |
 | `token0/token1`                                 | `address`      | `immutable` | 构造                                 | 固定资产对和顺序；部署后不可修改                                   |
-| `token0Decimals/token1Decimals`                 | `uint8`        | `immutable` | 构造                                 | 与固定资产 decimals 一致；部署后不可修改                          |
+| `token0Decimals/token1Decimals`                 | `uint8`        | `immutable` | 构造                                 | 分别等于固定 Token 的 `decimals()` 且不超过 18；部署后不可修改               |
 | `dustTolerance0/dustTolerance1`                 | `uint256`      | `immutable` | 构造                                 | 仅用于整数舍入和最小单位容忍；部署后不可修改                             |
 | `canonicalOracle`                               | `address`      | `immutable` | 构造                                 | 固定 `CanonicalV3Oracle` 合约；部署后不可替换                  |
 | `swapExecutor`                                  | `address`      | `immutable` | 构造                                 | 固定 `ControlledSwapExecutor` 合约；部署后不可替换             |
 | `minimumLockedShares`                           | `uint256`      | `immutable` | 构造                                 | Bootstrap 时铸造给 Vault 自身，永久锁定                       |
 | `minimumInitialNav`                             | `uint256`      | `immutable` | 构造                                 | Bootstrap 最低 NAV；调用者不能覆盖                           |
-| `minRebalanceCooldown`                          | `uint32`       | `immutable` | 构造                                 | 部署时校验；部署后不可修改                                      |
+| `minRebalanceCooldown`                          | `uint32`       | `immutable` | 构造                                 | 单位为秒；部署时校验，部署后不可修改                                  |
 | `enterMediumBps/exitMediumBps`                  | `uint24`       | `immutable` | 构造                                 | 满足完整 Hysteresis 阈值关系；部署后不可修改                       |
 | `enterHighBps/exitHighBps`                      | `uint24`       | `immutable` | 构造                                 | 满足完整 Hysteresis 阈值关系；部署后不可修改                       |
 | `enterExtremeBps/exitExtremeBps`                | `uint24`       | `immutable` | 构造                                 | 满足完整 Hysteresis 阈值关系；部署后不可修改                       |
@@ -424,7 +426,7 @@ struct AdapterConfig {
 | `initialized`                                   | `bool`         | `storage`   | Bootstrap 成功                       | 只能从 false 到 true                                   |
 | `activeVenue`                                   | `VenueType`    | `storage`   | Bootstrap/Rebalance/Emergency Exit | 与有效 Position 一致                                    |
 | `activeAdapter`                                 | `address`      | `storage`   | Bootstrap/Rebalance                | 必须来自 Bootstrap 成功后已冻结的 Registry 绑定                 |
-| `lastSuccessfulRebalanceAt`                     | `uint32`       | `storage`   | 成功 Position 变更                     | 失败交易不更新                                            |
+| `lastPositionChangeAt`                           | `uint32`       | `storage`   | Bootstrap、两类 Rebalance 成功 | 初始为 0；两类 Rebalance 共用其 Cooldown；Emergency Exit 跳过检查且不更新；失败交易和 IDLE 幂等分支不更新 |
 | `planVersion`                                   | `uint64`       | `storage`   | 成功 Position 结构变化                   | 初始为 0；每次成功变化递增 1，失败交易不更新                           |
 | `lastExecutedPlan`                              | `PositionPlan` | `storage`   | Bootstrap/成功策略计划执行                 | 保存最近一次成功执行的 Strategy 计划；其 `marketRegime` 是 Hysteresis 历史，非策略 Position 变化后可与当前资产位置不同 |
 | `pauseState`                                    | `PauseState`   | `storage`   | `setPauseState` 或 Emergency Exit   | 初始为全 false；Redeem 不受影响                             |
@@ -739,6 +741,7 @@ error Paused(PauseFlag flag);
 error OracleUnhealthy();
 error ObservationInsufficient();
 error InvalidAssetPair();
+error InvalidTokenDecimals(address token, uint8 configured, uint8 actual);
 error MinimumNavNotMet();
 error ZeroAmount();
 error ActivePositionSingleSided();
@@ -769,7 +772,7 @@ error UnsupportedToken();
 error Reentrancy();
 ```
 
-错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。角色授权和 `renounceRole` 调用者确认失败分别采用 OpenZeppelin `IAccessControl` 的 `AccessControlUnauthorizedAccount` 与 `AccessControlBadConfirmation`。`redeem` 在 `owner` shares 余额不足或代赎 allowance 不足时，分别采用 OpenZeppelin `IERC20Errors` 的 `ERC20InsufficientBalance` 与 `ERC20InsufficientAllowance` 标准语义；持有人自赎不检查 allowance。`AccessControlInvalidDefaultAdmin`、`AccessControlEnforcedDefaultAdminRules` 和 `AccessControlEnforcedDefaultAdminDelay` 直接采用 `IAccessControlDefaultAdminRules` 的标准语义，用于非法根管理员、绕过单一根管理员/两阶段规则以及尚未满足延迟的操作；Vault 不定义额外的最后管理员错误或自定义根管理员计数错误。`GuardianCannotUnpause()` 用于 Guardian 尝试把任一暂停位从 true 改为 false。`NotInitialized()` 用于要求已初始化状态的入口，包括 `setPauseState`、`setAdapterEnabled`、Emergency Exit 和未初始化 Vault 上的 `previewRebalance()`；该检查必须早于这些入口的业务状态读取。`OracleUnhealthy()` 用于 Bootstrap、Deposit、Preview 和两类 Rebalance 的健康门控，该错误路径不生成或返回 `PositionPlan`。`ActivePositionSingleSided()` 仅用于 V3 Active Position 的 `principal0` 或 `principal1` 为零时的 Deposit 前置检查；`ZeroAmount()` 用于双边 Position 下实际 `d0` 或 `d1` 为零；`SharesSlippage(actual, minimum)` 用于执行过程中计算出的 `sharesMinted` 低于 `minSharesOut`；`IdleLimitExceeded()` 用于 Deposit 或 Rebalance 的 Idle 健康约束失败。`AdapterDisabled()` 用于当前 Active Adapter 已禁用的 Deposit，以及非 IDLE 候选目标 Adapter 已禁用的 Bootstrap、Preview 和两类 Rebalance；检查必须发生在对应 Adapter 的 `previewDeposit()`、`deposit()` 或用户 Token 转入之前，不阻止从已禁用旧 Adapter 读取、同步费用或退出。`InvalidTickSpacing()` 用于 Adapter 绑定缺少、非正值或与 Pool 不一致的 V3 spacing；`InvalidTickRange()` 用于 spacing 步数换算溢出、边界不合法或生成的 Range 超出 Uniswap V3 可用 Tick。`SwapRequired()` 是回滚返回的 custom error，不是事件；当 Bootstrap 或普通 `rebalance` 的 `DeploymentAssessment.requiresSwap` 为 true 时使用该错误终止交易。
+错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。`InvalidTokenDecimals(token, configured, actual)` 用于 Vault 构造时任一 Token 的配置 decimals 与 `IERC20Metadata.decimals()` 返回值不一致，或链上返回值大于 18。角色授权和 `renounceRole` 调用者确认失败分别采用 OpenZeppelin `IAccessControl` 的 `AccessControlUnauthorizedAccount` 与 `AccessControlBadConfirmation`。`redeem` 在 `owner` shares 余额不足或代赎 allowance 不足时，分别采用 OpenZeppelin `IERC20Errors` 的 `ERC20InsufficientBalance` 与 `ERC20InsufficientAllowance` 标准语义；持有人自赎不检查 allowance。`AccessControlInvalidDefaultAdmin`、`AccessControlEnforcedDefaultAdminRules` 和 `AccessControlEnforcedDefaultAdminDelay` 直接采用 `IAccessControlDefaultAdminRules` 的标准语义，用于非法根管理员、绕过单一根管理员/两阶段规则以及尚未满足延迟的操作；Vault 不定义额外的最后管理员错误或自定义根管理员计数错误。`GuardianCannotUnpause()` 用于 Guardian 尝试把任一暂停位从 true 改为 false。`NotInitialized()` 用于要求已初始化状态的入口，包括 `setPauseState`、`setAdapterEnabled`、Emergency Exit 和未初始化 Vault 上的 `previewRebalance()`；该检查必须早于这些入口的业务状态读取。`OracleUnhealthy()` 用于 Bootstrap、Deposit、Preview 和两类 Rebalance 的健康门控，该错误路径不生成或返回 `PositionPlan`。`ActivePositionSingleSided()` 仅用于 V3 Active Position 的 `principal0` 或 `principal1` 为零时的 Deposit 前置检查；`ZeroAmount()` 用于双边 Position 下实际 `d0` 或 `d1` 为零；`SharesSlippage(actual, minimum)` 用于执行过程中计算出的 `sharesMinted` 低于 `minSharesOut`；`IdleLimitExceeded()` 用于 Deposit 或 Rebalance 的 Idle 健康约束失败。`AdapterDisabled()` 用于当前 Active Adapter 已禁用的 Deposit，以及非 IDLE 候选目标 Adapter 已禁用的 Bootstrap、Preview 和两类 Rebalance；检查必须发生在对应 Adapter 的 `previewDeposit()`、`deposit()` 或用户 Token 转入之前，不阻止从已禁用旧 Adapter 读取、同步费用或退出。`InvalidTickSpacing()` 用于 Adapter 绑定缺少、非正值或与 Pool 不一致的 V3 spacing；`InvalidTickRange()` 用于 spacing 步数换算溢出、边界不合法或生成的 Range 超出 Uniswap V3 可用 Tick。`SwapRequired()` 是回滚返回的 custom error，不是事件；当 Bootstrap 或普通 `rebalance` 的 `DeploymentAssessment.requiresSwap` 为 true 时使用该错误终止交易。`CooldownActive(availableAt)` 用于两类 Rebalance 在 `block.timestamp < uint256(lastPositionChangeAt) + minRebalanceCooldown` 时回滚，其中 `availableAt` 是允许再次执行计划性 Rebalance 的最早时间；Emergency Exit 不触发该错误。
 
 ## 8. 事件契约
 
@@ -845,14 +848,6 @@ event SwapExecuted(
     uint256 protocolMinOut
 );
 
-event IdleStateChanged(
-    VenueType indexed previousVenue,
-    VenueType indexed currentVenue,
-    uint256 idle0,
-    uint256 idle1,
-    uint256 idleBps
-);
-
 event AdapterConfigured(
     VenueType indexed venue,
     address indexed adapter,
@@ -876,7 +871,7 @@ event EmergencyExit(address indexed caller, VenueType previousVenue, uint256 amo
 - `FeesSynchronized` 的金额是本次从 claimable 状态归集的增量，不是再次计入总资产的额外资产；
 - `RebalanceExecuted` 只在所有 post-condition 成功后发出；
 - 任何以 custom error 回滚的交易都不会保留事件日志，协议不定义失败事件；`SwapRequired()` 通过 revert data 返回；
-- `IdleStateChanged` 只反映资产位置变化，不用于表示暂停；
+- `activeVenue` 的链下历史由动作事件共同重建：`VaultBootstrapped.initialVenue` 初始化位置，成功的 `RebalanceExecuted.targetVenue` 更新位置，`EmergencyExit` 将位置更新为 `IDLE`；同 Venue V3 Recenter 的 `previousVenue == targetVenue`。协议不定义额外的通用资产位置或 Idle 状态变化事件；
 - `RoleAdminChanged`、`RoleGranted` 和 `RoleRevoked` 采用 OpenZeppelin `IAccessControl` 标准语义；
 - `DefaultAdminTransferScheduled`、`DefaultAdminTransferCanceled`、`DefaultAdminDelayChangeScheduled` 和 `DefaultAdminDelayChangeCanceled` 采用 `IAccessControlDefaultAdminRules` 标准语义；
 - `PauseStateChanged` 只在 `setPauseState` 或 Emergency Exit 实际改变暂停 storage 时发出，自动门控和无状态变化调用不得发出；
@@ -911,7 +906,7 @@ sequenceDiagram
     Vault->>Vault: mint and lock grossInitialShares
     Vault->>Adapter: deposit if targetVenue is non-IDLE
     Adapter-->>Vault: used amounts and liquidity
-    Vault->>Vault: validate ACTIVE or EXTREME IDLE post-state; commit lastExecutedPlan and planVersion = 1; set initialized = true and freeze bindings
+    Vault->>Vault: validate ACTIVE or EXTREME IDLE post-state; commit lastExecutedPlan and planVersion = 1; set lastPositionChangeAt = block.timestamp; set initialized = true and freeze bindings
     Vault-->>Manager: PositionPlanCommitted and VaultBootstrapped
 ```
 
@@ -984,7 +979,7 @@ sequenceDiagram
     Vault->>NewAdapter: deposit() without swap
     NewAdapter-->>Vault: unused amounts and liquidity
     Vault->>Vault: validate conservation, idle and single position
-    Vault->>Vault: commit lastExecutedPlan and incremented planVersion
+    Vault->>Vault: commit lastExecutedPlan and incremented planVersion; set lastPositionChangeAt = block.timestamp
     Vault-->>Caller: PositionPlanCommitted and RebalanceExecuted
 ```
 
@@ -1007,7 +1002,7 @@ sequenceDiagram
     Vault->>Vault: require target Adapter enter enabled
     Vault->>NewAdapter: previewDeposit(current assets, plan)
     NewAdapter-->>Vault: used0/used1
-    Vault->>Vault: build initial DeploymentAssessment (initialDeployBps) from T0/T1; validate hash, deadline, assessment.requiresSwap and expectedDirection
+    Vault->>Vault: build initial DeploymentAssessment (initialDeployBps) from T0/T1; validate hash, deadline, cooldown, assessment.requiresSwap and expectedDirection
     Vault->>OldAdapter: syncFees() and withdrawAll()
     OldAdapter-->>Vault: token0/token1
     Vault->>Vault: verify actual balances against assessed assets; simulate worst-case post-swap balances
@@ -1019,7 +1014,7 @@ sequenceDiagram
     Vault->>NewAdapter: deposit() with adjusted assets
     NewAdapter-->>Vault: unused amounts and liquidity
     Vault->>Vault: validate NAV loss, deployment, idle, dust tolerance and position
-    Vault->>Vault: commit lastExecutedPlan and incremented planVersion
+    Vault->>Vault: commit lastExecutedPlan and incremented planVersion; set lastPositionChangeAt = block.timestamp
     Vault-->>Keeper: PositionPlanCommitted, RebalanceExecuted and SwapExecuted
 ```
 
@@ -1032,16 +1027,17 @@ sequenceDiagram
     participant Adapter
 
     Guardian->>Vault: emergencyExitToIdle()
+    Vault->>Vault: bypass minRebalanceCooldown
     alt activeVenue != IDLE
         Vault->>Adapter: syncFees()
         Vault->>Adapter: withdrawAll()
         Adapter-->>Vault: token0/token1
         Vault->>Vault: verify conservation and position liquidity == 0
-        Vault->>Vault: activeVenue = IDLE; increment planVersion; preserve lastExecutedPlan
+        Vault->>Vault: activeVenue = IDLE; increment planVersion; preserve lastExecutedPlan and lastPositionChangeAt
         Vault->>Vault: set all pause flags true
         Vault-->>Guardian: EmergencyExit and PauseStateChanged if pause storage changed
     else activeVenue == IDLE
-        Vault->>Vault: skip Adapter; preserve position, venue, version and history
+        Vault->>Vault: skip Adapter; preserve position, venue, version, history and lastPositionChangeAt
         Vault->>Vault: set all pause flags true
         Vault-->>Guardian: PauseStateChanged only if pause storage changed
     end
@@ -1118,7 +1114,7 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | INV-07 | Oracle 不健康时不执行价值相关操作                                                                | 入口回滚             |
 | INV-08 | Permissionless Caller 不能改变计划内容                                                      | 计划哈希校验失败         |
 | INV-09 | Swap 只允许固定 token0/token1、部署时封存的 Router/方法和目标过量资产修复范围                                | Swap 回滚          |
-| INV-10 | 失败交易不更新 Cooldown、版本或资产位置                                                            | 原子回滚             |
+| INV-10 | 两类 Rebalance 均不得在 Cooldown 结束前执行；Emergency Exit 跳过该检查且不更新 `lastPositionChangeAt`；失败交易不更新 `lastPositionChangeAt`、版本或资产位置，IDLE 幂等分支不更新时间戳 | `CooldownActive(availableAt)` 或原子回滚 |
 | INV-11 | 支持资产 Donation 不可被角色救援                                                               | 不存在对应接口          |
 | INV-12 | Pause 不阻止正常双资产 Redeem                                                               | 赎回测试失败           |
 | INV-13 | `lastExecutedPlan` 只在健康 Strategy 计划成功执行后更新；其 `marketRegime` 是 Hysteresis 历史，不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导 | 状态机测试失败          |
@@ -1136,7 +1132,7 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 
 | 测试层                 | 必测场景                                                                                                                                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Accounting 单元测试     | raw units、decimals、负 Tick、NAV、Bootstrap/Deposit shares 舍入、Idle、迁移损失、零值和溢出边界                                                                                                                                               |
+| Accounting 单元测试     | raw units、Token decimals 链上值与配置一致且均不超过 18、配置不一致或超限时以 `InvalidTokenDecimals` 回滚、负 Tick、NAV、Bootstrap/Deposit shares 舍入、Idle、迁移损失、零值和溢出边界                                                                                                                                               |
 | Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足、Pool 绑定、`Q1/Q0` 双向报价、Vault/Pool Token 顺序、向上/向下取整、Short TWAP/TWAP 偏离                                                                                                                                                     |
 | Strategy 单元测试       | Oracle 不健康快照回滚且不生成计划、`planVersion == 0` 的首次完整分类、四种历史 regime 的进入/退出 Hysteresis、`lastExecutedPlan.marketRegime` 作为 `lastCommittedRegime` 参数传递、Venue/Regime 严格双射、候选版本、spacing 步数换算与低/高费率 Pool spacing 映射、Range 对齐、边界回滚与中心偏移 Recenter、稳定计划哈希                                                                                 |
 | V2 Adapter 测试       | 储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、部分退出、实际退出数量与余额变化、Token 顺序                                                                                                                                                         |
@@ -1144,7 +1140,8 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | Adapter Registry 测试 | `configureAdapter(venue, adapter)` 的绑定校验、`tickSpacing` 缓存、初始化前重复配置、Bootstrap 后绑定和缓存冻结、仅 `enabled` 可变、Pool/Fee Tier 不重复存储                                                                                  |
 | Swap 测试             | 固定 Router/Token 方法、方向、过量资产修复范围、方向报价与 BPS 滑点折算的两段向上取整、派生部署阈值、minOut、deadline、Vault 向 Executor 精确交付输入、Vault 输出余额增量与返回值一致、Executor 余额恢复基线、回调验证和授权清理                                                                                                                         |
 | Deposit/Redeem 集成测试 | 只转实际数量、V3 单边 Active Position 的 `ActivePositionSingleSided()`、双边 Position 零实际存款的 `ZeroAmount()`、按 principal 比例的限制侧与非整除舍入、手续费不影响 Deposit 比例、暂停赎回、Oracle 异常赎回、Redeem 最小双资产输出、持有人自赎不消费 allowance、授权 spender 从显式 `owner` 销毁 shares 并消费有限 allowance、最大 allowance 不递减、任意 `receiver` 收款、owner 余额或 allowance 不足时原子回滚、捐赠、单边/高 Idle、比例公平性、当前 Active Adapter 禁用时 Deposit 在 Adapter 调用和 Token 转入前回滚、禁用后资产仍计价且 Redeem 成功 |
-| Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Emergency Exit 的 ACTIVE 撤仓分支、IDLE 幂等分支、全部流通 shares 赎回保留锁定份额对应资产、`activeVenue`/`planVersion`/`lastExecutedPlan` 不因 Redeem 改变、`expectedPlanHash`、`expectedDirection`、模拟 Swap 后评估、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
+| Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Bootstrap 初始化 `lastPositionChangeAt`、两类 Rebalance 共用 Cooldown 与 `CooldownActive(availableAt)`、Emergency Exit 绕过检查且不重置计时、IDLE 幂等分支不更新时间戳、全部流通 shares 赎回保留锁定份额对应资产、`activeVenue`/`planVersion`/`lastExecutedPlan` 不因 Redeem 改变、`expectedPlanHash`、`expectedDirection`、模拟 Swap 后评估、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
+| 事件契约测试            | `VaultBootstrapped.initialVenue` 初始化链下位置，`RebalanceExecuted.targetVenue` 更新位置且同 Venue Recenter 保持相同值，`EmergencyExit` 将位置更新为 `IDLE`；已在 IDLE 的幂等 Emergency Exit 不发出 `EmergencyExit`；自定义事件 ABI 不包含额外的通用资产位置或 Idle 状态变化事件 |
 | Invariant/Fuzz      | 资产守恒、shares 公平性、单活 Position、费用不重复、任意调用者不能越权                                                                                                                                                                               |
 | Mainnet Fork        | 真实 canonical Pool TWAP、V2 Pair、V3 Position Manager、Router 和 Tick spacing                                                                                                                                                  |
 | 安全测试                | 重入、闪电贷 Spot 操纵、Sandwich、Adapter 恶意返回、Default Admin 单账户约束、两阶段延迟转移/取消/接受、延迟变更、根角色无隐式业务权限、业务角色授予/撤销、Guardian 只能收紧控制、初始化前治理入口、暂停和 Adapter 状态滥用、暂停位与 Adapter `enabled` 作为独立运行时控制的组合、禁用 Active Adapter 不修改资产位置/计划版本/历史计划/暂停 storage                                                                                |

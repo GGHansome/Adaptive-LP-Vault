@@ -102,7 +102,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | Position Plan              | 目标 Venue、Market Regime、V3 Range 和计划版本的结构目标                                  | Strategy 确定性生成                          | Rebalance 调用者只能提交期望哈希和 deadline，不能改写内容    |
 | Last Executed Plan / `lastExecutedPlan` | 最近一次成功执行的完整 Strategy 计划 | Vault 持久化状态 | 非策略 Position 变化后可与当前资产位置不同；其 `marketRegime` 是 Hysteresis 历史 |
 | Hysteresis                 | 状态进入和退出使用不同阈值形成的滞后区间                                                      | Strategy 参数                             | 不能用 Cooldown 替代                           |
-| Cooldown                   | 两次成功 Position 变更之间的最小时间间隔                                                 | Vault 存储的时间戳                            | 失败交易不更新                                   |
+| Cooldown                   | 两类计划性 Rebalance 距最近一次成功 Bootstrap 或计划性 Rebalance 的最小时间间隔                                        | Vault 存储的 `lastPositionChangeAt`              | Emergency Exit 跳过前置检查且不更新计时；失败交易和 IDLE 幂等调用不更新 |
 | Donation                   | 未铸造 shares 而直接转入 Vault 的支持资产                                              | ERC-20 实际余额增加                           | 永久归现有 shares 持有人；v1 不提供救援                 |
 
 
@@ -189,7 +189,7 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 8. 计划为 LOW、MEDIUM 或 HIGH 时，部署评估必须满足 `requiresSwap == false` 和最低部署率，并在同一交易内建立目标 Position 后进入 ACTIVE。
 9. 部署评估的 `requiresSwap == true` 时，以 `SwapRequired()` 回滚；具体策略见第 9 节。
 10. 验证部署率、资产守恒和 Position 唯一性。
-11. 将初始计划写入 `lastExecutedPlan` ，并将 `planVersion` 写为 `1`。
+11. 将初始计划写入 `lastExecutedPlan`，将 `planVersion` 写为 `1`，并将 `lastPositionChangeAt` 写为当前 `block.timestamp`。
 12. 将 `initialized` 置为 `true`，并发出 `PositionPlanCommitted` 和 `VaultBootstrapped` 事件。
 
 Bootstrap 完成后的遵从规则如下：
@@ -295,6 +295,7 @@ v1 规则如下：
 ### 6.1 单位和快照
 
 - 所有 ERC-20 数量在合约内部使用各自 token 的 raw units。
+- v1 要求 `token0Decimals <= 18` 且 `token1Decimals <= 18`；Vault 构造时读取两个 Token 的 `IERC20Metadata.decimals()`，配置值必须与链上返回值一致，不一致或任一返回值大于 18 时均以 `InvalidTokenDecimals(token, configured, actual)` 拒绝部署。
 - Shares 固定使用 18 decimals；一份完整 share 的初始名义价值为一份完整 token1。
 - `NAV1`、`minimumInitialNav` 和迁移损失均以 token1 raw units 表示。
 - `Q1(amount0; tick)` 返回 token1 raw units，`Q0(amount1; tick)` 返回 token0 raw units；价格函数必须处理 Vault Token 顺序、canonical Pool 内部顺序和 decimals，具体取整规则由使用它的公式定义。
@@ -712,7 +713,7 @@ Vault 提供 `previewRebalance()` 策略只读接口。规则如下：
 - Venue 迁移；
 - V3 Recenter；
 - 策略进入或退出 IDLE；
-- Emergency Exit；
+- 调用前 `activeVenue != IDLE` 的 Emergency Exit；
 
 以下操作不得更新 `planVersion`：
 
@@ -862,7 +863,7 @@ $$
 7. 归还未使用资产；
 8. 验证资产守恒、Idle 和单活 Position；
 9. 将 `planVersion` 更新为执行计划的 `version`；
-10. 将 `lastExecutedPlan` 更新为执行计划，并更新 `lastSuccessfulRebalanceAt`；
+10. 将 `lastExecutedPlan` 更新为执行计划，并更新 `lastPositionChangeAt`；
 11. 发出 `PositionPlanCommitted` 和 `RebalanceExecuted` 事件。
 
 任一步骤失败时，交易必须回滚，且不得更新上述状态。
@@ -882,6 +883,7 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 - `swapRebalancePaused == false`；
 - Oracle Healthy；
 - `expectedPlanHash` 非零，且 `block.timestamp <= deadline`；
+- `minRebalanceCooldown` 已结束；
 - 重新生成的当前计划的 `planHash` 等于 `expectedPlanHash`；
 - 当前计划的目标 Adapter 满足 `isEnterEnabled(targetVenue) == true`；
 - 当前部署评估的 `requiresSwap == true`；
@@ -897,7 +899,7 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 5. 记录 Vault 的输入/输出 Token 余额和 Executor 的 token0/token1 余额，将精确的 `amountIn` 从 Vault 转入 Executor，再调用 `ControlledSwapExecutor.executeSwap()` 执行固定 exact-input Swap；
 6. 在调用目标 Adapter 前重新读取余额，以 Vault 的输出 Token 实际余额增量作为 `actualAmountOut`，并验证 Vault 的输入 Token 减少量等于 `amountIn`、`actualAmountOut` 等于 Executor 返回值且不低于 `minAmountOut`、Executor 的 token0/token1 余额恢复到转入前基线、Executor 对 Router 的 allowance 为零；该局部校验不使用 `dustTolerance0/1` 放宽；
 7. 使用 Swap 后的实际余额，在目标 Adapter 建立当前计划指定的 Position；
-8. 重新读取实际资产和 Position，完成最终迁移校验；全部校验通过后，将 `lastExecutedPlan` 更新为执行计划，并提交 `planVersion` 和 `lastSuccessfulRebalanceAt`；
+8. 重新读取实际资产和 Position，完成最终迁移校验；全部校验通过后，将 `lastExecutedPlan` 更新为执行计划，并提交 `planVersion` 和 `lastPositionChangeAt`；
 9. 发出 `PositionPlanCommitted`、`RebalanceExecuted` 和 `SwapExecuted` 事件，其中 `SwapExecuted.amountOut = actualAmountOut`。
 
 目标 Adapter 建仓完成后，Vault 必须重新读取实际状态并验证：
@@ -911,20 +913,20 @@ Swap 方向、`previewDeposit`、 `amountIn`、`protocolMinOut`、`keeperMinAmou
 
 ### 9.5 Emergency Exit to IDLE
 
-Guardian/Manager 可在不依赖价格估值的情况下触发幂等紧急退出 `emergencyExitToIdle()`。
+Guardian/Manager 可在不依赖价格估值的情况下触发幂等紧急退出 `emergencyExitToIdle()`。该入口不检查 `minRebalanceCooldown`，紧急撤仓不会被计划性 Rebalance 的时间限制阻塞。
 
 当调用前 `activeVenue != IDLE` 时：
 
 1. 调用当前 Active Adapter 的 `syncFees()` 并领取全部可领取手续费；
 2. 移除全部 LP liquidity，并验证资产守恒和旧 Position liquidity 为零；
 3. 设置 `activeVenue = IDLE`；
-4. 将 `planVersion` 递增 1，并保持 `lastExecutedPlan` 不变，使其 `marketRegime` 继续作为 Hysteresis 历史。
+4. 将 `planVersion` 递增 1，并保持 `lastExecutedPlan` 和 `lastPositionChangeAt` 不变；该时间戳继续约束后续计划性 Rebalance，历史计划的 `marketRegime` 继续作为 Hysteresis 历史。
 
 当调用前 `activeVenue == IDLE` 时：
 
 - 不调用任何 Adapter；
-- 不修改 `activeVenue`、`planVersion`、`lastExecutedPlan` 或 `lastSuccessfulRebalanceAt`；
-- 不发出 `EmergencyExit` 或资产位置事件。
+- 不修改 `activeVenue`、`planVersion`、`lastExecutedPlan` 或 `lastPositionChangeAt`；
+- 不发出 `EmergencyExit`。
 
 两个分支最后都必须把 `depositPaused`、`plainRebalancePaused` 和 `swapRebalancePaused` 设为 true。只有暂停 storage 实际变化时才发出 `PauseStateChanged`；只有调用前 `activeVenue != IDLE` 且全部 Position 成功清空时才发出 `EmergencyExit`。如果调用前已经 IDLE 且三个暂停位均为 true，调用成功但不修改状态，也不发出事件。
 
@@ -1053,6 +1055,7 @@ Bootstrap 成功后不可替换：
 身份与初始化：
 
 - 固定 token0/token1、canonical Oracle、Adapter 和 shares 语义已在链上验证；
+- `token0Decimals/token1Decimals` 的链上值与配置一致且均不超过 18，任一 Token 超限时部署回滚；
 - Bootstrap 只能成功一次；
 - Bootstrap 的最低 NAV、最低部署率、锁定 shares 和回滚语义完整。
 
@@ -1083,10 +1086,11 @@ Oracle 与策略：
 - Oracle 不健康时，Preview 和执行入口均以 `OracleUnhealthy()` 回滚，且不生成占位计划；
 - Strategy 使用 `planVersion == 0` 识别首次分类；之后 Vault 将 `lastExecutedPlan.marketRegime` 作为 `lastCommittedRegime` 参数传入 Strategy 执行 Hysteresis；
 - `narrowRangeHalfWidthSteps` 和 `wideRangeHalfWidthSteps` 按对应 Pool 的 `tickSpacing` 换算，低费率与高费率 Pool 的 spacing 来源及缓存一致，非法或越界 Range 以 `InvalidTickRange()` 回滚；
-- Position 结构变化的版本递增、Cooldown 和 Range 规则均经过测试。
+- Position 结构变化的版本递增和 Range 规则均经过测试。
 
 Rebalance、退出与接口：
 
+- Bootstrap 初始化 `lastPositionChangeAt`，两类 Rebalance 受同一 Cooldown 限制，Emergency Exit 可绕过检查且不重置计时，IDLE 幂等分支和失败交易不更新时间戳；
 - 普通 Rebalance 不含 Swap；
 - Preview、普通 Rebalance 和 Swap Rebalance 在非 IDLE 目标 Adapter 禁用时均以 `AdapterDisabled()` 回滚，但允许从已禁用的旧 Adapter 迁出；
 - Swap Rebalance 仅限 Keeper/Manager，且全部后置条件原子校验；

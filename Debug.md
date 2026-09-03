@@ -139,7 +139,7 @@ deployBps 同名指标在两处使用不同分母 NAV_1 vs NAV_after,sim ，分�
 Guardian 在 IDLE 状态调用紧急退出 回滚则 Guardian 无法区分 失败因已安全 与 失败因异常 ；成功则发出 EmergencyExit 事件但无任何状态变化 。锁定 shares 全部赎回后的不可重启 IDLE 壳同理。
 
 修改：
-- `emergencyExitToIdle()` 仅在调用前 `activeVenue != IDLE` 时同步费用、完整撤仓、递增一次 `planVersion` 并发出 `EmergencyExit`；已在 IDLE 时跳过 Adapter，不改变 `activeVenue`、`planVersion`、`lastExecutedPlan` 或 `lastSuccessfulRebalanceAt`，也不发出退出或资产位置事件。
+- `emergencyExitToIdle()` 仅在调用前 `activeVenue != IDLE` 时同步费用、完整撤仓、递增一次 `planVersion` 并发出 `EmergencyExit`；已在 IDLE 时跳过 Adapter，不改变 `activeVenue`、`planVersion`、`lastExecutedPlan` 或 `lastPositionChangeAt`，且不发出 `EmergencyExit`。
 - 两个分支都将三个暂停位设为 true；仅暂停 storage 实际变化时发出 `PauseStateChanged`。
 - 全部流通 shares 赎回不触发生命周期或资产位置转换；Redeem 仍按销毁前 `x/S` 部分退出 Position，保留 `minimumLockedShares` 对应的 Position 或 Idle 资产，`activeVenue`、`planVersion` 和 `lastExecutedPlan` 不变。
 - 产品验收与架构测试覆盖 ACTIVE/IDLE 两种 Emergency Exit 分支、重复调用、事件和版本不变，以及全部流通 shares 赎回后的锚定资产保留行为。
@@ -164,7 +164,7 @@ getPlan 在 Oracle 不健康时的返回契约未定义 Strategy 是纯函数，
 - Oracle 健康性仅由 `OracleSnapshot.healthy` 表达，不作为 Hysteresis 状态，也不写入 `lastCommittedRegime`。
 - Vault 在调用 `getPlan()` 前检查 Oracle 快照；`healthy == false` 时以 `OracleUnhealthy()` 回滚且不得调用 Strategy。
 - Strategy 若防御性地收到 `healthy == false` 的快照，也必须以 `OracleUnhealthy()` 回滚，不返回 `PositionPlan`，不计算 `planHash`。
-- 该失败路径不得修改 `positionPlan`、`lastCommittedRegime`、`planVersion`、`lastSuccessfulRebalanceAt` 或资产位置。
+- 该失败路径不得修改 `positionPlan`、`lastCommittedRegime`、`planVersion`、`lastPositionChangeAt` 或资产位置。
 - `previewRebalance()` 使用同一规则；Redeem 和 Emergency Exit 不依赖 Strategy，仍按各自规则开放。
 
 ## 问题 16
@@ -273,6 +273,12 @@ dustTolerance0/1 出现在可由 Admin 更新的治理参数表中，但 ARCH �
 ## 问题 27
 IdleStateChanged 事件的触发点集合未定义
 
+修改：
+- 删除冗余的 `IdleStateChanged` 事件。
+- `activeVenue` 的链下历史由动作事件完整覆盖：`VaultBootstrapped.initialVenue` 记录初始位置，成功的 `RebalanceExecuted.targetVenue` 记录 Rebalance 后位置，`EmergencyExit` 记录进入 `IDLE`。
+- 同 Venue V3 Recenter 的 `previousVenue == targetVenue`，链下位置保持不变；已在 IDLE 的 Emergency Exit 不发出 `EmergencyExit`。
+- Deposit、Redeem、费用同步、Donation、暂停和 Adapter 启停不改变 `activeVenue`，不需要额外的通用位置事件。
+
 ## 问题 28
 治理参数更新后 positionPlan 陈旧且 planVersion 不递增，Deposit 继续按旧计划建仓
 
@@ -281,6 +287,11 @@ IdleStateChanged 事件的触发点集合未定义
 ## 问题 29
 token1Decimals > 18 无约束，份额锚定与取整粒度退化
 
+修改：
+- v1 同时要求 `token0Decimals <= 18` 和 `token1Decimals <= 18`。
+- Vault 构造时读取两个 Token 的 `IERC20Metadata.decimals()`，配置值必须与链上返回值一致。
+- 配置不一致或任一链上值大于 18 时，以 `InvalidTokenDecimals(token, configured, actual)` 拒绝部署，避免 `10^decimals` 无界和 Token 精度高于 18 位 shares 的额外粒度语义。
+
 ## 问题 30
 单边实际存款为零时回滚错误未指定 ZeroAmount vs InvalidDepositRatio
 
@@ -288,6 +299,12 @@ token1Decimals > 18 无约束，份额锚定与取整粒度退化
 
 ## 问题 31
 Cooldown 与 Emergency Exit 的交互未显式对齐
+
+修改：
+- 普通 Rebalance 和带 Swap Rebalance 都必须满足同一 `minRebalanceCooldown`，未结束时以 `CooldownActive(availableAt)` 回滚。
+- Emergency Exit 为保证紧急撤仓活性而跳过 Cooldown 检查，且不更新 `lastPositionChangeAt`，不会重新开始 Cooldown。
+- Emergency Exit 后能否立即执行计划性 Rebalance，只取决于原有 `lastPositionChangeAt` 记录的 Cooldown 是否已经结束。
+- 已在 IDLE 的幂等分支和失败交易不更新时间戳。
 
 ## 问题 32
 ParameterUpdated 事件的参数转型语义未定义int24 参数与 bytes32 标识
@@ -301,7 +318,10 @@ ParameterUpdated 事件的参数转型语义未定义int24 参数与 bytes32 标
 ## 问题 34
 getAdapter(IDLE) 的返回值未定义
 
-> 已解决：`IDLE` 不代表 Adapter，Registry 的 Mapping Key 只允许三个非 IDLE Venue；`_adapterByVenue[IDLE]` 必须保持零值，因此 `getAdapter(IDLE)` 固定返回 `address(0)`，`isEnterEnabled(IDLE)` 固定返回 `false`。
+修改：
+- 明确 `IDLE` 不代表 Adapter。
+- Registry 的 Mapping Key 只允许三个非 IDLE Venue，`_adapterByVenue[IDLE]` 必须保持零值。
+- `getAdapter(IDLE)` 固定返回 `address(0)`，`isEnterEnabled(IDLE)` 固定返回 `false`。
 
 ## 问题 35
 继承式 Registry 与系统图/接口的部署语义不一致
@@ -320,6 +340,12 @@ Executor 在你的文档中被要求"验证计划哈希"，但它不接触 Strat
 
 ## 问题 38
 lastSuccessfulRebalanceAt 在 Bootstrap 成功时是否设置未定义
+
+修改：
+- 将该字段重命名为 `lastPositionChangeAt`，初始值为 `0`。
+- Bootstrap 成功时写入当前 `block.timestamp`。
+- 两类 Rebalance 成功时更新；Emergency Exit 不更新。
+- 该字段用于记录最近一次参与 Cooldown 计时的成功 Bootstrap 或计划性 Rebalance，因此 Bootstrap 后首次 Rebalance 也必须等待 Cooldown。
 
 ## 问题 39
 Adapter withdraw 最小输出与用户 redeem 最小输出的映射规则未定义

@@ -309,4 +309,4 @@ unused1 = 0 USDC
 - Router、Token 对、Pool、Fee Tier 或输出接收方不符合封存配置，或 Router/Pool 回调发送方校验失败；
 - Oracle 不健康或 Swap 安全边界不满足。
 
-失败交易不得更新 `lastExecutedPlan`、`planVersion`、`lastSuccessfulRebalanceAt` 或资产位置。
+失败交易不得更新 `lastExecutedPlan`、`planVersion`、`lastPositionChangeAt` 或资产位置。
