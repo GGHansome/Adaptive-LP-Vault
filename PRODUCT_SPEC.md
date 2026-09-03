@@ -200,7 +200,7 @@ Bootstrap 完成后的遵从规则如下：
 
 ### 5.3 Deposit
 
-用户提交 `amount0Max`、`amount1Max`、`minSharesOut` 和 `receiver`。Vault 只转入按存款前资产比例计算的实际数量，不先转入全部最大值。
+用户提交 `amount0Max`、`amount1Max`、`minSharesOut` 和 `receiver`。Vault 只转入按当前唯一 Active Position 本金比例计算的实际数量，不先转入全部最大值。
 
 前置条件：
 
@@ -210,26 +210,37 @@ Bootstrap 完成后的遵从规则如下：
 - `activeVenue != IDLE` 且 Active Position 结构有效；
 - `isEnterEnabled(activeVenue) == true`；Adapter 已禁用时以 `AdapterDisabled()` 回滚；
 - 存款前 `T0 > 0`、`T1 > 0`；
+- V3 Active Position 的 `principal0 > 0` 且 `principal1 > 0`；任一侧为零时以 `ActivePositionSingleSided()` 回滚；
 - 存款前 `idleBps <= maxHealthyIdleBps`；
-- 用户最大输入能够形成大于零的两边实际存款；
-- shares 计算结果不低于 `minSharesOut`。
 
-实际数量的目标关系是：
+设当前 Active Position Snapshot 的本金为 `p0 = principal0`、`p1 = principal1`。`d0` 和 `d1` 是实际从用户转入的数量，按以下最大共同存款公式计算：
 
 $$
-\frac{d_0}{T_0} \approx \frac{d_1}{T_1}
+amount0Max \times p_1 \le amount1Max \times p_0
+\quad\Longrightarrow\quad
+ d_0 = amount0Max,\qquad
+ d_1 = \left\lfloor\frac{amount0Max \times p_1}{p_0}\right\rfloor
 $$
 
-其中 `d0` 和 `d1` 是实际从用户转入的数量。整数实现必须向下舍入，并满足 `d0 <= amount0Max`、`d1 <= amount1Max`。比例误差只能来自最小单位舍入。
+$$
+amount0Max \times p_1 > amount1Max \times p_0
+\quad\Longrightarrow\quad
+ d_1 = amount1Max,\qquad
+ d_0 = \left\lfloor\frac{amount1Max \times p_0}{p_1}\right\rfloor
+$$
+
+所有乘除使用全精度 `mulDiv` 语义。公式必须满足 `d0 <= amount0Max`、`d1 <= amount1Max`；不得使用 `amount0/amount1` 或整个 Vault 的 `T0/T1` 作为 Deposit 比例来源。手续费不参与该比例计算。
 
 执行规则：
 
-1. 同步 Active Adapter 的费用并读取存款前资产快照。
-2. 使用存款前 `NAV1` 和 `S` 计算 `d0`、`d1`、`sharesMinted`。
-3. 从用户转入实际 `d0`、`d1`。
-4. 按当前 Position Plan 尝试增加流动性；不能部署的数量保留为 Idle。
-5. 验证 post-state 的 `idleBps`、单活 Position、资产守恒和 `sharesMinted >= minSharesOut`。
-6. 铸造 shares 给 `receiver` 并发出 `Deposit` 事件。
+1. 读取存款前 Oracle、资产和 Active Position Snapshot；费用同步按 §6.8 的统一会计路径执行，且不改变比例来源。
+2. 按上述公式计算实际 `d0`、`d1`；若 `d0 == 0` 或 `d1 == 0`，以 `ZeroAmount()` 回滚。
+3. 使用存款前 `NAV1`、`S` 和实际 `d0`、`d1` 计算 `sharesMinted`。
+4. 验证 `sharesMinted >= minSharesOut`；否则以 `SharesSlippage(sharesMinted, minSharesOut)` 回滚。
+5. 从用户转入实际 `d0`、`d1`。
+6. 按当前 Position Plan 尝试增加流动性；不能部署的数量保留为 Idle。
+7. 验证 post-state 的 `idleBps`、单活 Position 和资产守恒。
+8. 铸造 shares 给 `receiver` 并发出 `Deposit` 事件。
 
 任一检查失败，整笔交易回滚，用户未使用的最大输入不会离开钱包。
 
@@ -271,7 +282,7 @@ $$
 v1 规则如下：
 
 - 支持资产 Donation 永久归属于现有 shares 持有人；
-- Donation 可能改变存款比例、提高 `idleBps` 并关闭后续存款；
+- Donation 不改变按 Active Position 本金比例计算的 Deposit 数量，但可能提高 `idleBps` 并关闭后续存款；
 - Vault 不提供支持资产 `rescue`、`sweep`、退款或管理员提取接口；
 - 非支持资产不属于 v1 核心流程，不得通过通用转账接口引入资产转移权限。
 
@@ -466,7 +477,7 @@ $$
 
 Vault 和 Accounting 使用 `amount0/amount1` 计入 Position 资产后，不得再次加入 `claimableFee0/claimableFee1`。费用领取后，`claimableFee0/claimableFee1` 应从 Position 快照中移除，领取数量只能通过 Vault 实际余额进入 Idle 资产。
 
-调用时机：只有在 `Deposit`、`Redeem`、`Plain Rebalance`、`Swap Rebalance`、`Emergency Exit` 在读取定价、比例或迁移使用的最终资产快照前调用当前 Active Adapter 的 `syncFees()`。普通 shares 转账和只读接口无需同步。
+调用时机：`Deposit`、`Redeem`、`Plain Rebalance`、`Swap Rebalance`、`Emergency Exit` 在形成用于定价或迁移的最终资产快照前，必须按统一会计路径调用当前 Active Adapter 的 `syncFees()`；普通 shares 转账和只读接口无需同步。
 
 
 V3 Adapter 的 `syncFees()` 执行前必须满足前：
@@ -492,7 +503,7 @@ V3 Adapter 的 `syncFees()` 必须按以下顺序执行：
 Donation 直接增加 `I0/I1`，没有对应 `sharesMinted`。因此 Donation 发生后：
 
 - `NAV1` 和 `sharePrice1` 可能上升；
-- `T0/T1` 的存款比例可能变化；
+- Donation 不改变按 Active Position 本金比例计算的 Deposit 数量；
 - `idleBps` 可能超过健康上限；
 - 新 Deposit 应被关闭，直到恢复健康结构。
 
@@ -524,6 +535,7 @@ Bootstrap 对 Registry 执行最终封存：
 
 V2 Adapter 必须固定绑定一个 Pair、Vault、token0 和 token1，并提供：
 
+- 按 Pair 当前储备计算的 LP Token 权益作为 `PositionSnapshot` 的 `principal0/principal1` 和 `amount0/amount1`；`claimableFee0/1` 为零；
 - 按 Pair 当前储备比例增加流动性；
 - 读取 LP Token 余额和 Pair 总供应量；
 - 完整退出和按比例部分退出；
@@ -859,7 +871,7 @@ $$
 
 仅 Keeper/Manager 可以调用：`rebalanceWithSwap(expectedPlanHash, expectedDirection, amountIn, keeperMinAmountOut, deadline)`。
 
-固定的 Swap 基础设施：`ControlledSwapExecutor` 在部署或不可变初始化时固定.
+固定的 Swap 基础设施：`ControlledSwapExecutor` 在部署或不可变初始化时固定。Vault 在调用 `executeSwap()` 前向该 Executor 转入精确的 `amountIn`；Executor 只在本次调用期间持有输入资产，Router 的输出接收方固定为 Vault，调用者不能覆盖。
 
 `maxSwapSlippageBps` 是部署时固定的协议滑点上限，任何调用者都不能覆盖。Vault 使用本次迁移开始时捕获的 canonical TWAP 计算协议最低输出 `protocolMinOut`；方向报价和滑点折算均向上取整。Vault 将 `minAmountOut = max(protocolMinOut, keeperMinAmountOut)` 写入本次 `SwapPlan`。
 
@@ -882,14 +894,14 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 2. 检查目标 Adapter 已启用，再对当前 `T0/T1` 执行首次部署评估，使用派生值 `minDeployBps = BPS - maxHealthyIdleBps` 校验 `initialDeployBps < minDeployBps`、`requiresSwap == true` 以及 `direction == expectedDirection`；
 3. 同步费用并捕获迁移前 TWAP 和 NAV，退出旧 Position 后重新读取实际余额；
 4. 检查 `amountIn`，根据最差 `protocolMinOut` 模拟 Swap 后余额并计算 `simulatedDeployBps(x)`，验证不会换过头且满足部署率和 Idle 限制，再构造临时 `SwapPlan`；
-5. 调用 `ControlledSwapExecutor.executeSwap()` 执行固定 exact-input Swap；
-6. 使用 Swap 后的实际余额，在目标 Adapter 建立当前计划指定的 Position；
-7. 重新读取实际资产和 Position，完成最终校验；全部校验通过后，将 `lastExecutedPlan` 更新为执行计划，并提交 `planVersion` 和 `lastSuccessfulRebalanceAt`。
-8. 发出 `PositionPlanCommitted` 和 `RebalanceExecuted` 事件。
+5. 记录 Vault 的输入/输出 Token 余额和 Executor 的 token0/token1 余额，将精确的 `amountIn` 从 Vault 转入 Executor，再调用 `ControlledSwapExecutor.executeSwap()` 执行固定 exact-input Swap；
+6. 在调用目标 Adapter 前重新读取余额，以 Vault 的输出 Token 实际余额增量作为 `actualAmountOut`，并验证 Vault 的输入 Token 减少量等于 `amountIn`、`actualAmountOut` 等于 Executor 返回值且不低于 `minAmountOut`、Executor 的 token0/token1 余额恢复到转入前基线、Executor 对 Router 的 allowance 为零；该局部校验不使用 `dustTolerance0/1` 放宽；
+7. 使用 Swap 后的实际余额，在目标 Adapter 建立当前计划指定的 Position；
+8. 重新读取实际资产和 Position，完成最终迁移校验；全部校验通过后，将 `lastExecutedPlan` 更新为执行计划，并提交 `planVersion` 和 `lastSuccessfulRebalanceAt`；
+9. 发出 `PositionPlanCommitted`、`RebalanceExecuted` 和 `SwapExecuted` 事件，其中 `SwapExecuted.amountOut = actualAmountOut`。
 
-Swap 和目标 Adapter 建仓完成后，Vault 必须重新读取实际状态并验证：
+目标 Adapter 建仓完成后，Vault 必须重新读取实际状态并验证：
 
-- 实际 Swap 输出和 Executor 的余额增量满足 `minAmountOut` 最低输出要求；
 - `deployBps >= minDeployBps`，其中 `minDeployBps = BPS - maxHealthyIdleBps`；
 - `idleBps <= maxHealthyIdleBps`；
 - 完整迁移后的 NAV 损失不超过 `maxMigrationLossBps`；

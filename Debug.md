@@ -235,6 +235,15 @@ redeem 接口无 owner 参数，"获授权 spender"入口规则无法实现
 Deposit 实际数量 d0/d1 的推导算法未定义双侧 max 的截断与舍入路径不唯一
 目标关系只给出比例约束（1 参数解族），加上两个上限后仍存在多条合法推导路径：锚定 token0 侧（d0 = min(max0, ⌊max1 × T0/T1⌋)，d1 = ⌊d0 × T1/T0⌋）、锚定 token1 侧（对称）、或按 f = min(max0/T0, max1/T1) 等比缩放再各自向下取整。在比例非整除的输入下，这些算法给出不同的 (d0, d1)（差异在最小单位量级），且均满足"误差仅来自舍入"的字面要求——但 sharesMinted 与 InvalidDepositRatio 的触发边界随之不同。同一用户输入在不同实现下获得不同 shares，存款定价的确定性与公平性依赖实现者选择。
 
+> 原因：Deposit 的实际数量应匹配当前唯一 Active Position 的本金比例，而不是整个 Vault 的 `T0/T1`；双侧最大输入仍需要唯一的限制侧选择和整数舍入规则。
+
+修改：
+- 设当前 Active Position Snapshot 的 `p0 = principal0`、`p1 = principal1`，且 `p0 > 0`、`p1 > 0`。
+- 当 `amount0Max × p1 <= amount1Max × p0` 时，取 `d0 = amount0Max`、`d1 = floor(amount0Max × p1 / p0)`。
+- 否则取 `d1 = amount1Max`、`d0 = floor(amount1Max × p0 / p1)`。
+- 乘除使用全精度 `mulDiv` 语义；`previewDeposit()` 与真实 `deposit()` 使用相同的公式和舍入路径。
+- `d0`、`d1` 使用实际转入数量计算 shares；手续费不参与 Deposit 比例推导。
+
 ## 问题 24
 "所有 AMM 操作包含最小输出和截止时间"与 bootstrap/deposit/Adapter 接口参数面不符
 
@@ -248,9 +257,18 @@ Deposit 实际数量 d0/d1 的推导算法未定义双侧 max 的截断与舍入
 Swap 接收地址二义性："Vault 或受控 Executor"未裁定，余额增量校验对象随之不明
 Swap 输出接收方在"Vault"与"受控 Executor"两个选项间未裁定。若接收方是 Executor 输出 token 滞留 Executor，后续 Adapter 建仓需要 Executor→Vault 的二次转账（该流程、授权与清理均未定义），且"实际余额增量"应度量 Executor 余额；若接收方是 Vault：增量度量 Vault 余额，MATH §6 "带 Swap 路径的 Executor 实际余额增量满足 minAmountOut" 的表述指代错位（增量发生在 Vault 而非 Executor）。两种读法下的后置校验位置、资金流与授权模型均不同。
 
+> 原因：架构曾局部写明输出接收方为 Vault，但产品流程、数学规范、输入资金交付和局部校验时点没有同步闭环。
+
+修改：
+- 以 `PRODUCT_SPEC.md` §9.4 作为业务事实来源：Vault 向固定 Executor 转入精确 `amountIn`，Router 输出固定发送到 Vault；Swap 后、Adapter 建仓前以 Vault 输出 Token 余额增量确定 `actualAmountOut`，并校验输入扣减、返回值、Executor 余额基线和 Router allowance。
+- 在 `SWAP_REBALANE_MATH.md` §5—6 补齐对应余额公式，区分 Swap 局部校验与建仓后的完整迁移校验。
+- `ARCHITECTURE.md` 只保留 Executor 的接口、存储和模块职责边界，并引用产品与数学规范；测试矩阵增加上述资产流和清理条件，不重复业务流程。
+
 ## 问题 26
  dustTolerance0/1 列于治理参数表但归入 ImmutableConfig，可更新性矛盾
 dustTolerance0/1 出现在可由 Admin 更新的治理参数表中，但 ARCH 将其定义为不可变配置，两份文档对同一参数的可变性判定相反。且含混具有安全敏感性：守恒校验的容忍窗口若可治理调大，等于可放宽资产损失检查——与 自身声明的"不能用于放宽价值损失"冲突。
+
+> 已并入问题 2 统一处理：删除可更新治理参数表、运行时参数更新入口及 `ParameterUpdated` 语义；`dustTolerance0/1` 作为 `VaultConfig` 构造输入分别写入 `immutable` 状态变量，部署后任何角色均不得修改。两者仅以 token0/token1 raw units 表示整数舍入、最小单位和 AMM 数学造成的微小容忍，不得通过治理调大以放宽资产守恒检查。
 
 ## 问题 27
 IdleStateChanged 事件的触发点集合未定义
@@ -266,6 +284,8 @@ token1Decimals > 18 无约束，份额锚定与取整粒度退化
 ## 问题 30
 单边实际存款为零时回滚错误未指定 ZeroAmount vs InvalidDepositRatio
 
+修改：当 `activeVenue` 对应 V3 Adapter 且 Active Position 的 `principal0 == 0` 或 `principal1 == 0` 时，Deposit 前置检查以 `ActivePositionSingleSided()` 回滚。双边 Active Position 下，按 principal 比例计算后 `d0 == 0` 或 `d1 == 0` 时以 `ZeroAmount()` 回滚。
+
 ## 问题 31
 Cooldown 与 Emergency Exit 的交互未显式对齐
 
@@ -280,6 +300,8 @@ ParameterUpdated 事件的参数转型语义未定义int24 参数与 bytes32 标
 
 ## 问题 34
 getAdapter(IDLE) 的返回值未定义
+
+> 已解决：`IDLE` 不代表 Adapter，Registry 的 Mapping Key 只允许三个非 IDLE Venue；`_adapterByVenue[IDLE]` 必须保持零值，因此 `getAdapter(IDLE)` 固定返回 `address(0)`，`isEnterEnabled(IDLE)` 固定返回 `false`。
 
 ## 问题 35
 继承式 Registry 与系统图/接口的部署语义不一致

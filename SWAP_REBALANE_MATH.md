@@ -214,15 +214,15 @@ $$
 
 ## 5. Router 与固定 Swap 方法
 
-v1 的 Router、Token 对、Pool/Fee Tier、固定 Swap 方法和接收地址规则在 `ControlledSwapExecutor` 部署或不可变初始化时配置，并在 Bootstrap 时校验。Bootstrap 后不能由 Keeper/Manager 通过调用参数替换。
+v1 的 Router、Token 对、Pool/Fee Tier 和固定 Swap 方法在 `ControlledSwapExecutor` 部署或不可变初始化时配置，并在 Bootstrap 时校验。Bootstrap 后不能由 Keeper/Manager 通过调用参数替换；
 
 推荐使用固定的 exact-input、single-hop 方法：
 
 - `tokenIn` 和 `tokenOut` 只能是 Vault 固定的 token0/token1；
 - Pool/Fee Tier 来自封存配置；
 - `amountIn` 和 `minAmountOut` 是本次执行参数；
-- 接收地址固定为 Vault 或受控 Executor；
-- 不接受任意 Router、任意路径、任意 calldata、任意回调接收方或无限授权。
+- 输出接收地址固定为 Vault；
+- 不接受任意 Router、任意路径、任意 calldata、外部 receiver 或未验证的回调发送方。
 
 Keeper/Manager 提交交易级的 `expectedPlanHash`、`expectedDirection`、`amountIn`、`keeperMinAmountOut` 和 `deadline`。`expectedDirection` 必须非 `NONE`，并与 Vault 首次 `DeploymentAssessment.direction` 一致；该参数只确认预期方向，不替代 Vault 的计算。
 
@@ -230,19 +230,31 @@ Keeper/Manager 提交交易级的 `expectedPlanHash`、`expectedDirection`、`am
 
 `ControlledSwapExecutor` 只负责 Swap 本地安全检查和执行：
 
-- 只接受 Vault 调用；
-- 验证固定 Router、Token 对、方向、`amountIn`、`minAmountOut` 和 `deadline`；
-- 使用精确授权并在不需要时清理授权；
-- 固定回调和接收地址；
-- 执行 Swap 后重新读取 Token 余额，不能只信任 Router 返回值。
+- 只接受 Vault 调用，并仅使用 Vault 已转入的精确 `amountIn`；
+- 验证方向、`amountIn`、`minAmountOut` 和 `deadline`；
+- 对 Router 使用精确授权并在调用后清零；
+- 将输出接收方固定为 Vault；
+- 以 Vault 的输出 Token 实际余额增量计算并返回 `actualAmountOut`，不能只信任 Router 返回值。
 
-完整迁移校验由 Vault 负责。Vault 必须在 Swap、目标 Adapter 建仓和所有外部调用完成后，重新读取实际资产和 Position，并校验：
+设 `VInBefore/VOutBefore` 为 Vault 向 Executor 转入 `amountIn` 前的输入和输出 Token 余额，`VInAfterSwap/VOutAfterSwap` 为 `executeSwap()` 返回后、目标 Adapter 建仓前的余额。Vault 必须立即验证：
+
+$$
+VInBefore - VInAfterSwap = amountIn
+$$
+
+$$
+actualAmountOut = VOutAfterSwap - VOutBefore \ge minAmountOut
+$$
+
+Executor 返回值等于 `actualAmountOut`；Executor 的 token0/token1 余额恢复到 Vault 转入前的基线，且其 Router allowance 为零。
+
+完整迁移校验由 Vault 在目标 Adapter 建仓后负责，包括：
 
 - `deployBps >= minDeployBps`；
 - `idleBps <= maxHealthyIdleBps`；
 - 目标 Position 唯一且有效；
 - 无 Swap 路径的逐 Token 资产守恒，允许差异仅在 `dustTolerance0/1` 范围内；
-- 带 Swap 路径的 Executor 实际余额增量满足 `minAmountOut`；
+- 带 Swap 路径按 `amountIn` 和 `actualAmountOut` 调整后的资产位置与余额守恒；
 - NAV 损失不超过 `maxMigrationLossBps`。
 
 迁移前捕获的 `twapTickBefore` 用于迁移前后 NAV 比较：
@@ -288,12 +300,13 @@ unused1 = 0 USDC
 - `expectedPlanHash` 与重新生成的当前计划不匹配；
 - `expectedDirection == NONE`，或与首次 `DeploymentAssessment.direction` 不一致；
 - `amountIn` 方向错误、超过可用余额或导致资产比例换过头；
-- 实际输出低于 `minAmountOut`；
+- Vault 的实际输入 Token 减少量不等于 `amountIn`；
 - `deadline` 已过期；
 - `DeployBps`、`IdleBps` 或 NAV 损失校验失败；
 - 无 Swap 路径的逐 Token 资产守恒失败；
-- 带 Swap 路径的实际余额增量低于 `minAmountOut`；
-- Router、Token 对、Pool、Fee Tier 或回调接收方不符合封存配置；
+- Vault 的实际输出 Token 余额增量低于 `minAmountOut`，或与 Executor 返回值不一致；
+- Executor 的 token0/token1 余额未恢复调用前基线，或 Router allowance 未清零；
+- Router、Token 对、Pool、Fee Tier 或输出接收方不符合封存配置，或 Router/Pool 回调发送方校验失败；
 - Oracle 不健康或 Swap 安全边界不满足。
 
 失败交易不得更新 `lastExecutedPlan`、`planVersion`、`lastSuccessfulRebalanceAt` 或资产位置。
