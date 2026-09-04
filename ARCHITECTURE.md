@@ -255,14 +255,6 @@ struct AccessControlConfig {
     address initialDefaultAdmin;
 }
 
-struct OracleConfig {
-    address token0;
-    address token1;
-    address canonicalPool;
-    uint32 twapWindowSeconds;
-    uint32 shortTwapWindowSeconds;
-}
-
 struct StrategyConfig {
     uint32 minRebalanceCooldown;
     uint24 enterMediumBps;
@@ -277,6 +269,14 @@ struct StrategyConfig {
     uint16 maxHealthyIdleBps;
     uint16 maxSwapSlippageBps;
     uint16 maxMigrationLossBps;
+}
+
+struct OracleConfig {
+    address token0;
+    address token1;
+    address canonicalPool;
+    uint32 twapWindowSeconds;
+    uint32 shortTwapWindowSeconds;
 }
 ```
 
@@ -356,7 +356,6 @@ struct DeploymentAssessment {
 }
 
 struct SwapPlan {
-    bytes32 planHash;
     SwapDirection direction;
     uint256 amountIn;
     uint256 minAmountOut;
@@ -370,7 +369,7 @@ struct V3RangeContext {
 ```
 
 - `V3RangeContext` 由 Vault 根据 `_adapterByVenue` 的 spacing 缓存构造，只作为 Strategy 调用的运行时上下文，不属于部署策略参数。
-- `planHash` 覆盖 `targetVenue`、`marketRegime`、`tickLower`、`tickUpper` 和 `version`。
+- `PositionPlan.planHash` 覆盖 `targetVenue`、`marketRegime`、`tickLower`、`tickUpper` 和 `version`。
 - `DeploymentAssessment` 是 Vault 根据当前资产和目标 Adapter 生成的临时内存结果，不写入 `lastExecutedPlan` storage。
 - `SwapPlan` 是 Vault 在执行入口内构造、仅传给 `ControlledSwapExecutor` 的交易级对象，不是调用者可自由提交的完整目标结构。
 - `deadline` 由调用入口独立校验；调用者不能传入任意目标字段、Router、实际方向或 calldata。
@@ -731,54 +730,149 @@ ControlledSwapExecutor 架构边界：
 
 ## 7. 错误契约
 
-错误使用 custom error，Vault 自定义错误名和触发语义固定如下；继承自 OpenZeppelin `IAccessControl`、`IAccessControlDefaultAdminRules` 和 shares ERC-20 的标准错误不在此重复声明：
+错误使用 custom error，错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。Vault 自定义错误名和触发语义固定如下。
+
+继承错误沿用 OpenZeppelin 标准语义：角色授权和 `renounceRole` 调用者确认失败分别使用 `IAccessControl` 的 `AccessControlUnauthorizedAccount` 与 `AccessControlBadConfirmation`；非法根管理员、绕过单一根管理员或两阶段规则以及尚未满足延迟的操作，分别使用 `IAccessControlDefaultAdminRules` 的 `AccessControlInvalidDefaultAdmin`、`AccessControlEnforcedDefaultAdminRules` 和 `AccessControlEnforcedDefaultAdminDelay`，Vault 不定义额外的最后管理员错误或自定义根管理员计数错误。`redeem` 在 `owner` shares 余额不足或代赎 allowance 不足时，分别使用 `IERC20Errors` 的 `ERC20InsufficientBalance` 与 `ERC20InsufficientAllowance`；
 
 ```solidity
+/// @notice 仅允许初始化前调用的入口在 Vault 已初始化后被调用。
 error AlreadyInitialized();
+
+/// @notice 要求已初始化状态的入口在 Vault 尚未初始化时被调用。
+/// @dev 适用于 setPauseState、setAdapterEnabled、Emergency Exit 和 previewRebalance；检查必须早于业务状态读取。
 error NotInitialized();
+
+/// @notice Guardian 尝试把任一暂停位从 true 改为 false。
 error GuardianCannotUnpause();
+
+/// @notice 调用所需入口当前处于暂停状态。
+/// @param flag 阻止本次调用的暂停位。
 error Paused(PauseFlag flag);
+
+/// @notice Bootstrap、Deposit、Preview 或两类 Rebalance 的 Oracle 健康门控失败。
+/// @dev 该错误路径不得生成或返回 PositionPlan。
 error OracleUnhealthy();
+
+/// @notice Canonical Pool 的可用观察数据不足以覆盖所需时间窗口。
 error ObservationInsufficient();
+
+/// @notice 配置组件绑定的资产对与 Vault 的固定 token0/token1 不一致。
 error InvalidAssetPair();
+
+/// @notice Token 的配置 decimals 与链上返回值不一致，或链上返回值大于 18。
+/// @param token 校验失败的 Token。
+/// @param configured 部署配置中的 decimals。
+/// @param actual IERC20Metadata.decimals() 返回的 decimals。
 error InvalidTokenDecimals(address token, uint8 configured, uint8 actual);
+
+/// @notice Bootstrap 的初始 NAV 低于 minimumInitialNav。
 error MinimumNavNotMet();
+
+/// @notice 双边 Active Position 下计算出的实际存款 d0 或 d1 为零。
 error ZeroAmount();
+
+/// @notice V3 Active Position 的 principal0 或 principal1 为零，不能接受 Deposit。
 error ActivePositionSingleSided();
+
+/// @notice 执行时计算出的 sharesMinted 低于调用者指定的 minSharesOut。
+/// @param actual 实际计算出的 sharesMinted。
+/// @param minimum 调用者要求的最小 shares 输出。
 error SharesSlippage(uint256 actual, uint256 minimum);
+
+/// @notice Redeem 的实际双资产输出未同时满足调用者指定的最小输出。
+/// @param amount0 实际 token0 输出。
+/// @param amount1 实际 token1 输出。
 error AssetSlippage(uint256 amount0, uint256 amount1);
+
+/// @notice 当前重新生成的 PositionPlan 哈希与 expectedPlanHash 不一致。
 error InvalidPlanHash();
+
+/// @notice Swap 方向为 NONE，或与当前部署评估派生的方向不一致。
 error InvalidSwapDirection();
+
+/// @notice Adapter 绑定缺少有效 V3 tickSpacing、spacing 非正值或与 Pool 不一致。
 error InvalidTickSpacing();
+
+/// @notice spacing 步数换算溢出、Range 边界不合法或生成的 Range 超出 Uniswap V3 可用 Tick。
 error InvalidTickRange();
+
+/// @notice 当前区块时间已经超过调用者指定的 deadline。
 error DeadlineExpired();
+
+/// @notice 计划生成的状态或 Range 与当前状态相同，无需执行变更。
 error NoStateChangeRequired();
+
+/// @notice 计划性 Rebalance 的最小冷却时间尚未结束。
+/// @param availableAt 允许再次执行计划性 Rebalance 的最早时间。
+/// @dev 两类 Rebalance 均使用该错误；Emergency Exit 不受此限制。
 error CooldownActive(uint256 availableAt);
+
+/// @notice Bootstrap 或普通 rebalance 的部署评估表明必须先执行 Swap。
+/// @dev 这是通过 revert data 返回的 custom error，不是事件。
 error SwapRequired();
+
+/// @notice 当前入口、计划或部署评估不允许执行 Swap。
 error SwapNotAllowed();
+
+/// @notice Swap 使用的 Router 不是 Executor 部署时封存的 Router。
 error RouterNotAllowed();
+
+/// @notice Swap 涉及的 Token 不属于 Vault 固定的 token0/token1，或与方向不一致。
 error TokenNotAllowed();
+
+/// @notice amountIn 超过本次过量资产修复允许使用的最大数量。
 error SwapAmountExceeded();
+
+/// @notice Swap 的实际输出低于本次 SwapPlan 的 minAmountOut。
 error SwapSlippage();
+
+/// @notice 完整迁移后的 NAV 损失超过 maxMigrationLossBps。
 error MigrationLossExceeded();
+
+/// @notice Deposit 或 Rebalance 后的 Idle 比例超过 maxHealthyIdleBps。
 error IdleLimitExceeded();
+
+/// @notice 目标 Position 的实际或模拟部署率低于派生的 minDeployBps。
 error DeploymentRatioTooLow();
+
+/// @notice 建立目标 Position 前仍存在另一有效 Position。
 error ActivePositionExists();
+
+/// @notice 退出后旧 Position 的 liquidity 或资产状态未完全清空。
 error PositionNotCleared();
+
+/// @notice 请求的非 IDLE Venue 尚未绑定 Adapter。
 error AdapterNotRegistered();
+
+/// @notice 当前 Active Adapter 或非 IDLE 候选目标 Adapter 不允许建立或增加 liquidity。
+/// @dev 必须在对应 Adapter 的 previewDeposit、deposit 或用户 Token 转入前检查；不阻止从已禁用旧 Adapter 读取、同步费用或退出。
 error AdapterDisabled();
+
+/// @notice Adapter 或 ControlledSwapExecutor 的资产方法由 Vault 以外的地址调用。
 error NotVaultCaller();
+
+/// @notice 外部回调或资产操作涉及 Vault 不支持的 Token。
 error UnsupportedToken();
+
+/// @notice 非重入保护检测到重入调用。
 error Reentrancy();
 ```
 
-错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。`InvalidTokenDecimals(token, configured, actual)` 用于 Vault 构造时任一 Token 的配置 decimals 与 `IERC20Metadata.decimals()` 返回值不一致，或链上返回值大于 18。角色授权和 `renounceRole` 调用者确认失败分别采用 OpenZeppelin `IAccessControl` 的 `AccessControlUnauthorizedAccount` 与 `AccessControlBadConfirmation`。`redeem` 在 `owner` shares 余额不足或代赎 allowance 不足时，分别采用 OpenZeppelin `IERC20Errors` 的 `ERC20InsufficientBalance` 与 `ERC20InsufficientAllowance` 标准语义；持有人自赎不检查 allowance。`AccessControlInvalidDefaultAdmin`、`AccessControlEnforcedDefaultAdminRules` 和 `AccessControlEnforcedDefaultAdminDelay` 直接采用 `IAccessControlDefaultAdminRules` 的标准语义，用于非法根管理员、绕过单一根管理员/两阶段规则以及尚未满足延迟的操作；Vault 不定义额外的最后管理员错误或自定义根管理员计数错误。`GuardianCannotUnpause()` 用于 Guardian 尝试把任一暂停位从 true 改为 false。`NotInitialized()` 用于要求已初始化状态的入口，包括 `setPauseState`、`setAdapterEnabled`、Emergency Exit 和未初始化 Vault 上的 `previewRebalance()`；该检查必须早于这些入口的业务状态读取。`OracleUnhealthy()` 用于 Bootstrap、Deposit、Preview 和两类 Rebalance 的健康门控，该错误路径不生成或返回 `PositionPlan`。`ActivePositionSingleSided()` 仅用于 V3 Active Position 的 `principal0` 或 `principal1` 为零时的 Deposit 前置检查；`ZeroAmount()` 用于双边 Position 下实际 `d0` 或 `d1` 为零；`SharesSlippage(actual, minimum)` 用于执行过程中计算出的 `sharesMinted` 低于 `minSharesOut`；`IdleLimitExceeded()` 用于 Deposit 或 Rebalance 的 Idle 健康约束失败。`AdapterDisabled()` 用于当前 Active Adapter 已禁用的 Deposit，以及非 IDLE 候选目标 Adapter 已禁用的 Bootstrap、Preview 和两类 Rebalance；检查必须发生在对应 Adapter 的 `previewDeposit()`、`deposit()` 或用户 Token 转入之前，不阻止从已禁用旧 Adapter 读取、同步费用或退出。`InvalidTickSpacing()` 用于 Adapter 绑定缺少、非正值或与 Pool 不一致的 V3 spacing；`InvalidTickRange()` 用于 spacing 步数换算溢出、边界不合法或生成的 Range 超出 Uniswap V3 可用 Tick。`SwapRequired()` 是回滚返回的 custom error，不是事件；当 Bootstrap 或普通 `rebalance` 的 `DeploymentAssessment.requiresSwap` 为 true 时使用该错误终止交易。`CooldownActive(availableAt)` 用于两类 Rebalance 在 `block.timestamp < uint256(lastPositionChangeAt) + minRebalanceCooldown` 时回滚，其中 `availableAt` 是允许再次执行计划性 Rebalance 的最早时间；Emergency Exit 不触发该错误。
-
 ## 8. 事件契约
 
-事件字段是链下索引和审计的稳定接口。以下代码块仅列出 Vault 自定义事件；继承自 `IAccessControl`、`IAccessControlDefaultAdminRules` 和 shares ERC-20 的标准事件不在此重复声明。所有事件由 Vault 或对应模块在状态成功更新后发出。
+事件字段是链下索引和审计的稳定接口。以下代码块仅列出 Vault 自定义事件；继承的 `RoleAdminChanged`、`RoleGranted`、`RoleRevoked` 沿用 OpenZeppelin `IAccessControl` 标准语义，`DefaultAdminTransferScheduled`、`DefaultAdminTransferCanceled`、`DefaultAdminDelayChangeScheduled` 和 `DefaultAdminDelayChangeCanceled` 沿用 `IAccessControlDefaultAdminRules` 标准语义。
+
+所有事件由 Vault 或对应模块在状态成功更新后发出。任何以 custom error 回滚的交易都不会保留事件日志，协议不定义失败事件；链下索引器按下列动作事件重建 `activeVenue` 历史。
 
 ```solidity
+/// @notice Bootstrap 成功并完成初始资产、shares、Position 和生命周期状态提交。
+/// @dev initialVenue 是链下 activeVenue 历史的起点。
+/// @param manager 执行 Bootstrap 的 Manager。
+/// @param amount0 实际纳入 Vault 的初始 token0 数量。
+/// @param amount1 实际纳入 Vault 的初始 token1 数量。
+/// @param grossInitialShares 初始资产对应的 shares 总铸造量。
+/// @param lockedShares 铸造给 Vault 自身并永久锁定的 shares 数量。
+/// @param initialVenue Bootstrap 完成后的资产位置。
 event VaultBootstrapped(
     address indexed manager,
     uint256 amount0,
@@ -788,6 +882,12 @@ event VaultBootstrapped(
     VenueType initialVenue
 );
 
+/// @notice Deposit 成功并按实际转入资产铸造 shares。
+/// @param caller 发起 Deposit 并提供资产的地址。
+/// @param receiver 接收新铸造 shares 的地址。
+/// @param amount0 实际转入的 token0 数量。
+/// @param amount1 实际转入的 token1 数量。
+/// @param shares 实际铸造给 receiver 的 shares 数量。
 event Deposit(
     address indexed caller,
     address indexed receiver,
@@ -796,6 +896,13 @@ event Deposit(
     uint256 shares
 );
 
+/// @notice Redeem 成功并从 owner 销毁 shares，向 receiver 发送双资产。
+/// @param caller 实际发起 Redeem 的持有人或获授权 spender。
+/// @param receiver 接收 token0 和 token1 的地址。
+/// @param owner 被销毁 shares 的持有人。
+/// @param shares 从 owner 销毁的 shares 数量。
+/// @param amount0 实际发送给 receiver 的 token0 数量。
+/// @param amount1 实际发送给 receiver 的 token1 数量。
 event Redeem(
     address indexed caller,
     address indexed receiver,
@@ -805,6 +912,11 @@ event Redeem(
     uint256 amount1
 );
 
+/// @notice 新 PositionPlan 已成功执行并提交为 Vault 的计划历史。
+/// @param planHash 已提交计划的稳定哈希。
+/// @param version 已提交的计划版本。
+/// @param targetVenue 计划指定并在提交时成立的目标资产位置。
+/// @param regime 计划提交的 Market Regime，用作后续 Hysteresis 历史。
 event PositionPlanCommitted(
     bytes32 indexed planHash,
     uint64 indexed version,
@@ -812,6 +924,17 @@ event PositionPlanCommitted(
     MarketRegime regime
 );
 
+/// @notice Rebalance 的全部迁移步骤和 post-condition 均已成功完成。
+/// @dev targetVenue 更新链下 activeVenue 历史；同 Venue V3 Recenter 时 previousVenue == targetVenue。
+/// @param caller 发起本次 Rebalance 的地址。
+/// @param planHash 本次执行并提交的 PositionPlan 哈希。
+/// @param previousVenue 执行前的资产位置。
+/// @param targetVenue 执行完成后的资产位置。
+/// @param withSwap 本次迁移是否执行受控 Swap。
+/// @param total0 执行完成后的 token0 总资产。
+/// @param total1 执行完成后的 token1 总资产。
+/// @param nav1 执行完成后以 token1 raw units 表示的 NAV。
+/// @param idleBps 执行完成后的 Idle 资产比例。
 event RebalanceExecuted(
     address indexed caller,
     bytes32 indexed planHash,
@@ -824,6 +947,12 @@ event RebalanceExecuted(
     uint256 idleBps
 );
 
+/// @notice 已执行计划改变了 V3 Position 的 Tick Range。
+/// @param planHash 触发 Range 变化的 PositionPlan 哈希。
+/// @param oldTickLower 原 Range 下界。
+/// @param oldTickUpper 原 Range 上界。
+/// @param newTickLower 新 Range 下界。
+/// @param newTickUpper 新 Range 上界。
 event V3RangeChanged(
     bytes32 indexed planHash,
     int24 oldTickLower,
@@ -832,6 +961,13 @@ event V3RangeChanged(
     int24 newTickUpper
 );
 
+/// @notice Adapter 已把本次 claimable 手续费增量归集到 Vault 会计状态。
+/// @dev fee0 和 fee1 是本次归集的增量，不是再次计入总资产的额外资产。
+/// @param adapter 执行费用同步的 Active Adapter。
+/// @param fee0 本次归集的 token0 手续费增量。
+/// @param fee1 本次归集的 token1 手续费增量。
+/// @param total0 同步完成后的 token0 总资产。
+/// @param total1 同步完成后的 token1 总资产。
 event FeesSynchronized(
     address indexed adapter,
     uint256 fee0,
@@ -840,6 +976,13 @@ event FeesSynchronized(
     uint256 total1
 );
 
+/// @notice ControlledSwapExecutor 已通过封存的 Router 完成受控 Swap。
+/// @dev amountOut 是 Vault 输出 Token 的实际余额增量；Emergency Exit 禁止 Swap，因此不发出本事件。
+/// @param router 执行 Swap 的部署时封存 Router。
+/// @param direction 实际执行的 token0/token1 Swap 方向。
+/// @param amountIn 实际使用的输入 Token 数量。
+/// @param amountOut Vault 实际收到的输出 Token 数量。
+/// @param protocolMinOut 根据 canonical TWAP 和协议滑点上限计算的最低输出。
 event SwapExecuted(
     address indexed router,
     SwapDirection direction,
@@ -848,6 +991,13 @@ event SwapExecuted(
     uint256 protocolMinOut
 );
 
+/// @notice Vault 地址上的 Registry 已配置并验证一个 Venue 的 Adapter 绑定。
+/// @dev pool、feeTier 和 tickSpacing 是配置时从 Adapter 或 Pool 读取并验证后的实际绑定值。
+/// @param venue 被配置的非 IDLE Venue。
+/// @param adapter 已独立部署并通过绑定校验的 Adapter。
+/// @param pool Adapter 绑定的实际 Pool。
+/// @param feeTier Adapter 绑定的实际 Fee Tier；V2 为零。
+/// @param tickSpacing Adapter 绑定并缓存的实际 Tick spacing；V2 为零。
 event AdapterConfigured(
     VenueType indexed venue,
     address indexed adapter,
@@ -855,28 +1005,34 @@ event AdapterConfigured(
     uint24 feeTier,
     int24 tickSpacing
 );
+
+/// @notice Vault 地址上的 Registry 已改变 Adapter 是否允许建立或增加 liquidity 的状态。
+/// @param venue 状态发生变化的 Venue。
+/// @param adapter 该 Venue 当前绑定的 Adapter。
+/// @param enabled 变更后的进入状态。
 event AdapterStatusChanged(VenueType indexed venue, address indexed adapter, bool enabled);
+
+/// @notice setPauseState 或 Emergency Exit 已实际改变暂停 storage。
+/// @dev 自动门控和未造成 storage 变化的调用不得发出本事件。
+/// @param caller 触发暂停状态变化的地址。
+/// @param depositPaused 变更后的 Deposit 暂停状态。
+/// @param plainRebalancePaused 变更后的普通 Rebalance 暂停状态。
+/// @param swapRebalancePaused 变更后的 Swap Rebalance 暂停状态。
 event PauseStateChanged(
     address indexed caller,
     bool depositPaused,
     bool plainRebalancePaused,
     bool swapRebalancePaused
 );
+
+/// @notice Emergency Exit 已清空全部 Active Position 并把资产位置更新为 IDLE。
+/// @dev 仅在调用前 activeVenue != IDLE 且 Position 成功清空时发出；调用前已为 IDLE 时不发出。
+/// @param caller 发起 Emergency Exit 的 Guardian 或 Manager。
+/// @param previousVenue 退出前的 Active Venue；链下索引器据此将当前位置更新为 IDLE。
+/// @param amount0 退出 Position 后由 Vault 控制的 token0 数量。
+/// @param amount1 退出 Position 后由 Vault 控制的 token1 数量。
 event EmergencyExit(address indexed caller, VenueType previousVenue, uint256 amount0, uint256 amount1);
 ```
-
-事件规则：
-
-- `Redeem` 记录实际调用者 `caller`、被销毁 shares 的持有人 `owner` 和资产接收者 `receiver`；shares 必须从 `owner` 销毁；
-- `FeesSynchronized` 的金额是本次从 claimable 状态归集的增量，不是再次计入总资产的额外资产；
-- `RebalanceExecuted` 只在所有 post-condition 成功后发出；
-- 任何以 custom error 回滚的交易都不会保留事件日志，协议不定义失败事件；`SwapRequired()` 通过 revert data 返回；
-- `activeVenue` 的链下历史由动作事件共同重建：`VaultBootstrapped.initialVenue` 初始化位置，成功的 `RebalanceExecuted.targetVenue` 更新位置，`EmergencyExit` 将位置更新为 `IDLE`；同 Venue V3 Recenter 的 `previousVenue == targetVenue`。协议不定义额外的通用资产位置或 Idle 状态变化事件；
-- `RoleAdminChanged`、`RoleGranted` 和 `RoleRevoked` 采用 OpenZeppelin `IAccessControl` 标准语义；
-- `DefaultAdminTransferScheduled`、`DefaultAdminTransferCanceled`、`DefaultAdminDelayChangeScheduled` 和 `DefaultAdminDelayChangeCanceled` 采用 `IAccessControlDefaultAdminRules` 标准语义；
-- `PauseStateChanged` 只在 `setPauseState` 或 Emergency Exit 实际改变暂停 storage 时发出，自动门控和无状态变化调用不得发出；
-- `AdapterConfigured` 与 `AdapterStatusChanged` 由 Vault 地址上的继承式 Registry 入口发出；`AdapterConfigured` 的 Pool、Fee Tier 和 `tickSpacing` 字段是配置时从 Adapter/Pool 读取并验证后的实际绑定值；
-- Emergency Exit 不发 Swap 事件，因为该路径禁止 Swap；只有调用前 `activeVenue != IDLE` 且全部 Position 成功清空时发出 `EmergencyExit`，调用前已为 IDLE 时不发出该事件；
 
 ## 9. 关键调用时序
 
@@ -1053,7 +1209,7 @@ sequenceDiagram
 - `Q1` 输入 token0 raw units 并返回 token1 raw units；`Q0` 输入 token1 raw units 并返回 token0 raw units。
 - canonical Uniswap V3 Pool 按地址从小到大定义 Pool token0/token1；在资产对绑定已验证的前提下，报价函数以输入 Token 作为 `baseToken`：`baseToken < quoteToken` 时按 Pool token0 → token1 报价，否则按 Pool token1 → token0 反向报价。
 - 报价使用全精度乘除；`roundUp == false` 时返回精确商的向下取整结果，`roundUp == true` 时返回精确商的向上取整结果；`protocolMinOut` 的方向报价和 BPS 滑点折算分别向上取整。
-- Oracle 使用 `shortTwapTick` 和 `twapTick` 计算 `deviationBps`；NAV 仍使用 `twapTick`，`spotTick` 保留用于 Range 越界和 Swap 风控。
+- Oracle 使用 `shortTwapTick` 和 `twapTick` 计算 `deviationBps`；NAV 和 `protocolMinOut` 仍使用 `twapTick`，`spotTick` 仅用于 V3 Range 越界与 Recenter 判定，不参与 Swap 风控。
 
 
 

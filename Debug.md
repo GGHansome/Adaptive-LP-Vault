@@ -303,7 +303,7 @@ Cooldown 与 Emergency Exit 的交互未显式对齐
 修改：
 - 普通 Rebalance 和带 Swap Rebalance 都必须满足同一 `minRebalanceCooldown`，未结束时以 `CooldownActive(availableAt)` 回滚。
 - Emergency Exit 为保证紧急撤仓活性而跳过 Cooldown 检查，且不更新 `lastPositionChangeAt`，不会重新开始 Cooldown。
-- Emergency Exit 后能否立即执行计划性 Rebalance，只取决于原有 `lastPositionChangeAt` 记录的 Cooldown 是否已经结束。
+- Emergency Exit 恢复后能否立即执行计划性 Rebalance，只取决于原有 `lastPositionChangeAt` 记录的 Cooldown 是否已经结束。
 - 已在 IDLE 的幂等分支和失败交易不更新时间戳。
 
 ## 问题 32
@@ -338,6 +338,11 @@ getAdapter(IDLE) 的返回值未定义
 ## 问题 37
 Executor 在你的文档中被要求"验证计划哈希"，但它不接触 Strategy、不存储任何计划记录，也没有可对照的真值源——该哈希在 Executor 侧无法被有意义地验证 至多做非零检查，与"验证"语义不符 。真正有效的哈希校验发生在 Vault 侧（expectedPlanHash vs 重新生成计划）；Executor 侧的这条要求无实现语义。
 
+已解决：
+- `expectedPlanHash` 仅由 Vault 在普通 Rebalance 和带 Swap Rebalance 入口中，与重新生成的 `PositionPlan.planHash` 比较。
+- 从 `SwapPlan` 删除 `planHash`；`SwapPlan` 仅承载方向、输入数量、最低输出和截止时间等交易级 Swap 参数。
+- `ControlledSwapExecutor` 不接收、不读取也不验证 `PositionPlan.planHash`，只负责 Vault 已构造交易参数的局部 Swap 安全检查和执行。
+
 ## 问题 38
 lastSuccessfulRebalanceAt 在 Bootstrap 成功时是否设置未定义
 
@@ -354,6 +359,11 @@ Adapter withdraw 最小输出与用户 redeem 最小输出的映射规则未定�
 
 ## 问题 40
 spotTick 声明的"安全检查 / Swap 风控"用途无实现
+
+已解决：
+- `spotTick` 仅用于判断 V3 Position 是否越界以及是否满足 Recenter 条件。
+- `spotTick` 不参与 `deviationBps`、NAV、`protocolMinOut` 或 Swap 风控。
+- Swap 的协议安全底线继续由 `protocolMinOut`、`keeperMinAmountOut`、实际输出余额增量和迁移后的完整校验共同承担。
 
 ## 问题 41
 getPlan 生成计划的 version 取值规则未定义

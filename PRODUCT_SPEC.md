@@ -93,7 +93,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | NAV                        | 按 canonical TWAP 将全部资产折算为 token1 的价值                                      | `NAV1 = T1 + Q1(T0; twapTick)`          | 仅用于定价和风控，不代表可立即换成 token1                  |
 | TWAP                       | canonical V3 Pool 在 `twapWindowSeconds` 内的 arithmetic mean tick 对应的几何平均价格 | 一次 `observe([twapWindowSeconds, shortTwapWindowSeconds, 0])`，取 `tickCumulatives[2] - tickCumulatives[0]` | 用于 NAV、目标 Range 和偏离基准，不是现价或统计波动率          |
 | Short TWAP Tick            | canonical V3 Pool 在 `shortTwapWindowSeconds` 内的 arithmetic mean tick      | 同一次 `observe([twapWindowSeconds, shortTwapWindowSeconds, 0])`，取 `tickCumulatives[2] - tickCumulatives[1]` | 只用于偏离信号，不单独作为 NAV                         |
-| Spot Tick                  | canonical Pool 当前 `slot0().tick`                                          | 同一 Oracle 读取                            | 用于 Range 越界和安全检查，不参与 `deviationBps` 或 NAV |
+| Spot Tick                  | canonical Pool 当前 `slot0().tick`                                          | 同一 Oracle 读取                            | 用于 V3 Range 越界与 Recenter 判定，不参与 `deviationBps`、NAV、`protocolMinOut` 或 Swap 风控 |
 | DEVIATION / `deviationBps` | 短周期 TWAP 价格相对 TWAP 价格的绝对偏离，单位为基点                                          | Oracle 内部计算                             | 不接受外部输入；不得命名为 volatility                  |
 | Oracle Healthy             | Oracle 地址、资产顺序、观察历史、窗口、Tick 和报价均满足可用性检查                                   | Oracle 健康检查                             | 与 `EXTREME_DEVIATION` 独立；极端偏离可以仍然健康       |
 | Market Regime              | Strategy 根据健康 Oracle 快照和滞后规则输出的策略状态                                       | LOW/MEDIUM/HIGH/EXTREME                 | 不是收益评级或风险免责                               |
@@ -684,7 +684,7 @@ Strategy 输出完整的 `PositionPlan`，其内容包含：`targetVenue`、`mar
 - `version` 和 `planHash` 用于执行时的计划身份校验；
 - Strategy 只生成候选计划，不直接提交 Vault 的 `planVersion` 或 `lastExecutedPlan` 更新；
 
-Vault 提供 `previewRebalance()` 策略只读接口。规则如下：
+**Vault 提供 `previewRebalance()` 策略只读接口**。规则如下：
 
 1. 检查 `initialized == true`；未初始化时以 `NotInitialized()` 回滚。
 2. 检查 Oracle 不健康时以 `OracleUnhealthy()` 回滚。
