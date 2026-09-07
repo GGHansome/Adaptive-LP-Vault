@@ -10,14 +10,12 @@
 
 ## 1. 架构原则
 
-1. `AdaptiveLPVault` 是唯一资产编排入口，负责权限、状态机、资产转移和跨模块原子性。
-2. `VaultAccounting` 是无状态数学模块，不持有资产、不调用外部合约、不决定策略。
-3. `CanonicalV3Oracle` 是部署时绑定的唯一价格来源；`deviationBps` 在 Oracle 内部产生，不从调用者输入。
-4. `MarketRegimeStrategy` 只读链上快照并确定性生成 `PositionPlan`，不转移资产、不调用 AMM。
-5. `IPositionAdapter` 隔离 Uniswap V2/V3 细节，Adapter 不能铸造或销毁 shares。
-6. `ControlledSwapExecutor` 不是通用交易聚合器，只能按 Vault 验证过的 `SwapPlan` 执行 token0/token1 交换。
-7. Registry 的遍历不是资产会计路径。Vault 只读取 `activeVenue` 对应 Adapter，保证 Gas 有界。
-8. 所有资产迁移入口采用 Checks-Effects-Interactions、非重入保护和外部调用后的状态重读。
+1. `AdaptiveLPVault` 是唯一核心 Vault 部署合约，负责资产会计、计划生成、部署评估、状态机、资产转移和跨模块原子性；`VaultRoles`、`VaultPause` 与 `AdapterRegistry` 仅作为源码级抽象模块由其继承，不单独部署。
+2. `CanonicalV3Oracle` 独立部署并由 Vault 固定绑定；`deviationBps` 在 Oracle 内部产生，不从调用者输入。
+3. `IPositionAdapter` 隔离 Uniswap V2/V3 细节，Adapter 不能铸造或销毁 shares。
+4. `ControlledSwapExecutor` 不是通用交易聚合器，只能按 Vault 验证过的 `SwapPlan` 执行 token0/token1 交换。
+5. Registry 的遍历不是资产会计路径。Vault 只读取 `activeVenue` 对应 Adapter，保证 Gas 有界。
+6. 所有资产迁移入口采用 Checks-Effects-Interactions、非重入保护和外部调用后的状态重读。
 
 ## 2. 系统边界
 
@@ -34,9 +32,7 @@ flowchart TB
 
     subgraph Protocol[Adaptive LP Vault Protocol]
         Vault[AdaptiveLPVault]
-        Accounting[VaultAccounting]
         Oracle[CanonicalV3Oracle]
-        Strategy[MarketRegimeStrategy]
         Swap[ControlledSwapExecutor]
         V2Adapter[UniswapV2Adapter]
         V3Adapter[UniswapV3Adapter]
@@ -57,9 +53,7 @@ flowchart TB
     Guardian --> Vault
     DefaultAdmin --> Vault
     Manager --> Vault
-    Vault --> Accounting
     Vault --> Oracle
-    Vault --> Strategy
     Vault --> Swap
     Vault --> V2Adapter
     Vault --> V3Adapter
@@ -78,14 +72,11 @@ flowchart TB
 ```mermaid
 flowchart LR
     Core[core] --> Interfaces[interfaces]
-    Core --> Accounting[accounting]
     Core --> Oracle[oracle]
-    Core --> Strategy[strategy]
+    Core --> Libraries[libraries]
     Core --> Adapters[adapters]
     Core --> Swap[swap]
-    Accounting --> Libraries[libraries]
     Oracle --> Libraries
-    Strategy --> Interfaces
     Adapters --> Interfaces
     Adapters --> Libraries
     Swap --> Interfaces
@@ -94,8 +85,7 @@ flowchart LR
 
 禁止以下依赖：
 
-- Accounting 依赖 Vault 存储、Adapter 具体实现或外部调用；
-- Strategy 依赖 msg.sender、Keeper 参数或任意 Router；
+- `PriceMath` 不得依赖 Vault storage、`msg.sender`、Keeper 参数、Router 或 Adapter 外部调用；
 - Adapter 直接铸造/销毁 shares 或修改 Vault 的策略状态；
 - Oracle 读取目标 Venue 作为价格来源；
 - Swap Executor 修改 `activeVenue`、shares 供应量或策略参数。
@@ -112,18 +102,12 @@ AdaptiveLPVault/
 │   ├── core/
 │   │   ├── AdaptiveLPVault.sol
 │   │   ├── VaultRoles.sol
-│   │   └── VaultPause.sol
-│   ├── accounting/
-│   │   ├── VaultAccounting.sol
-│   │   └── AccountingTypes.sol
+│   │   ├── VaultPause.sol
+│   │   └── AdapterRegistry.sol
 │   ├── oracle/
 │   │   ├── CanonicalV3Oracle.sol
 │   │   └── OracleTypes.sol
-│   ├── strategy/
-│   │   ├── MarketRegimeStrategy.sol
-│   │   └── StrategyTypes.sol
 │   ├── adapters/
-│   │   ├── AdapterRegistry.sol
 │   │   ├── UniswapV2Adapter.sol
 │   │   ├── UniswapV3Adapter.sol
 │   │   └── AdapterTypes.sol
@@ -132,24 +116,22 @@ AdaptiveLPVault/
 │   │   └── SwapTypes.sol
 │   ├── interfaces/
 │   │   ├── IAdaptiveLPVault.sol
-│   │   ├── IVaultAccounting.sol
-│   │   ├── ICanonicalV3Oracle.sol
-│   │   ├── IMarketRegimeStrategy.sol
-│   │   ├── IPositionAdapter.sol
+│   │   ├── IVaultRoles.sol
+│   │   ├── IVaultPause.sol
 │   │   ├── IAdapterRegistry.sol
+│   │   ├── ICanonicalV3Oracle.sol
+│   │   ├── IPositionAdapter.sol
 │   │   ├── IControlledSwapExecutor.sol
 │   │   ├── IUniswapV2External.sol
 │   │   └── IUniswapV3External.sol
 │   └── libraries/
 │       ├── PriceMath.sol
 │       ├── PositionPlanHash.sol
-│       ├── SafeTransferLib.sol
-│       └── ValidationLib.sol
+│       └── SafeTransferLib.sol
 ├── test/
 │   ├── unit/
-│   │   ├── VaultAccounting.t.sol
+│   │   ├── AdaptiveLPVault.t.sol
 │   │   ├── CanonicalV3Oracle.t.sol
-│   │   ├── MarketRegimeStrategy.t.sol
 │   │   ├── UniswapV2Adapter.t.sol
 │   │   ├── UniswapV3Adapter.t.sol
 │   │   └── ControlledSwapExecutor.t.sol
@@ -180,20 +162,18 @@ AdaptiveLPVault/
 
 | 目录                 | 职责                                  | 约束                                                                                            |
 | ------------------ | ----------------------------------- | --------------------------------------------------------------------------------------------- |
-| `src/core`         | Vault 入口、角色、暂停和状态机                  | 唯一资产编排层                                                                                       |
-| `src/accounting`   | NAV、shares、比例、Idle 和损失计算            | 无状态、无外部调用                                                                                     |
-| `src/oracle`       | Uniswap V3 `observe`、报价和健康检查        | 不接受外部价格输入                                                                                     |
-| `src/strategy`     | Market Regime、Hysteresis、Range 和计划  | 只读、确定性                                                                                        |
-| `src/adapters`     | Registry 及 V2/V3 Venue 适配           | 只能由 Vault 调用资产方法                                                                              |
-| `src/swap`         | 白名单 Router 和受限 Swap                 | 不得成为通用聚合器                                                                                     |
-| `src/interfaces`   | 内外部协议契约                             | 不包含实现状态                                                                                       |
-| `src/libraries`    | 全精度数学、哈希和安全转账                       | 不保存协议状态                                                                                       |
-| `test/unit`        | 单模块行为                               | Mock 外部依赖                                                                                     |
-| `test/integration` | 跨模块完整流程                             | 覆盖原子回滚                                                                                        |
-| `test/invariant`   | 不变量和模糊测试                            | 覆盖资产、shares、单活 Position                                                                       |
-| `test/fork`        | Mainnet/Fork 外部协议行为                 | 验证真实 V2/V3 接口                                                                                 |
+| `src/core`         | Vault 入口、角色、暂停、Adapter Registry、会计、计划和状态机 | `AdaptiveLPVault` 是唯一部署合约；其余为源码级抽象模块 |
+| `src/oracle`       | 独立 Oracle、Uniswap V3 `observe`、报价和健康检查 | 由 Vault 固定绑定；不接受外部价格输入 |
+| `src/libraries`    | Tick/价格换算、计划哈希和安全转账 | 无状态、无外部调用 |
+| `src/adapters`     | V2/V3 Venue 适配与 Position 操作 | 只能由 Vault 调用资产方法 |
+| `src/swap`         | 白名单 Router 和受限 Swap | 不得成为通用聚合器 |
+| `src/interfaces`   | Vault、源码级模块和独立部署合约的逻辑接口契约 | 不包含实现状态；不以是否独立部署作为接口存在的前提 |
+| `test/unit`        | 单模块行为 | Mock 外部依赖 |
+| `test/integration` | 跨模块完整流程 | 覆盖原子回滚 |
+| `test/invariant`   | 不变量和模糊测试 | 覆盖资产、shares、单活 Position |
+| `test/fork`        | Mainnet/Fork 外部协议行为 | 验证真实 V2/V3 接口 |
 | `script`           | 分阶段部署、角色指派、Adapter 绑定和一次性 Bootstrap | 数值参数仅由 Deploy 写入；主网按 Deploy → Grant Roles → Configure → Bootstrap 执行，`bootstrap()` 内部执行最终绑定校验 |
-| `docs`             | 发布后的文档副本                            | 以根目录规范为源                                                                                      |
+| `docs`             | 发布后的文档副本 | 以根目录规范为源 |
 
 
 
@@ -232,7 +212,7 @@ enum SwapDirection {
 }
 ```
 
-`VenueType` 描述资产位置，`MarketRegime` 描述Strategy 市场状态，Oracle 健康性由 `OracleSnapshot.healthy` 独立表达；`PauseFlag` 描述暂停入口。`SwapDirection.NONE` 表示不需要 Swap，`ZERO_FOR_ONE` 表示 token0 → token1，`ONE_FOR_ZERO` 表示 token1 → token0。
+`VenueType` 描述资产位置，`MarketRegime` 描述 Vault 策略逻辑的市场状态，Oracle 健康性由 `OracleSnapshot.healthy` 独立表达；`PauseFlag` 描述暂停入口。`SwapDirection.NONE` 表示不需要 Swap，`ZERO_FOR_ONE` 表示 token0 → token1，`ONE_FOR_ZERO` 表示 token1 → token0。
 
 ### 4.2 部署配置类型
 
@@ -350,8 +330,6 @@ struct PositionPlan {
 
 struct DeploymentAssessment {
     bool requiresSwap;
-    uint256 used0;
-    uint256 used1;
     SwapDirection direction;
 }
 
@@ -361,16 +339,10 @@ struct SwapPlan {
     uint256 minAmountOut;
     uint32 deadline;
 }
-
-struct V3RangeContext {
-    int24 lowFeeTickSpacing;
-    int24 highFeeTickSpacing;
-}
 ```
 
-- `V3RangeContext` 由 Vault 根据 `_adapterByVenue` 的 spacing 缓存构造，只作为 Strategy 调用的运行时上下文，不属于部署策略参数。
 - `PositionPlan.planHash` 覆盖 `targetVenue`、`marketRegime`、`tickLower`、`tickUpper` 和 `version`。
-- `DeploymentAssessment` 是 Vault 根据当前资产和目标 Adapter 生成的临时内存结果，不写入 `lastExecutedPlan` storage。
+- `DeploymentAssessment` 是 Vault 根据当前资产和目标 Adapter 生成的临时内存结果，仅包含 `requiresSwap` 与 `direction`，不写入 `lastExecutedPlan` storage。
 - `SwapPlan` 是 Vault 在执行入口内构造、仅传给 `ControlledSwapExecutor` 的交易级对象，不是调用者可自由提交的完整目标结构。
 - `deadline` 由调用入口独立校验；调用者不能传入任意目标字段、Router、实际方向或 calldata。
 
@@ -384,7 +356,7 @@ struct PauseState {
 }
 ```
 
-`PauseState` 归属于 `AdaptiveLPVault` 的运行时控制状态，由 `VaultPause` 逻辑读写并以普通 storage 保存。
+`PauseState` 是 `VaultPause` 的运行时控制状态；其内部 storage 由 `VaultPause` 逻辑读写，最终位于 `AdaptiveLPVault` 的部署地址。
 
 ### 4.6 Registry 绑定类型
 
@@ -427,13 +399,22 @@ struct AdapterConfig {
 | `activeAdapter`                                 | `address`      | `storage`   | Bootstrap/Rebalance                | 必须来自 Bootstrap 成功后已冻结的 Registry 绑定                 |
 | `lastPositionChangeAt`                           | `uint32`       | `storage`   | Bootstrap、两类 Rebalance 成功 | 初始为 0；两类 Rebalance 共用其 Cooldown；Emergency Exit 跳过检查且不更新；失败交易和 IDLE 幂等分支不更新 |
 | `planVersion`                                   | `uint64`       | `storage`   | 成功 Position 结构变化                   | 初始为 0；每次成功变化递增 1，失败交易不更新                           |
-| `lastExecutedPlan`                              | `PositionPlan` | `storage`   | Bootstrap/成功策略计划执行                 | 保存最近一次成功执行的 Strategy 计划；其 `marketRegime` 是 Hysteresis 历史，非策略 Position 变化后可与当前资产位置不同 |
-| `pauseState`                                    | `PauseState`   | `storage`   | `setPauseState` 或 Emergency Exit   | 初始为全 false；Redeem 不受影响                             |
+| `lastExecutedPlan`                              | `PositionPlan` | `storage`   | Bootstrap/成功策略计划执行                 | 保存最近一次成功执行的策略计划；其 `marketRegime` 是 Hysteresis 历史，非策略 Position 变化后可与当前资产位置不同 |
 
 
-Vault 不保存由 Registry 遍历产生的冗余资产总额。`totalAssets()` 每次读取 Idle 余额和当前 Active Adapter 快照，并调用 Accounting 计算。
+Vault 不保存由 Registry 遍历产生的冗余资产总额。`totalAssets()` 每次读取 Idle 余额和当前 Active Adapter 快照，并在 `AdaptiveLPVault` 内部计算。
 
-### 5.2 Oracle 配置存储
+### 5.2 VaultPause 存储
+
+`VaultPause` 是由 `AdaptiveLPVault` 继承的源码级抽象模块，不单独部署。其逻辑上只负责以下持久化状态：
+
+| 存储项        | 类型         | 存储方式       | 写入时机                         | 约束                         |
+| ----------- | ---------- | ---------- | ---------------------------- | -------------------------- |
+| `_pauseState` | `PauseState` | 普通 `storage` | `setPauseState` 或 Emergency Exit | 初始为全 false；Redeem 不受影响 |
+
+`pauseState()` 从 `_pauseState` 返回当前暂停状态；`setPauseState()` 和 Emergency Exit 通过 `VaultPause` 的内部逻辑更新该状态。`VaultPause` 不保存其他业务状态。
+
+### 5.3 Oracle 配置存储
 
 `CanonicalV3Oracle` 是独立部署的 Oracle 合约：
 
@@ -448,7 +429,7 @@ Vault 不保存由 Registry 遍历产生的冗余资产总额。`totalAssets()` 
 
 Oracle 在构造时完成 canonical Pool、Vault Token 顺序、窗口关系和协议硬边界校验。实现可以使用独立的 `immutable` 字段承载，而不要求把整个 `OracleConfig` 结构体写入普通 storage。
 
-### 5.3 Registry 存储
+### 5.4 Registry 存储
 
 `AdapterRegistry` 是 `AdaptiveLPVault` 继承的内部存储与校验模块。
 
@@ -458,9 +439,9 @@ Oracle 在构造时完成 canonical Pool、Vault Token 顺序、窗口关系和�
 | `_adapterByVenue` | `mapping(VenueType => AdapterConfig)` | 普通 `storage` Mapping | `configureAdapter` 写入 Adapter 地址和经过验证的 `tickSpacing` 并将 `enabled` 设为 true；Bootstrap 后 `setAdapterEnabled` 仅修改 `enabled` | Key 只允许三个非 IDLE Venue；不得用于遍历资产会计 |
 
 
-`adapter == address(0)` 表示该 Venue 未注册。`IDLE` 不是 Adapter，`_adapterByVenue[IDLE]` 必须保持零值，`getAdapter(IDLE)` 返回 `address(0)`，`isEnterEnabled(IDLE)` 返回 `false`。`isEnterEnabled(venue)` 仅按 `adapter != address(0) && enabled` 派生 Registry 层结果；其他入口门控由 Vault 负责。`tickSpacing` 是经过验证的 Strategy 读取缓存；
+`adapter == address(0)` 表示该 Venue 未注册。`IDLE` 不是 Adapter，`_adapterByVenue[IDLE]` 必须保持零值，`getAdapter(IDLE)` 返回 `address(0)`，`isEnterEnabled(IDLE)` 返回 `false`。`isEnterEnabled(venue)` 仅按 `adapter != address(0) && enabled` 派生 Registry 层结果；其他入口门控由 Vault 负责。`tickSpacing` 是经过验证、供 Vault 策略逻辑读取的缓存；
 
-### 5.4 Adapter 合约存储
+### 5.5 Adapter 合约存储
 
 `UniswapV2Adapter` 和 `UniswapV3Adapter` 是独立部署的 Adapter 合约；每个 Adapter 至少保存以下不可变绑定字段：
 
@@ -534,12 +515,7 @@ stateDiagram-v2
 ### 6.1 Vault 接口
 
 ```solidity
-interface IAdaptiveLPVault is IAccessControlDefaultAdminRules, IAdapterRegistry {
-    function DEFAULT_ADMIN_ROLE() external view returns (bytes32);
-    function MANAGER_ROLE() external view returns (bytes32);
-    function KEEPER_ROLE() external view returns (bytes32);
-    function GUARDIAN_ROLE() external view returns (bytes32);
-
+interface IAdaptiveLPVault is IVaultRoles, IVaultPause, IAdapterRegistry {
     function bootstrap(uint256 amount0, uint256 amount1, address receiver) external;
 
     function deposit(
@@ -567,7 +543,6 @@ interface IAdaptiveLPVault is IAccessControlDefaultAdminRules, IAdapterRegistry 
         uint32 deadline
     ) external;
 
-    function setPauseState(PauseState calldata newState) external;
     function emergencyExitToIdle() external;
 
     function previewRebalance()
@@ -578,13 +553,28 @@ interface IAdaptiveLPVault is IAccessControlDefaultAdminRules, IAdapterRegistry 
     function totalAssets() external view returns (uint256 total0, uint256 total1);
     function assetSnapshot() external view returns (AssetSnapshot memory);
     function lastExecutedPlan() external view returns (PositionPlan memory);
-    function pauseState() external view returns (PauseState memory);
 }
 ```
 
-`_assessDeployment` 是 Vault 内部只读函数，不属于 `IAdaptiveLPVault` ABI：
+`IAdaptiveLPVault` 只声明 Vault 自身的核心业务入口，并通过继承聚合 `IVaultRoles`、`IVaultPause` 和 `IAdapterRegistry`。它描述的是源码接口组合，不是独立部署合约；编译后的 Vault ABI 是这些接口和实现中全部外部函数的聚合结果。
+
+#### Vault 内部计划与部署评估
 
 ```solidity
+function _getPlan(
+    OracleSnapshot memory oracle,
+    AssetSnapshot memory assets,
+    PositionSnapshot memory currentPosition,
+    uint8 token0Decimals,
+    uint8 token1Decimals,
+    VenueType currentVenue,
+    MarketRegime lastExecutedRegime,
+    StrategyConfig memory strategyConfig,
+    int24 lowFeeTickSpacing,
+    int24 highFeeTickSpacing,
+    uint64 currentVersion
+) internal pure returns (PositionPlan memory plan);
+
 function _assessDeployment(
     PositionPlan memory plan,
     uint256 amount0,
@@ -593,7 +583,35 @@ function _assessDeployment(
 ) internal view returns (DeploymentAssessment memory assessment);
 ```
 
-### 6.2 Oracle 接口
+- `_getPlan()` 显式接收 `OracleSnapshot`、`AssetSnapshot`、`PositionSnapshot`、固定 Token decimals、当前 Venue、最近一次已执行 Regime、固定策略参数、两个 V3 Pool 的 `tickSpacing` 和当前版本；这些参数共同构成计划计算的完整输入；
+- `_assessDeployment()` 属于 Vault 的内部 `view` 编排职责，直接调用目标 Adapter 的 `previewDeposit()`，使用局部 `used0/used1` 计算 `requiresSwap` 和 `direction`；
+- `PriceMath`、`PositionPlanHash` 和 `SafeTransferLib` 仅提供跨模块通用的无状态工具。
+
+### 6.2 Vault Roles 接口
+
+```solidity
+interface IVaultRoles is IAccessControlDefaultAdminRules {
+    function DEFAULT_ADMIN_ROLE() external view returns (bytes32);
+    function MANAGER_ROLE() external view returns (bytes32);
+    function KEEPER_ROLE() external view returns (bytes32);
+    function GUARDIAN_ROLE() external view returns (bytes32);
+}
+```
+
+`VaultRoles` 是 `AccessControlDefaultAdminRules` 的抽象实现模块，并实现 `IVaultRoles`。它负责 Default Admin 构造流程、业务角色常量和权限校验；
+
+### 6.3 Vault Pause 接口
+
+```solidity
+interface IVaultPause {
+    function pauseState() external view returns (PauseState memory);
+    function setPauseState(PauseState calldata newState) external;
+}
+```
+
+`VaultPause` 是 `IVaultPause` 的抽象实现模块，负责 `pauseState` storage、Manager/Guardian 权限校验和暂停状态变更。
+
+### 6.4 Oracle 接口
 
 ```solidity
 interface ICanonicalV3Oracle {
@@ -619,31 +637,27 @@ Oracle 架构边界：
 - `quoteToken0InToken1()` 和 `quoteToken1InToken0()` 使用固定的 Vault Token 顺序和全精度数学；`roundUp == false` 时向下取整，`roundUp == true` 时向上取整；
 - Oracle 负责输出 `OracleSnapshot` 和健康状态，不负责决定策略状态或目标 Venue；
 
-### 6.3 Strategy 接口
+### 6.5 Adapter Registry 接口
 
 ```solidity
-interface IMarketRegimeStrategy {
-    function getPlan(
-        OracleSnapshot calldata oracle,
-        AssetSnapshot calldata assets,
-        PositionSnapshot calldata currentPosition,
-        VenueType currentVenue,
-        MarketRegime lastCommittedRegime,
-        StrategyConfig calldata config,
-        V3RangeContext calldata rangeContext,
-        uint64 currentVersion
-    ) external view returns (PositionPlan memory);
+interface IAdapterRegistry {
+    function configureAdapter(VenueType venue, address adapter) external;
+    function getAdapter(VenueType venue) external view returns (address adapter);
+    function getConfig(VenueType venue) external view returns (AdapterConfig memory);
+    function isEnterEnabled(VenueType venue) external view returns (bool);
+    function setAdapterEnabled(VenueType venue, bool enabled) external;
 }
 ```
 
-Strategy 架构边界：
+`IAdapterRegistry` 由 `AdaptiveLPVault` 在 Vault 同一地址上实现，不代表独立部署合约。
 
-- Strategy 是只读、确定性的计划生成模块，只接收调用者提供的快照、部署时固定的策略配置和已验证的 V3 spacing 上下文；
-- `rangeContext` 由 Vault 从 `_adapterByVenue` 的 spacing 缓存构造，Strategy 不读取 Registry 或目标 Pool；
-- Vault 在执行前必须重新读取 Oracle、资产和 Position 快照，并传入当前 `planVersion`；`planVersion == 0` 时传入并忽略 `lastCommittedRegime` 参数的默认值，`planVersion > 0` 时将 `lastExecutedPlan.marketRegime` 作为该参数传入；调用者不能提交完整的目标计划替代 Strategy 结果；
-- Strategy 只生成 `PositionPlan`，不转移资产、不调用 Router、不修改 Vault 状态；
+Registry 架构边界：
 
-### 6.4 Adapter 接口
+- `configureAdapter()` 只接受已独立部署的 Adapter 地址；Vault 从 Adapter 读取绑定信息并完成校验，再写入 Adapter 地址、`tickSpacing` 缓存和 `enabled = true`；
+- `configureAdapter()` 仅在 Bootstrap 前开放并可重复调用；该方法不部署 Adapter、不转移资产、不创建 Position；
+- Bootstrap 成功时重新验证 Adapter 的 immutable 绑定与 Registry 的 `tickSpacing` 缓存并冻结身份字段；此后 `setAdapterEnabled()` 只能修改 `enabled`；
+
+### 6.6 Adapter 接口
 
 ```solidity
 interface IPositionAdapter {
@@ -679,31 +693,7 @@ Adapter 架构边界：
 - `snapshot()` 返回完整的 Position 资产快照，费用和本金不得在同一会计路径中重复计价；
 - `snapshot()`、`syncFees()`、`withdraw()` 和 `withdrawAll()` 不受 Adapter `enabled` 限制，并必须继续支持已禁用 Active Adapter 的计价和退出；`withdraw()` 和 `withdrawAll()` 必须将资产返回 Vault 控制的地址；
 
-### 6.5 Registry 接口
-
-```solidity
-interface IAdapterRegistry {
-    function configureAdapter(
-        VenueType venue,
-        address adapter
-    ) external;
-
-    function getAdapter(VenueType venue) external view returns (address adapter);
-    function getConfig(VenueType venue) external view returns (AdapterConfig memory);
-    function isEnterEnabled(VenueType venue) external view returns (bool);
-    function setAdapterEnabled(VenueType venue, bool enabled) external;
-}
-```
-
-`IAdapterRegistry` 由 `AdaptiveLPVault` 在 Vault 同一地址上实现，不代表独立部署合约。
-
-Registry 架构边界：
-
-- `configureAdapter()` 只接受已独立部署的 Adapter 地址；Vault 从 Adapter 读取绑定信息并完成校验，再写入 Adapter 地址、`tickSpacing` 缓存和 `enabled = true`；
-- `configureAdapter()` 仅在 Bootstrap 前开放并可重复调用；该方法不部署 Adapter、不转移资产、不创建 Position；
-- Bootstrap 成功时重新验证 Adapter 的 immutable 绑定与 Registry 的 `tickSpacing` 缓存并冻结身份字段；此后 `setAdapterEnabled()` 只能修改 `enabled`；
-
-### 6.6 Swap Executor 接口
+### 6.7 Swap Executor 接口
 
 ```solidity
 interface IControlledSwapExecutor {
@@ -724,7 +714,7 @@ ControlledSwapExecutor 架构边界：
 
 - `vault`、Router、token0/token1、`swapPool`、Fee Tier 和固定 Swap 方法在部署或不可变初始化时固定，Bootstrap 后不能由 Keeper/Manager 替换；
 - Executor 只接受 Vault 调用，只执行 `SwapPlan` 指定的交易级参数和局部 Swap 安全检查；
-- Executor 不调用 Strategy，不退出或建立 Position，也不负责完整迁移损失、部署率、Idle 或单活 Position 的后置校验；这些检查由 Vault 负责；
+- Executor 不调用 Vault 策略逻辑，不退出或建立 Position，也不负责完整迁移损失、部署率、Idle 或单活 Position 的后置校验；这些检查由 Vault 负责；
 
 
 
@@ -860,7 +850,7 @@ error Reentrancy();
 
 ## 8. 事件契约
 
-事件字段是链下索引和审计的稳定接口。以下代码块仅列出 Vault 自定义事件；继承的 `RoleAdminChanged`、`RoleGranted`、`RoleRevoked` 沿用 OpenZeppelin `IAccessControl` 标准语义，`DefaultAdminTransferScheduled`、`DefaultAdminTransferCanceled`、`DefaultAdminDelayChangeScheduled` 和 `DefaultAdminDelayChangeCanceled` 沿用 `IAccessControlDefaultAdminRules` 标准语义。
+事件字段是链下索引和审计的稳定接口。以下代码块列出 Vault 自定义事件及其逻辑接口归属：核心资产和计划事件归属于 `IAdaptiveLPVault`，`AdapterConfigured` 与 `AdapterStatusChanged` 归属于 `IAdapterRegistry`，`PauseStateChanged` 归属于 `IVaultPause`。角色事件归属于 `IVaultRoles` 继承的 OpenZeppelin 权限接口；`RoleAdminChanged`、`RoleGranted`、`RoleRevoked` 沿用 OpenZeppelin `IAccessControl` 标准语义，`DefaultAdminTransferScheduled`、`DefaultAdminTransferCanceled`、`DefaultAdminDelayChangeScheduled` 和 `DefaultAdminDelayChangeCanceled` 沿用 `IAccessControlDefaultAdminRules` 标准语义。
 
 所有事件由 Vault 或对应模块在状态成功更新后发出。任何以 custom error 回滚的交易都不会保留事件日志，协议不定义失败事件；链下索引器按下列动作事件重建 `activeVenue` 历史。
 
@@ -1043,21 +1033,17 @@ sequenceDiagram
     participant Manager
     participant Vault
     participant Oracle
-    participant Accounting
-    participant Strategy
     participant Adapter
 
     Manager->>Vault: bootstrap(amount0, amount1, receiver)
     Vault->>Vault: validate complete configured Adapter bindings and cached tickSpacing
     Vault->>Oracle: snapshot()
     Oracle-->>Vault: healthy OracleSnapshot
-    Vault->>Accounting: compute seed NAV and grossInitialShares
-    Vault->>Strategy: getPlan(seed snapshots, default lastCommittedRegime, verified rangeContext, planVersion = 0)
-    Strategy-->>Vault: deterministic initial PositionPlan with version = 1
-    Vault->>Vault: require target Adapter enter enabled if targetVenue is non-IDLE
+    Vault->>Vault: calculate initial NAV and grossInitialShares
+    Vault->>Vault: generate PositionPlan and validate target Adapter enter enabled
     Vault->>Adapter: previewDeposit(seed amounts, plan) if targetVenue is non-IDLE
     Adapter-->>Vault: used0/used1
-    Vault->>Vault: build DeploymentAssessment; validate ratio; revert SwapRequired if assessment.requiresSwap
+    Vault->>Vault: assess deployment with local used0/used1; validate ratio and revert SwapRequired if needed
     Vault->>Vault: transferFrom token0/token1
     Vault->>Vault: mint and lock grossInitialShares
     Vault->>Adapter: deposit if targetVenue is non-IDLE
@@ -1074,14 +1060,12 @@ sequenceDiagram
     participant Vault
     participant Oracle
     participant Adapter
-    participant Accounting
 
     User->>Vault: deposit(max0, max1, minSharesOut)
     Vault->>Vault: validate initialized, deposit pause and non-IDLE activeVenue; require isEnterEnabled(activeVenue)
     Vault->>Oracle: snapshot()
     Vault->>Adapter: syncFees() and snapshot() for principal0/principal1
-    Vault->>Accounting: compute amounts and shares from pre-state
-    Accounting-->>Vault: used0, used1, shares
+    Vault->>Vault: compute deposit amounts and shares from pre-state
     Vault->>Vault: transferFrom only used amounts
     Vault->>Adapter: deposit(used0, used1, lastExecutedPlan)
     Adapter-->>Vault: unused amounts and liquidity
@@ -1097,13 +1081,11 @@ sequenceDiagram
     participant Caller
     participant Vault
     participant Adapter
-    participant Accounting
 
     Caller->>Vault: redeem(shares, min0, min1, receiver, owner)
     Vault->>Vault: verify owner balance and allowance(owner, Caller) when Caller != owner
     Vault->>Adapter: syncFees() and snapshot()
-    Vault->>Accounting: compute fraction from pre-burn supply
-    Accounting-->>Vault: proportional amounts
+    Vault->>Vault: compute proportional amounts from pre-burn supply
     Vault->>Adapter: withdraw(shares, totalShares)
     Adapter-->>Vault: token0/token1
     Vault->>Vault: add proportional Idle and validate final outputs against minAmount0Out/minAmount1Out
@@ -1118,18 +1100,16 @@ sequenceDiagram
     participant Caller
     participant Vault
     participant Oracle
-    participant Strategy
     participant OldAdapter
     participant NewAdapter
 
     Caller->>Vault: rebalance(expectedPlanHash, deadline)
     Vault->>Oracle: snapshot()
-    Vault->>Strategy: getPlan(current snapshots, lastExecutedPlan.marketRegime as lastCommittedRegime, verified rangeContext, planVersion)
-    Strategy-->>Vault: deterministic PositionPlan
+    Vault->>Vault: generate current PositionPlan
     Vault->>Vault: require target Adapter enter enabled if targetVenue is non-IDLE
     Vault->>NewAdapter: previewDeposit(current assets, plan) if targetVenue is non-IDLE
     NewAdapter-->>Vault: used0/used1
-    Vault->>Vault: build DeploymentAssessment; validate deadline, hash and cooldown; revert SwapRequired if assessment.requiresSwap
+    Vault->>Vault: assess deployment with local used0/used1; validate deadline, hash and cooldown; revert SwapRequired if needed
     Vault->>OldAdapter: syncFees() and withdrawAll()
     OldAdapter-->>Vault: token0/token1
     Vault->>NewAdapter: deposit() without swap
@@ -1146,25 +1126,23 @@ sequenceDiagram
     participant Keeper
     participant Vault
     participant Oracle
-    participant Strategy
     participant OldAdapter
     participant SwapExecutor
     participant NewAdapter
 
     Keeper->>Vault: rebalanceWithSwap(expectedPlanHash, expectedDirection, amountIn, keeperMinAmountOut, deadline)
     Vault->>Oracle: snapshot()
-    Vault->>Strategy: getPlan(current snapshots, lastExecutedPlan.marketRegime as lastCommittedRegime, verified rangeContext, planVersion)
-    Strategy-->>Vault: PositionPlan
+    Vault->>Vault: generate current PositionPlan
     Vault->>Vault: require target Adapter enter enabled
     Vault->>NewAdapter: previewDeposit(current assets, plan)
     NewAdapter-->>Vault: used0/used1
-    Vault->>Vault: build initial DeploymentAssessment (initialDeployBps) from T0/T1; validate hash, deadline, cooldown, assessment.requiresSwap and expectedDirection
+    Vault->>Vault: assess deployment with local used0/used1; validate hash, deadline, cooldown, assessment.requiresSwap and expectedDirection
     Vault->>OldAdapter: syncFees() and withdrawAll()
     OldAdapter-->>Vault: token0/token1
     Vault->>Vault: verify actual balances against assessed assets; simulate worst-case post-swap balances
     Vault->>NewAdapter: previewDeposit(simulated post-swap balances, plan)
     NewAdapter-->>Vault: simulated used0/used1
-    Vault->>Vault: validate amountIn, simulatedDeployBps and idle; construct SwapPlan
+    Vault->>Vault: validate simulatedDeployBps and idle; construct SwapPlan
     Vault->>SwapExecutor: executeSwap(validated SwapPlan)
     SwapExecutor-->>Vault: actual amountOut
     Vault->>NewAdapter: deposit() with adjusted assets
@@ -1273,7 +1251,7 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | INV-10 | 两类 Rebalance 均不得在 Cooldown 结束前执行；Emergency Exit 跳过该检查且不更新 `lastPositionChangeAt`；失败交易不更新 `lastPositionChangeAt`、版本或资产位置，IDLE 幂等分支不更新时间戳 | `CooldownActive(availableAt)` 或原子回滚 |
 | INV-11 | 支持资产 Donation 不可被角色救援                                                               | 不存在对应接口          |
 | INV-12 | Pause 不阻止正常双资产 Redeem                                                               | 赎回测试失败           |
-| INV-13 | `lastExecutedPlan` 只在健康 Strategy 计划成功执行后更新；其 `marketRegime` 是 Hysteresis 历史，不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导 | 状态机测试失败          |
+| INV-13 | `lastExecutedPlan` 只在健康策略计划成功执行后更新；其 `marketRegime` 是 Hysteresis 历史，不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导 | 状态机测试失败          |
 | INV-14 | 每次成功的 Position 结构变化使 `planVersion` 恰好递增 1，失败交易及非结构变化不更新                             | 版本与原子性测试失败       |
 | INV-15 | `DEFAULT_ADMIN_ROLE` 至多由一个账户持有，转移、放弃和延迟变更只能通过 `AccessControlDefaultAdminRules` 标准流程 | 权限操作回滚           |
 | INV-16 | Default Admin 不因根角色自动获得 Vault 业务权限，Guardian 只能收紧暂停和 Adapter 状态                      | 权限操作回滚           |
@@ -1288,9 +1266,8 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 
 | 测试层                 | 必测场景                                                                                                                                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Accounting 单元测试     | raw units、Token decimals 链上值与配置一致且均不超过 18、配置不一致或超限时以 `InvalidTokenDecimals` 回滚、负 Tick、NAV、Bootstrap/Deposit shares 舍入、Idle、迁移损失、零值和溢出边界                                                                                                                                               |
-| Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足、Pool 绑定、`Q1/Q0` 双向报价、Vault/Pool Token 顺序、向上/向下取整、Short TWAP/TWAP 偏离                                                                                                                                                     |
-| Strategy 单元测试       | Oracle 不健康快照回滚且不生成计划、`planVersion == 0` 的首次完整分类、四种历史 regime 的进入/退出 Hysteresis、`lastExecutedPlan.marketRegime` 作为 `lastCommittedRegime` 参数传递、Venue/Regime 严格双射、候选版本、spacing 步数换算与低/高费率 Pool spacing 映射、Range 对齐、边界回滚与中心偏移 Recenter、稳定计划哈希                                                                                 |
+| `AdaptiveLPVault` 单元测试 | Vault 会计、Oracle 快照编排、内部 `pure` 的 `_getPlan()` 独立输入测试、Hysteresis、Range、部署评估、`requiresSwap`、`direction`、计划哈希、角色、暂停、Registry 和核心状态边界 |
+| Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足、Pool 绑定、`Q1/Q0` 双向报价、Vault/Pool Token 顺序、向上/向下取整、Short TWAP/TWAP 偏离 |
 | V2 Adapter 测试       | 储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、部分退出、实际退出数量与余额变化、Token 顺序                                                                                                                                                         |
 | V3 Adapter 测试       | principal、tokens owed、fee growth 增量、领取后重读、principal 比例与手续费隔离、`amount0Max/amount1Max` 与实际 `used0/used1`、immutable binding getters、`tickSpacing`、Range、部分退出、实际退出数量与余额变化、旧 NFT 清理                                                                                                                               |
 | Adapter Registry 测试 | `configureAdapter(venue, adapter)` 的绑定校验、`tickSpacing` 缓存、初始化前重复配置、Bootstrap 后绑定和缓存冻结、仅 `enabled` 可变、Pool/Fee Tier 不重复存储                                                                                  |

@@ -40,9 +40,9 @@ Hysteresis 状态机的转移规则以 当前状态 为前提，但该状态既�
 > 原因：`positionPlan.marketRegime` 虽保存了最近成功计划的 Regime，但现有 Strategy 接口没有接收该历史值；同时，资产位置和 Hysteresis 历史被隐式绑定，Emergency Exit 或全部流通 shares 赎回进入 IDLE 后无法唯一恢复上次策略状态。
 
 修改：
-- Vault 使用 `lastExecutedPlan` storage 保存最近一次成功执行的完整 Strategy 计划；`lastExecutedPlan.marketRegime` 是 Hysteresis 历史的唯一事实来源，不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导。
-- `IMarketRegimeStrategy.getPlan` 接收 `MarketRegime lastCommittedRegime` 参数；Vault 在 Preview、普通 Rebalance 和带 Swap Rebalance 中将 `lastExecutedPlan.marketRegime` 作为该参数传入。
-- `planVersion == 0` 是无历史计划的唯一标志。首次生成计划时 Strategy 忽略 `lastCommittedRegime` 参数的默认枚举值，按完整进入阈值直接分类；`planVersion > 0` 时使用传入的 `lastExecutedPlan.marketRegime` 执行 Hysteresis。
+- Vault 使用 `lastExecutedPlan` storage 保存最近一次成功执行的完整计划；`lastExecutedPlan.marketRegime` 是 Hysteresis 历史的唯一事实来源，不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导。
+- Vault 各入口将本次读取或构造的快照、固定 Token decimals、历史 Regime、当前版本、Registry 缓存和固定策略参数显式传入内部 `pure` 的 `_getPlan()`；Preview、普通 Rebalance 和带 Swap Rebalance 使用同一套规则。
+- `planVersion == 0` 是无历史计划的唯一标志。首次生成计划时忽略 `lastExecutedRegime` 参数的默认枚举值，按完整进入阈值直接分类；`planVersion > 0` 时使用传入的历史 Regime 执行 Hysteresis。
 - 候选 `PositionPlan.version` 固定为当前 `planVersion + 1`。Bootstrap 或 Rebalance 成功执行策略计划后，将 `lastExecutedPlan` 写为执行计划，并将 `planVersion` 写为该计划的 `version`。
 - Emergency Exit 在非 IDLE 时清空 Position 并递增 `planVersion`，但在 IDLE 时不改变 Position；`lastExecutedPlan` 始终保持不变。Oracle 不健康、Preview 和失败交易也不得覆盖该计划及其 `marketRegime`。
 - 任一合法 `PositionPlan` 的 `targetVenue` 与 `marketRegime` 严格双射：`IDLE` ↔ `EXTREME_DEVIATION`、`UNISWAP_V2` ↔ `HIGH_DEVIATION`、`UNISWAP_V3_HIGH_FEE` ↔ `MEDIUM_DEVIATION`、`UNISWAP_V3_LOW_FEE` ↔ `LOW_DEVIATION`；该约束不要求非策略退出后的当前 `activeVenue` 与历史计划目标一致。
@@ -68,7 +68,7 @@ emergencyExitToIdle() 无最小输出参数，文档中承诺的滑点保护也�
 
 修改：
 - 手动 `seal()` 已由问题 3 删除，`initialized = true` 是唯一 Registry 身份冻结边界。
-- `IAdaptiveLPVault` 在 Vault 同一地址上组合 OpenZeppelin Contracts v5 `IAccessControlDefaultAdminRules` 标准 ABI 与继承式 `IAdapterRegistry`。
+- `IAdaptiveLPVault` 聚合 `IVaultRoles`、`IVaultPause` 和 `IAdapterRegistry`；`VaultRoles` 继承 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules` 并实现 `IVaultRoles`，`VaultPause` 和 `AdapterRegistry` 分别实现各自的逻辑接口。上述接口由同一个 Vault 地址实现，不代表独立部署的模块。
 - 删除自管理的 `ADMIN_ROLE`，将原业务 Admin 重命名为 `MANAGER_ROLE = keccak256("MANAGER_ROLE")`；`KEEPER_ROLE` 和 `GUARDIAN_ROLE` 保持不变。`DEFAULT_ADMIN_ROLE` 是唯一根角色，只负责业务角色授予/撤销和自身标准继任流程，不自动获得任何 Vault 业务权限。
 - 新增 `AccessControlConfig(initialDefaultAdminDelay, initialDefaultAdmin)` 构造输入，并直接使用 `AccessControlDefaultAdminRules` 的单一 Default Admin、两阶段延迟转移、取消/接受和延迟调整流程。
 - 新增 `setPauseState(PauseState)`：仅 Bootstrap 后开放；Manager 可暂停或解除暂停，Guardian 只能把暂停位从 false 改为 true；相同状态回滚 `NoStateChangeRequired()`，成功后原子更新并发出一次 `PauseStateChanged`。
@@ -161,10 +161,10 @@ getPlan 在 Oracle 不健康时的返回契约未定义 Strategy 是纯函数，
 
 修改：
 - 从 `MarketRegime` 删除 Oracle 不健康成员；该枚举只保留 LOW、MEDIUM、HIGH 和 EXTREME 四种健康市场状态。
-- Oracle 健康性仅由 `OracleSnapshot.healthy` 表达，不作为 Hysteresis 状态，也不写入 `lastCommittedRegime`。
-- Vault 在调用 `getPlan()` 前检查 Oracle 快照；`healthy == false` 时以 `OracleUnhealthy()` 回滚且不得调用 Strategy。
+- Oracle 健康性仅由 `OracleSnapshot.healthy` 表达，不作为 Hysteresis 状态，也不写入计划输入的历史 Regime。
+- Vault 在调用内部 `_getPlan()` 前检查 Oracle 快照；`healthy == false` 时以 `OracleUnhealthy()` 回滚且不得生成计划。
 - Strategy 若防御性地收到 `healthy == false` 的快照，也必须以 `OracleUnhealthy()` 回滚，不返回 `PositionPlan`，不计算 `planHash`。
-- 该失败路径不得修改 `positionPlan`、`lastCommittedRegime`、`planVersion`、`lastPositionChangeAt` 或资产位置。
+- 该失败路径不得修改计划输入中的历史 Regime、`planVersion`、`lastPositionChangeAt` 或资产位置。
 - `previewRebalance()` 使用同一规则；Redeem 和 Emergency Exit 不依赖 Strategy，仍按各自规则开放。
 
 ## 问题 16
@@ -325,9 +325,9 @@ getAdapter(IDLE) 的返回值未定义
 
 ## 问题 35
 继承式 Registry 与系统图/接口的部署语义不一致
-你的Registry 是继承进 Vault 的内部模块 无独立地址、无跨合约调用 ，但系统图与 §6.5 的完整外部接口形状 含 seal() 等入口 均按独立合约表达。图示的调用边在继承式实现中不存在；IAdapterRegistry 若仅由 Vault 自身实现，其接口语义 外部可调用性、权限边界 需重新说明。
+你的 Registry 是继承进 Vault 的内部模块，无独立地址、无跨合约调用，但系统图与 §6.5 的完整外部接口形状含 `seal()` 等入口均按独立合约表达。图示的调用边在继承式实现中不存在；Registry 外部函数由 Vault 自身实现，其外部可调用性和权限边界需重新说明。
 
-> 已并入问题 3 和问题 6 统一处理：`AdapterRegistry` 作为 `AdaptiveLPVault` 的继承式内部模块，`IAdapterRegistry` ABI 由 Vault 自身实现；系统图改为 Vault 直接连接 Adapter，删除独立 Registry、`seal()`/`sealed()` 及相关接口和事件，Bootstrap 成功时由 `initialized = true` 冻结身份字段。
+> 已并入问题 3 和问题 6 统一处理：`AdapterRegistry` 作为 `AdaptiveLPVault` 的继承式内部模块，`IAdapterRegistry` 作为其逻辑接口由 Vault 地址实现；系统图改为 Vault 直接连接 Adapter，删除独立 Registry、`seal()`/`sealed()` 及相关接口和事件，Bootstrap 成功时由 `initialized = true` 冻结身份字段。
 
 ## 问题 36
 紧急退出"关闭 Deposit 和 Rebalance"的实现机制歧义

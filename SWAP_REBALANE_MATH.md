@@ -4,7 +4,7 @@
 
 本文档不定义任意 Router、任意路径或任意 calldata。v1 使用部署时封存的 Router、Token 对、Pool/Fee Tier 和固定 Swap 方法。
 
-`lastExecutedPlan` 保存最近一次成功执行的 Strategy 计划，其 `marketRegime` 作为 Hysteresis 历史，并通过 `getPlan()` 的 `lastCommittedRegime` 参数传入；Swap 数学和失败路径不得另行维护或覆盖该历史状态。
+`lastExecutedPlan` 保存最近一次成功执行的策略计划，其 `marketRegime` 作为 Hysteresis 历史；Swap 数学和失败路径不得另行维护或覆盖该历史状态。
 
 ## 1. 统一口径
 
@@ -17,8 +17,8 @@
 
 一次 Swap Rebalance 使用同一个健康 Oracle 快照：
 
-- `twapTickBefore`：本次迁移使用的唯一参考 Tick；
-- `NAVBefore`：迁移前按 `twapTickBefore` 计算的 token1 价值；
+- `twapTick`：本次迁移使用的唯一参考 Tick；
+- `NAVBefore`：迁移前按 `twapTick` 计算的 token1 价值；
 - `T0`、`T1`：生成当前计划后首次部署评估使用的 Vault 总资产数量；
 - `B0`、`B1`：退出旧 Position 后、执行 Swap 前的 Vault 实际余额。
 
@@ -26,7 +26,7 @@
 
 ## 2. 部署评估与资产偏差
 
-`_assessDeployment(plan, amount0, amount1, twapTick)` 是 Vault 内部只读函数，不属于外部 ABI。
+`_assessDeployment(plan, amount0, amount1, twapTick)` 是 Vault 内部只读的编排函数。它调用目标 Adapter 的 `previewDeposit()`，再使用返回的局部 `used0/used1` 计算仅包含 `requiresSwap` 与 `direction` 的部署评估。
 
 对于非 IDLE 计划，Vault 必须先验证 `isEnterEnabled(plan.targetVenue) == true`，再调用目标 Adapter 的 `previewDeposit()`；禁用时以 `AdapterDisabled()` 回滚。该运行时门控不改变以下部署率、Swap 方向或舍入公式；IDLE 计划不检查 Adapter 状态，也不调用 Adapter。
 
@@ -59,26 +59,26 @@ unused_1 = A_1 - used_1
 $$
 
 $$
-DeployableNAV_1 = used_1 + Q_1(used_0; twapTickBefore)
+DeployableNAV_1 = used_1 + Q_1(used_0; twapTick)
 $$
 
 $$
-deployBps =
+initialDeployBps =
 \left\lfloor
 \frac{DeployableNAV_1 \times BPS}
-{A_1 + Q_1(A_0; twapTickBefore)}
+{A_1 + Q_1(A_0; twapTick)}
 \right\rfloor
 $$
 
-`DeploymentAssessment` 按以下规则生成：
+按以下规则生成 `DeploymentAssessment`：
 
 - `minDeployBps` 是派生值，定义为 `BPS - maxHealthyIdleBps`，不作为独立配置或独立事实来源；
-- `deployBps < minDeployBps` 时，`requiresSwap = true`；否则为 `false`；
+- `initialDeployBps < minDeployBps` 时，`requiresSwap = true`；否则为 `false`；
 - `unused0 > dustTolerance0` 且 `unused1 <= dustTolerance1` 时，`direction = ZERO_FOR_ONE`；
 - `unused1 > dustTolerance1` 且 `unused0 <= dustTolerance0` 时，`direction = ONE_FOR_ZERO`；
 - 两边都不超过对应 Dust 时，`direction = NONE`；
 - 两边都明显超过对应 Dust 时，目标计划、Adapter 预览或资产快照不一致，必须回滚；
-- IDLE 计划不调用 Adapter，固定返回 `used0 = 0`、`used1 = 0`、`requiresSwap = false` 和 `direction = NONE`。
+- IDLE 计划由 Vault 在调用 Adapter 前短路处理，固定返回 `requiresSwap = false` 和 `direction = NONE`。
 
 `dustTolerance0` 和 `dustTolerance1` 分别使用 token0 和 token1 raw units，仅用于整数舍入、最小单位和 AMM 计算造成的可接受微小剩余；该范围内的余额仍属于 Vault。
 
@@ -122,19 +122,16 @@ $$
 然后对模拟余额执行部署评估：
 
 ```text
-simulatedAssessment = _assessDeployment(currentPlan, H0(x), H1(x), twapTickBefore)
-used0 = simulatedAssessment.used0
-used1 = simulatedAssessment.used1
+(used0, used1) = targetAdapter.previewDeposit(H0(x), H1(x), currentPlan)
 ```
 
-每次 `_assessDeployment` 只调用一次目标 Adapter 的 `previewDeposit()`。首次评估使用 `T0/T1`，结果记为 `initialDeployBps`；本次评估使用模拟 Swap 后的 `H0/H1`，结果记为 `simulatedDeployBps(x)`。两者使用相同公式，但输入资产和检查阶段不同。
 
 $$
-DeployableNAV_1(x) = used_1 + Q_1(used_0; twapTickBefore)
+DeployableNAV_1(x) = used_1 + Q_1(used_0; twapTick)
 $$
 
 $$
-NAV_{after,sim}(x) = H_1(x) + Q_1(H_0(x); twapTickBefore)
+NAV_{after,sim}(x) = H_1(x) + Q_1(H_0(x); twapTick)
 $$
 
 $$
@@ -147,7 +144,7 @@ $$
 
 $$
 IdleValue_1(x) =
-(H_1(x)-used_1) + Q_1(H_0(x)-used_0; twapTickBefore)
+(H_1(x)-used_1) + Q_1(H_0(x)-used_0; twapTick)
 $$
 
 $$
@@ -181,8 +178,8 @@ Keeper 可以在链下寻找合适的 `x`。Vault 只验证值是否安全、方
 $$
 OracleQuoteOutUp(x) =
 \begin{cases}
-Q_1(x; twapTickBefore), & token0 \rightarrow token1 \\
-Q_0(x; twapTickBefore), & token1 \rightarrow token0
+Q_1(x; twapTick), & token0 \rightarrow token1 \\
+Q_0(x; twapTick), & token1 \rightarrow token0
 \end{cases}
 $$
 
@@ -257,7 +254,7 @@ Executor 返回值等于 `actualAmountOut`；Executor 的 token0/token1 余额�
 - 带 Swap 路径按 `amountIn` 和 `actualAmountOut` 调整后的资产位置与余额守恒；
 - NAV 损失不超过 `maxMigrationLossBps`。
 
-迁移前捕获的 `twapTickBefore` 用于迁移前后 NAV 比较：
+迁移前捕获的 `twapTick` 用于迁移前后 NAV 比较：
 
 $$
 NAV_{after} \ge

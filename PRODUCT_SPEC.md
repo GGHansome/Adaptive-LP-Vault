@@ -38,7 +38,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | Shares          | Vault 自己发行 ERC-20 shares；存取款均为双资产                 | 标准单资产 ERC-4626 接口、自动换币存款              |
 | Active Position | 任意时刻最多一个 Adapter 持有有效 LP Position                 | 多 Venue 并行权重、连续组合优化                   |
 | 价格来源            | 部署时固定且不可替换的 canonical Uniswap V3 Pool             | Chainlink、后端价格、调用者传入价格、目标池自报价         |
-| 策略输入            | Oracle 内部计算 `deviationBps`；Strategy 只读取 Oracle 快照 | 调用者传入 `DEVIATION`、历史标准差、实现波动率、手续费 APR |
+| 策略输入            | Oracle 内部计算 `deviationBps`；Vault 策略逻辑只读取 Oracle 快照 | 调用者传入 `DEVIATION`、历史标准差、实现波动率、手续费 APR |
 | 普通 Rebalance    | 允许撤出旧仓并使用现有双边资产建仓，不执行 Swap                        | 任意 Router、任意 calldata、调用者指定目标         |
 | Swap Rebalance  | 仅 Keeper/Manager 使用受限的 token0/token1 Swap           | 通用聚合器、用户自定义路径、无上限 Swap                |
 | 支持 Venue        | Uniswap V2、两个指定 Fee Tier 的 Uniswap V3、IDLE        | 动态新增 DEX 或初始化后替换 Adapter              |
@@ -68,7 +68,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | 角色                    | 可调用操作                                      | 业务权限                           | 明确禁止                                                             | 暂停影响                                                                           |
 | --------------------- | ------------------------------------------ | ------------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | LP 用户                 | `deposit`、`redeem`、shares 转账、只读查询          | 按规则提供双资产、获得和转让 shares、按比例赎回    | 单边存款、指定策略目标、调用 Swap Rebalance、取得额外 shares                        | `depositPaused` 不影响赎回；其他暂停不应阻止正常双资产赎回                                          |
-| Permissionless Caller | `rebalance`、只读查询                           | 在部署评估无需 Swap 时触发 Strategy 生成的当前计划 | 指定 Venue、Fee Tier、Tick Range、Swap、Router 或接收地址                   | 受 `plainRebalancePaused`、Cooldown、Oracle 健康、`expectedPlanHash` 和 `deadline` 限制 |
+| Permissionless Caller | `rebalance`、只读查询                           | 在部署评估无需 Swap 时触发 Vault 策略逻辑生成当前计划 | 指定 Venue、Fee Tier、Tick Range、Swap、Router 或接收地址                   | 受 `plainRebalancePaused`、Cooldown、Oracle 健康、`expectedPlanHash` 和 `deadline` 限制 |
 | Keeper                | `rebalanceWithSwap`、普通 Rebalance、只读查询      | 按受控 Swap 参数修复资产比例并执行有效目标计划     | 任意 Token、任意 Router、超限数量、降低协议 `minOut`、绕过 NAV 检查                  | 受 `swapRebalancePaused` 和全部 Oracle/风控门控限制                                      |
 | Guardian              | 暂停入口、禁用 Adapter、`emergencyExitToIdle`、只读查询 | 在异常情况下停止风险操作并无 Swap 撤出 LP      | 更换核心依赖、提取支持资产、执行任意 Swap                                          | 可暂停存款和 Rebalance；不应冻结赎回或紧急退出                                                   |
 | Default Admin         | 业务角色授予/撤销、根管理员两阶段转移与延迟管理、只读查询 | 仅管理权限归属和根角色生命周期              | 在未另持业务角色时调用 Bootstrap、暂停、Adapter 或资产操作                           | 业务暂停不影响角色管理；不因根角色自动取得任何业务权限                                                 |
@@ -96,12 +96,12 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | Spot Tick                  | canonical Pool 当前 `slot0().tick`                                          | 同一 Oracle 读取                            | 用于 V3 Range 越界与 Recenter 判定，不参与 `deviationBps`、NAV、`protocolMinOut` 或 Swap 风控 |
 | DEVIATION / `deviationBps` | 短周期 TWAP 价格相对 TWAP 价格的绝对偏离，单位为基点                                          | Oracle 内部计算                             | 不接受外部输入；不得命名为 volatility                  |
 | Oracle Healthy             | Oracle 地址、资产顺序、观察历史、窗口、Tick 和报价均满足可用性检查                                   | Oracle 健康检查                             | 与 `EXTREME_DEVIATION` 独立；极端偏离可以仍然健康       |
-| Market Regime              | Strategy 根据健康 Oracle 快照和滞后规则输出的策略状态                                       | LOW/MEDIUM/HIGH/EXTREME                 | 不是收益评级或风险免责                               |
-| Last Executed Regime / `lastExecutedPlan.marketRegime` | 最近一次成功执行的健康 Strategy 计划所提交的 Regime，作为 Hysteresis 历史 | Vault 持久化的 `lastExecutedPlan` | 不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导；Emergency Exit、Redeem 和 Oracle 不健康不覆盖 |
+| Market Regime              | Vault 策略逻辑根据健康 Oracle 快照和滞后规则输出的策略状态                                       | LOW/MEDIUM/HIGH/EXTREME                 | 不是收益评级或风险免责                               |
+| Last Executed Regime / `lastExecutedPlan.marketRegime` | 最近一次成功执行的健康策略计划所提交的 Regime，作为 Hysteresis 历史 | Vault 持久化的 `lastExecutedPlan` | 不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导；Emergency Exit、Redeem 和 Oracle 不健康不覆盖 |
 | Plan Version / `planVersion` | Position 结构状态的单调版本；候选计划使用下一版本 | Vault 持久化状态 | `0` 仅表示首次计划尚未成功；成功结构变化后递增 |
-| Position Plan              | 目标 Venue、Market Regime、V3 Range 和计划版本的结构目标                                  | Strategy 确定性生成                          | Rebalance 调用者只能提交期望哈希和 deadline，不能改写内容    |
-| Last Executed Plan / `lastExecutedPlan` | 最近一次成功执行的完整 Strategy 计划 | Vault 持久化状态 | 非策略 Position 变化后可与当前资产位置不同；其 `marketRegime` 是 Hysteresis 历史 |
-| Hysteresis                 | 状态进入和退出使用不同阈值形成的滞后区间                                                      | Strategy 参数                             | 不能用 Cooldown 替代                           |
+| Position Plan              | 目标 Venue、Market Regime、V3 Range 和计划版本的结构目标                                  | Vault 策略逻辑确定性生成                          | Rebalance 调用者只能提交期望哈希和 deadline，不能改写内容    |
+| Last Executed Plan / `lastExecutedPlan` | 最近一次成功执行的完整策略计划 | Vault 持久化状态 | 非策略 Position 变化后可与当前资产位置不同；其 `marketRegime` 是 Hysteresis 历史 |
+| Hysteresis                 | 状态进入和退出使用不同阈值形成的滞后区间                                                      | 部署固定的策略参数                             | 不能用 Cooldown 替代                           |
 | Cooldown                   | 两类计划性 Rebalance 距最近一次成功 Bootstrap 或计划性 Rebalance 的最小时间间隔                                        | Vault 存储的 `lastPositionChangeAt`              | Emergency Exit 跳过前置检查且不更新计时；失败交易和 IDLE 幂等调用不更新 |
 | Donation                   | 未铸造 shares 而直接转入 Vault 的支持资产                                              | ERC-20 实际余额增加                           | 永久归现有 shares 持有人；v1 不提供救援                 |
 
@@ -110,7 +110,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 
 ## 4. 系统行为总览
 
-Vault 的职责是校验和编排；Accounting 负责统一计价；Oracle 负责产生价格快照；Strategy 负责生成目标；Adapter 负责与具体 AMM 交互；Swap Executor 只负责受限换币。
+Vault 的职责是校验、会计和编排；策略逻辑负责生成目标；Oracle 负责产生价格快照；Adapter 负责与具体 AMM 交互；Swap Executor 只负责受限换币。所有 Vault 专属会计和策略逻辑均在 Vault 内部完成。
 
 ```mermaid
 flowchart LR
@@ -120,9 +120,7 @@ flowchart LR
     Manager[Manager] -->|Bootstrap 与全部受控操作| Vault
     Keeper[Keeper] -->|受控 Swap Rebalance| Vault
     Guardian[Guardian] -->|暂停或紧急退出| Vault
-    Vault --> Accounting[VaultAccounting]
     Vault --> Oracle[CanonicalV3Oracle]
-    Vault --> Strategy[MarketRegimeStrategy]
     Vault --> Swap[ControlledSwapExecutor]
     Vault --> V2[UniswapV2Adapter]
     Vault --> V3[UniswapV3Adapter]
@@ -180,8 +178,8 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 执行规则：
 
 1. 读取 TWAP，并根据 `amount0/amount1` 构造零 Position 的初始资产快照。
-2. 以 `planVersion == 0` 表示无历史计划，调用 Strategy 生成初始计划。
-3. Strategy 忽略 `lastCommittedRegime` 参数的默认枚举值，按完整进入阈值分类，并返回 `version == 1` 的计划。
+2. 以 `planVersion == 0` 表示无历史计划，由 Vault 策略逻辑生成初始计划。
+3. 初始计划按 LOW → MEDIUM → HIGH → EXTREME 的完整进入阈值分类，并返回 `version == 1` 的计划。
 4. 校验初始计划的目标 Venue 和 Range，并对初始资产执行部署评估。
 5. 按第 6.4 节公式计算 `grossInitialShares`。
 6. 转入 `amount0/amount1` 并完成铸造：`minimumLockedShares` 铸造给 Vault 自身（`address(this)`），其余发送到 `receiver`。
@@ -476,7 +474,7 @@ $$
 amount_0 = principal_0 + claimableFee_0, \qquad amount_1 = principal_1 + claimableFee_1
 $$
 
-Vault 和 Accounting 使用 `amount0/amount1` 计入 Position 资产后，不得再次加入 `claimableFee0/claimableFee1`。费用领取后，`claimableFee0/claimableFee1` 应从 Position 快照中移除，领取数量只能通过 Vault 实际余额进入 Idle 资产。
+Vault 使用 `amount0/amount1` 计入 Position 资产后，不得再次加入 `claimableFee0/claimableFee1`。费用领取后，`claimableFee0/claimableFee1` 应从 Position 快照中移除，领取数量只能通过 Vault 实际余额进入 Idle 资产。
 
 调用时机：`Deposit`、`Redeem`、`Plain Rebalance`、`Swap Rebalance`、`Emergency Exit` 在形成用于定价或迁移的最终资产快照前，必须按统一会计路径调用当前 Active Adapter 的 `syncFees()`；普通 shares 转账和只读接口无需同步。
 
@@ -587,7 +585,7 @@ canonical Oracle 在部署时绑定一个 Uniswap V3 Pool。该 Pool 必须满�
 - `0 < shortTwapWindowSeconds < twapWindowSeconds`；
 - Pool 不为零流动性或无历史的空池。
 
-Oracle 不读取目标 Venue 作为自己的价格来源。V2、两个 V3 Venue 的 NAV 和 Strategy 输入都使用同一 canonical Pool。
+Oracle 不读取目标 Venue 作为自己的价格来源。V2、两个 V3 Venue 的 NAV 和 Vault 策略输入都使用同一 canonical Pool。
 
 ### 8.2 TWAP 计算
 
@@ -666,30 +664,31 @@ Oracle 不健康时：
 
 ## 9. 策略与 Rebalance
 
-### 9.1 Strategy 输入和输出
+### 9.1 Vault 策略输入和输出
 
-`MarketRegimeStrategy` 是只读、确定性的计划生成器。输入仅来自：
+Vault 内部的策略逻辑是只读且确定性的计划生成器。输入仅来自：
 
 - 当前 Oracle Snapshot；
 - 当前 `activeVenue` 和 Position Snapshot；
-- Vault 资产比例、Idle 比例和暂停状态；
+- Vault 资产比例和 Idle 比例；
 - `lastExecutedPlan.marketRegime` 作为持久化的 Hysteresis 历史；
 - 当前 `planVersion`；
+- 固定 `token0Decimals` 和 `token1Decimals`，用于 raw units 的 Token 价值换算；
 - 已配置并验证的低费率 Pool 和高费率 Pool `tickSpacing`；
 - 部署时固定且受硬边界约束的策略参数。
 
-Strategy 输出完整的 `PositionPlan`，其内容包含：`targetVenue`、`marketRegime`、V3 Tick Range、`version` 和 `planHash`。
+Vault 内部根据当前资产、Position、Oracle 快照、历史 Regime、当前 Venue、固定策略参数和已验证的目标 Pool 配置，确定性生成完整的 `PositionPlan`；其内容包含 `targetVenue`、`marketRegime`、V3 Tick Range、`version` 和 `planHash`。
 
 - `planHash` 是对所有影响仓位结构且可稳定复算的计划字段计算的哈希；
 - `version` 和 `planHash` 用于执行时的计划身份校验；
-- Strategy 只生成候选计划，不直接提交 Vault 的 `planVersion` 或 `lastExecutedPlan` 更新；
+- 计划生成只产生候选计划，不直接提交 Vault 的 `planVersion` 或 `lastExecutedPlan` 更新；
 
 **Vault 提供 `previewRebalance()` 策略只读接口**。规则如下：
 
 1. 检查 `initialized == true`；未初始化时以 `NotInitialized()` 回滚。
 2. 检查 Oracle 不健康时以 `OracleUnhealthy()` 回滚。
 3. 生成最新 `PositionPlan`；目标为非 IDLE 时检查 `isEnterEnabled(targetVenue) == true`，禁用时以 `AdapterDisabled()` 回滚。
-4. 使用与执行入口相同的部署评估路径返回 `PositionPlan` 与 `DeploymentAssessment`。
+4. 使用与执行入口相同的部署评估路径返回 `PositionPlan` 与仅包含 `requiresSwap`、`direction` 的 `DeploymentAssessment`。
 
 `previewRebalance()` 的使用边界如下：
 
@@ -700,10 +699,10 @@ Strategy 输出完整的 `PositionPlan`，其内容包含：`targetVenue`、`mar
 
 ### 9.1.1 Position 结构版本与提交规则
 
-`planVersion` 是 Vault 对 Position 结构状态的单调提交版本；Strategy 只生成候选计划，成功的 Position 结构变化才提交新版本。
+`planVersion` 是 Vault 对 Position 结构状态的单调提交版本；策略逻辑只生成候选计划，成功的 Position 结构变化才提交新版本。
 
 - `planVersion` 初始为 `0`；
-- Strategy 生成的候选 `PositionPlan.version` 固定为当前 `planVersion + 1`；
+- 策略逻辑生成的候选 `PositionPlan.version` 固定为当前 `planVersion + 1`；
 - `version` 和 `planHash` 共同用于确认候选计划的身份；
 - 候选计划生成、预览或哈希校验成功，不代表 `planVersion` 已经更新。
 
@@ -752,15 +751,15 @@ $$
 - EXTREME 只有在 `deviationBps <= exitExtremeBps` 时回到 HIGH；
 - 未跨越当前状态对应边界时保持当前状态。
 
-Strategy 根据 `planVersion` 选择 Hysteresis 的分类方式：
+Vault 策略逻辑根据 `planVersion` 选择 Hysteresis 的分类方式：
 
-- `planVersion == 0`：忽略 `lastCommittedRegime` 参数的 Solidity 默认值，按 LOW → MEDIUM → HIGH → EXTREME 的完整进入阈值直接分类；
-- `planVersion > 0`：Vault 将 `lastExecutedPlan.marketRegime` 作为 `lastCommittedRegime` 参数传入，Strategy 使用该值执行上述状态转换；
+- `planVersion == 0`：没有已提交的历史计划，按 LOW → MEDIUM → HIGH → EXTREME 的完整进入阈值直接分类；
+- `planVersion > 0`：使用 `lastExecutedPlan.marketRegime` 作为 Hysteresis 历史执行上述状态转换；
 - Hysteresis 只控制幅度，Cooldown 只控制时间频率，两者不可互相替代。
 
 ### 9.1.3 Position V3 Range 计算与 Recenter
 
-Strategy 使用由 Vault 从已验证 Adapter 配置构造的目标 Pool spacing：
+Vault 策略逻辑使用由已验证 Adapter 配置提供的目标 Pool spacing：
 
 - `LOW_DEVIATION` 的目标 Venue 是 `UNISWAP_V3_LOW_FEE`，使用低费率 Pool 的 `tickSpacing`；
 - `MEDIUM_DEVIATION` 的目标 Venue 是 `UNISWAP_V3_HIGH_FEE`，使用高费率 Pool 的 `tickSpacing`；
@@ -775,7 +774,7 @@ $$
 highHalfWidthTicks = wideRangeHalfWidthSteps \times highFeeTickSpacing
 $$
 
-Strategy 按以下规则确定 `targetCenterTick`：
+Vault 策略逻辑按以下规则确定 `targetCenterTick`：
 
 - 以 `twapTick` 为价格中心参考；
 - 不使用调用者传入的 Tick，也不直接跟随 Spot Tick；
@@ -808,15 +807,7 @@ Spot 越界但 TWAP 目标中心尚未移动足够远时，不立即跟随 Spot 
 
 #### 9.2 部署评估 与 `requiresSwap`
 
-Strategy 生成候选 `PositionPlan` 后，由 Vault 调用内部只读的 `_assessDeployment(plan, amount0, amount1, twapTick)` 对指定资产数量执行部署评估。以下公式描述以当前总资产 `T0/T1` 为输入的首次部署评估；非 IDLE 计划通过目标 Adapter 的 `previewDeposit()` 获取预计可部署的 `used0/used1`：
-
-$$
-DeployableNAV_1 = used_1 + Q_1(used_0; twapTick)
-$$
-
-$$
-initialDeployBps = \left\lfloor \frac{DeployableNAV_1 \times BPS}{NAV_1} \right\rfloor
-$$
+Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_assessDeployment(plan, amount0, amount1, twapTick)` 对指定资产执行部署评估。该函数调用目标 Adapter 的 `previewDeposit()` 获取局部 `used0/used1`，再根据统一部署评估公式计算包含 `requiresSwap` 与 `direction` 的 `DeploymentAssessment`。
 
 生成部署评估规则如下:
 
@@ -826,7 +817,7 @@ $$
 - `EXTREME_DEVIATION` 以 IDLE 为目标，返回 `requiresSwap = false` 和 `direction = NONE`，不受部署率边界约束；
 - 非 IDLE 计划的 `direction` 由 `used0/used1` 与未使用余额确定，完整规则见 [SWAP_REBALANE_MATH.md](SWAP_REBALANE_MATH.md)。
 
-按以上规则返回包含 `requiresSwap`、`direction`、`used0`、`used1` 的 `DeploymentAssessment`：
+按以上规则返回包含 `requiresSwap`、`direction` 的 `DeploymentAssessment`。
 
 `requiresSwap = true` 表示当前资产比例无法通过无 Swap 路径达到最低部署率，还需做对应处理如下：
 
@@ -934,7 +925,7 @@ Guardian/Manager 可在不依赖价格估值的情况下触发幂等紧急退出
 
 ### 10.1 根管理员与业务角色
 
-Vault 直接继承 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules`：
+Vault 使用 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules` 提供根管理员标准流程：
 
 | 角色 | 固定标识 | 角色管理员 | 权限范围 | 初始授权 |
 | --- | --- | --- | --- | --- |
@@ -1034,7 +1025,7 @@ Bootstrap 成功后不可替换：
 - Observation 不足、报价为零或资产绑定错误时关闭价值相关操作。
 - TWAP 只提高操纵成本，不构成绝对安全保证。
 - `deviationBps` 不是波动率，也不用于宣称收益最优。
-- `lastExecutedPlan` 只在健康 Strategy 计划成功执行后更新；其 `marketRegime` 是 Hysteresis 历史，不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导；
+- `lastExecutedPlan` 只在健康策略计划成功执行后更新；其 `marketRegime` 是 Hysteresis 历史，不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导；
 - 每次成功的 Position 结构变化必须使 `planVersion` 恰好递增 1，失败交易和非结构变化不得更新。
 
 
@@ -1084,7 +1075,7 @@ Oracle 与策略：
 - `deviationBps` 由 Oracle 内部根据 `shortTwapTick` 和 `twapTick` 生成；
 - 未初始化 Preview 以 `NotInitialized()` 回滚；
 - Oracle 不健康时，Preview 和执行入口均以 `OracleUnhealthy()` 回滚，且不生成占位计划；
-- Strategy 使用 `planVersion == 0` 识别首次分类；之后 Vault 将 `lastExecutedPlan.marketRegime` 作为 `lastCommittedRegime` 参数传入 Strategy 执行 Hysteresis；
+- Vault 策略逻辑使用 `planVersion == 0` 识别首次分类；之后使用 `lastExecutedPlan.marketRegime` 作为 Hysteresis 历史；
 - `narrowRangeHalfWidthSteps` 和 `wideRangeHalfWidthSteps` 按对应 Pool 的 `tickSpacing` 换算，低费率与高费率 Pool 的 spacing 来源及缓存一致，非法或越界 Range 以 `InvalidTickRange()` 回滚；
 - Position 结构变化的版本递增和 Range 规则均经过测试。
 
