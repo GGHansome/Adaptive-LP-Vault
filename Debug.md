@@ -103,7 +103,7 @@ protocolMinOut 在 token1→token0 方向需要 Q0（token1 数量按 tick 报�
 修改：
 - `OracleConfig` 增加 `token0`、`token1` 和 `canonicalPool`；`CanonicalV3Oracle` 将其写入 immutable，并按 Vault Token 顺序提供 `quoteToken0InToken1` 和 `quoteToken1InToken0`，两者通过 `roundUp` 参数选择向下或向上取整。
 - `protocolMinOut` 先取得向上取整的方向报价，再对 BPS 滑点折算向上取整；相对仅在最终结果处取整的精确有理数公式，结果相同或最多高一个输出 Token raw unit。
-- 产品验收与架构测试矩阵补充双向报价、Token 顺序和两段取整测试。
+- 产品验收与架构测试矩阵补充双向报价、统一有序 Token 和两段取整测试。
 
 ## 问题 10
 原事件契约中的 `PlanGenerated` 在系统里没有任何合法的发出点 预览是 view 不能发 执行成功时计划已被执行（RebalanceExecuted 携带 planHash） 执行失败即回滚（事件不存在）。若意图是在 RebalanceExecuted 之外补充 planHash→(venue, regime, requiresSwap) 的映射广播，则应说明与 RebalanceExecuted 的关系及是否在同一交易内成对发出。
@@ -289,8 +289,8 @@ token1Decimals > 18 无约束，份额锚定与取整粒度退化
 
 修改：
 - v1 同时要求 `token0Decimals <= 18` 和 `token1Decimals <= 18`。
-- Vault 构造时读取两个 Token 的 `IERC20Metadata.decimals()`，配置值必须与链上返回值一致。
-- 配置不一致或任一链上值大于 18 时，以 `InvalidTokenDecimals(token, configured, actual)` 拒绝部署，避免 `10^decimals` 无界和 Token 精度高于 18 位 shares 的额外粒度语义。
+- `CanonicalV3Oracle` 从 canonical Pool 读取有序 Token 地址，并从两个 Token 合约读取 `IERC20Metadata.decimals()`；Vault 从 Oracle 读取并缓存相同的 immutable 值，不再由部署者重复配置。
+- Token metadata 读取失败时以 `InvalidTokenMetadata(token)` 拒绝部署；任一链上值大于 18 时以 `InvalidTokenDecimals(token, actual)` 拒绝部署，避免 `10^decimals` 无界和 Token 精度高于 18 位 shares 的额外粒度语义。
 
 ## 问题 30
 单边实际存款为零时回滚错误未指定 ZeroAmount vs InvalidDepositRatio
@@ -314,6 +314,11 @@ ParameterUpdated 事件的参数转型语义未定义int24 参数与 bytes32 标
 ## 问题 33
  OracleSnapshot.observedAt 与三个价格字段的标度/参考量未定义
 价格字段未定义标度：是 1 raw unit token0 的 token1 报价、还是 10^token0Decimals（1 整个 token0）的报价、还是 X96 定点——三种标度在同一字段名下均可行；observedAt 无任何使用处与语义说明。另外 AssetSnapshot.nav1 在 Oracle 不健康时（无法计算 TWAP 报价）的取值（回滚？零？）也未定义。
+
+修改：
+- `spotPriceToken1`、`twapPriceToken1` 和 `shortTwapPriceToken1` 保留，分别使用 `spotTick`、`twapTick`、`shortTwapTick` 对 `10^token0Decimals` 个 token0 raw units（1 个完整 token0）执行 `Q1` 向下取整报价，返回 token1 raw units。
+- `observedAt` 定义为 Oracle 生成快照时的 `block.timestamp`，仅用于前端、索引器和调试元数据，不参与协议计算、计划哈希或状态门控。
+- `AssetSnapshot` 删除 `nav1`、`idleValue1` 和 `idleBps`，只返回 raw-unit 资产数量和 `totalShares`；策略、定价和迁移路径按同一次健康 Oracle 快照在内部计算所需估值。原始资产查询不依赖 Oracle，价值相关路径在 Oracle 不健康时以 `OracleUnhealthy()` 回滚。
 
 ## 问题 34
 getAdapter(IDLE) 的返回值未定义
@@ -371,3 +376,12 @@ getPlan 生成计划的 version 取值规则未定义
 > 已并入问题 4 统一处理：`planVersion` 初始为 0，候选 `PositionPlan.version` 必须等于当前 `planVersion + 1`；成功的 Position 结构变化提交候选版本或将现有版本递增 1，失败交易和非结构变化不更新。
 
 看一下这些问题 处理一下 完事之后可以 再找我
+
+## 问题 42
+Vault、Oracle、Swap Executor、Adapter 及其绑定 Pool 的 Token 顺序来源和一致性
+
+已解决：
+- canonical Pool 按地址升序确定 `token0/token1`；Oracle 从 canonical Pool 读取 Token 地址和 decimals，Vault 从 Oracle 读取并缓存。
+- Vault、Oracle、Swap Executor、所有 Adapter 及其绑定 Pool 必须使用完全一致的有序 Token 对；`token0 < token1`。
+- 删除 Vault 和 Oracle 中重复的手动 Token/decimals 配置；派生值在部署时校验并写入 immutable。
+- 反向顺序、零地址、相同地址、错误资产对或必要依赖读取失败时，相关部署或绑定校验回滚。

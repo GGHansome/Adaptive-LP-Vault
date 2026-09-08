@@ -82,7 +82,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | 术语                         | 规范定义                                                                      | 数据来源或计算方式                               | 可变性与禁止混用                                  |
 | -------------------------- | ------------------------------------------------------------------------- | --------------------------------------- | ----------------------------------------- |
 | Vault                      | 持有 Idle 资产、发行 shares 并编排所有模块的核心合约                                         | 合约存储和 Adapter 快照                        | Vault 不实现 V2/V3 内部数学                      |
-| token0 / token1            | Vault 初始化时固定的两种底层资产及其顺序                                                   | immutable 地址和 decimals                  | 不得按调用者输入重排；所有接口使用固定顺序                     |
+| token0 / token1            | canonical Uniswap V3 Pool 按地址升序确定的两种底层资产及其唯一协议顺序                              | Oracle 从 canonical Pool 读取并由 Vault 缓存为 immutable 地址和 decimals | `token0 < token1`；Vault、Oracle、Swap Executor、所有 Adapter 及其 Pool 必须使用相同顺序；前端可独立选择展示顺序 |
 | Venue                      | 一个具体的流动性池实例或 IDLE 状态                                                      | `VenueType` 加 Adapter 配置                | Venue 不是抽象的 DEX 名称                        |
 | Adapter                    | 封装某个 Venue 的存取流动性、费用和 Position 数据的受信模块                                    | Registry 中的固定地址                         | 不能决定 shares；`enabled` 只控制建立或增加 liquidity，禁用后现有 Position 仍可计价和退出 |
 | Active Position            | 当前唯一结构有效的外部 LP Position                                                   | Active Adapter 的 Position 快照            | 有效性不包含 Adapter `enabled`；非 IDLE 时最多一个，IDLE 时必须为零 |
@@ -95,7 +95,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | Short TWAP Tick            | canonical V3 Pool 在 `shortTwapWindowSeconds` 内的 arithmetic mean tick      | 同一次 `observe([twapWindowSeconds, shortTwapWindowSeconds, 0])`，取 `tickCumulatives[2] - tickCumulatives[1]` | 只用于偏离信号，不单独作为 NAV                         |
 | Spot Tick                  | canonical Pool 当前 `slot0().tick`                                          | 同一 Oracle 读取                            | 用于 V3 Range 越界与 Recenter 判定，不参与 `deviationBps`、NAV、`protocolMinOut` 或 Swap 风控 |
 | DEVIATION / `deviationBps` | 短周期 TWAP 价格相对 TWAP 价格的绝对偏离，单位为基点                                          | Oracle 内部计算                             | 不接受外部输入；不得命名为 volatility                  |
-| Oracle Healthy             | Oracle 地址、资产顺序、观察历史、窗口、Tick 和报价均满足可用性检查                                   | Oracle 健康检查                             | 与 `EXTREME_DEVIATION` 独立；极端偏离可以仍然健康       |
+| Oracle Healthy             | 运行时观察历史、Pool 动态数据、Tick 和报价均足以生成完整可用的价格快照                              | Oracle 每次生成快照时检查                         | 与部署期固定绑定校验、`EXTREME_DEVIATION` 独立；极端偏离可以仍然健康 |
 | Market Regime              | Vault 策略逻辑根据健康 Oracle 快照和滞后规则输出的策略状态                                       | LOW/MEDIUM/HIGH/EXTREME                 | 不是收益评级或风险免责                               |
 | Last Executed Regime / `lastExecutedPlan.marketRegime` | 最近一次成功执行的健康策略计划所提交的 Regime，作为 Hysteresis 历史 | Vault 持久化的 `lastExecutedPlan` | 不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导；Emergency Exit、Redeem 和 Oracle 不健康不覆盖 |
 | Plan Version / `planVersion` | Position 结构状态的单调版本；候选计划使用下一版本 | Vault 持久化状态 | `0` 仅表示首次计划尚未成功；成功结构变化后递增 |
@@ -169,7 +169,7 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 前置条件：
 
 - Vault 尚未初始化；
-- `bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓前，重新校验 token0/token1、canonical Oracle、Swap Executor 和所有 v1 Adapter 的完整 immutable 绑定及 `tickSpacing` 缓存；
+- `bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓前，重新校验由 canonical Pool 派生并由 canonical Oracle 固化的 token0/token1、Token decimals、canonical Oracle、Swap Executor 和所有 v1 Adapter 的完整 immutable 绑定及 `tickSpacing` 缓存；
 - 上述绑定校验失败时，整笔交易回滚；
 - Oracle Healthy，观察窗口有足够历史；
 - 初始 token0 和 token1 均大于零；
@@ -293,10 +293,10 @@ v1 规则如下：
 ### 6.1 单位和快照
 
 - 所有 ERC-20 数量在合约内部使用各自 token 的 raw units。
-- v1 要求 `token0Decimals <= 18` 且 `token1Decimals <= 18`；Vault 构造时读取两个 Token 的 `IERC20Metadata.decimals()`，配置值必须与链上返回值一致，不一致或任一返回值大于 18 时均以 `InvalidTokenDecimals(token, configured, actual)` 拒绝部署。
+- v1 要求两个支持 Token 的 `IERC20Metadata.decimals()` 均不超过 18；`CanonicalV3Oracle` 从 canonical Pool 读取有序 `token0/token1` 后读取两个 Token 的 decimals，Vault 再从 canonical Oracle 取得并缓存这些 immutable 值。Token 地址必须非零、互不相同且满足 `token0 < token1`；Pool 或 Token metadata 读取失败、Token 顺序不合法或 decimals 超限时，相关合约部署或绑定校验回滚。
 - Shares 固定使用 18 decimals；一份完整 share 的初始名义价值为一份完整 token1。
 - `NAV1`、`minimumInitialNav` 和迁移损失均以 token1 raw units 表示。
-- `Q1(amount0; tick)` 返回 token1 raw units，`Q0(amount1; tick)` 返回 token0 raw units；价格函数必须处理 Vault Token 顺序、canonical Pool 内部顺序和 decimals，具体取整规则由使用它的公式定义。
+- `Q1(amount0; tick)` 返回 token1 raw units，`Q0(amount1; tick)` 返回 token0 raw units；canonical Pool、Vault、Oracle、Swap Executor、所有 Adapter 及其绑定 Pool 使用相同的有序 Token 顺序，因此 `Q1` 固定表示 token0 → token1，`Q0` 固定表示 token1 → token0。价格函数必须处理 Token decimals，具体取整规则由使用它的公式定义。
 - 百分比使用 `BPS = 10_000`。
 - 所有乘除使用全精度 `mulDiv` 语义；不足一单位时按照每个公式规定的方向舍入。
 - Shares 铸造和资产输出向下舍入；零 shares 或零实际存款必须回滚。
@@ -512,12 +512,12 @@ Donation 直接增加 `I0/I1`，没有对应 `sharesMinted`。因此 Donation �
 
 ### 7.1 AdapterRegistry 配置
 
-`AdapterRegistry` 由 `AdaptiveLPVault` 继承实现，只负责绑定已独立部署的 Adapter；初始化前，将三个非 IDLE Venue 分别绑定到唯一的 Adapter。Adapter 自身在部署时固定保存其 Vault、Venue、Pool、Token、Fee Tier、Tick Spacing` 和（V3）Position Manager。
+`AdapterRegistry` 由 `AdaptiveLPVault` 继承实现，只负责绑定已独立部署的 Adapter；初始化前，将三个非 IDLE Venue 分别绑定到唯一的 Adapter。Adapter 自身在部署时固定保存其 Vault、Venue、Pool 和（V3）Position Manager，并从绑定 Pool 读取 token0/token1、Fee Tier、Tick Spacing`。
 
 `configureAdapter(venue, adapter)` 的调用规则如下：
 
 - 仅 Manager 可在 `initialized == false` 时调用；
-- 调用时必须验证 Adapter 合约代码、Vault、Venue、Pool、Token 顺序、Fee Tier 和 `tickSpacing` 的绑定关系；V3 Adapter 的 `tickSpacing` 必须为正且与其 Pool 的实际 `tickSpacing()` 一致，V2 Adapter 的 Fee Tier 和 `tickSpacing` 固定为零；验证失败时以 `InvalidTickSpacing()` 或对应绑定错误回滚；
+- 调用时必须验证 Adapter 合约代码、Vault、Venue、Pool、Adapter 与 Pool 的 `token0/token1`、Fee Tier 和 `tickSpacing` 的绑定关系；V3 Adapter 的 `tickSpacing` 必须为正且与其 Pool 的实际 `tickSpacing()` 一致，V2 Adapter 的 Fee Tier 和 `tickSpacing` 固定为零；验证失败时以 `InvalidTokenOrder()`、`InvalidTickSpacing()` 或对应绑定错误回滚；
 - 成功后将 Adapter 地址、经过验证的 `tickSpacing` 缓存和 `enabled = true` 写入 `_adapterByVenue`，并发出 `AdapterConfigured`；
 - 该方法不转移资产、不创建 Position，也不改变 shares 或策略状态；
 - 初始化前可重复调用，以修正绑定。
@@ -532,7 +532,7 @@ Bootstrap 对 Registry 执行最终封存：
 
 ### 7.2 Uniswap V2 Adapter
 
-V2 Adapter 必须固定绑定一个 Pair、Vault、token0 和 token1，并提供：
+V2 Adapter 必须固定绑定一个 Pair、Vault 以及从该 Pair 读取的 token0/token1，并提供：
 
 - 按 Pair 当前储备计算的 LP Token 权益作为 `PositionSnapshot` 的 `principal0/principal1` 和 `amount0/amount1`；`claimableFee0/1` 为零；
 - 按 Pair 当前储备比例增加流动性；
@@ -544,7 +544,7 @@ V2 Position 覆盖全价格区间，不存在 Tick Range，但仍承担 AMM 价�
 
 ### 7.3 Uniswap V3 Adapter
 
-V3 Adapter 必须固定绑定一个 Pool、Fee Tier、Pool、Tick Spacing、Position Manager、token0/token1 和 Vault，并管理一个 NFT Position。Position 包含：
+V3 Adapter 必须固定绑定一个 Pool、Fee Tier、Tick Spacing、Position Manager 和 Vault，并从该 Pool 读取 token0/token1，同时管理一个 NFT Position。Position 包含：
 
 - `tokenId`；
 - `tickLower`、`tickUpper`；
@@ -576,14 +576,15 @@ IDLE 不是 Adapter，而是 `activeVenue == IDLE` 的资产位置状态。IDLE 
 
 ### 8.1 Canonical Uniswap V3 Oracle
 
-canonical Oracle 在部署时绑定一个 Uniswap V3 Pool。该 Pool 必须满足：
+canonical Oracle 在部署时绑定一个 Uniswap V3 Pool。canonical Pool 是 Vault Token 顺序和价格来源的最终事实来源；该 Pool 必须满足：
 
-- `token0/token1` 与 Vault 固定资产对一致；
-- Oracle 的 `token0/token1` 报价顺序与 Vault 的 immutable `token0/token1` 顺序一致；
+- `canonicalPool.token0()` 和 `canonicalPool.token1()` 均非零、互不相同且满足 `canonicalPool.token0() < canonicalPool.token1()`；
+- `CanonicalV3Oracle` 从 canonical Pool 读取该 `token0/token1`，并从对应 Token 合约读取 decimals；
+- Vault 从 canonical Oracle 取得并缓存相同的 `token0/token1` 和 decimals；
+- canonical Pool、Vault、Oracle、ControlledSwapExecutor、所有 Adapter 及其绑定 Pool 的 `token0/token1` 必须完全一致；
 - Pool 地址、Factory、Fee Tier 和代码哈希通过初始化检查；
-- Observation Cardinality 和历史覆盖时间足以满足 `twapWindowSeconds` 和 `shortTwapWindowSeconds`；
 - `0 < shortTwapWindowSeconds < twapWindowSeconds`；
-- Pool 不为零流动性或无历史的空池。
+- 对 WETH/USDC，标准 Pool 顺序为 `token0 = USDC`、`token1 = WETH`；前端展示可以使用 WETH/USDC 等用户顺序，但不改变协议内部 Token 顺序。
 
 Oracle 不读取目标 Venue 作为自己的价格来源。V2、两个 V3 Venue 的 NAV 和 Vault 策略输入都使用同一 canonical Pool。
 
@@ -613,11 +614,13 @@ Spot Tick 和价格报价遵循以下规则：
 - Oracle 同时读取 `pool.slot0().tick` 作为 `spotTick`；
 - `spotTick` 不参与 `deviationBps`；
 - `Q1/Q0` 报价通过 `TickMath` 和全精度乘除完成；
-- 如果 token 地址顺序与 Pool 内部顺序不同，必须反转报价方向并处理 decimals。
+- canonical Pool、Vault、Oracle、Swap Executor、所有 Adapter 及其绑定 Pool 使用相同的有序 Token 顺序，`Q1` 固定为 token0 → token1，`Q0` 固定为 token1 → token0；
+- `spotPriceToken1`、`twapPriceToken1` 和 `shortTwapPriceToken1` 分别是以 `10^token0Decimals` 个 token0 raw units（1 个完整 token0）为参考量，使用对应 Tick 通过 `Q1` 向下取整得到的 token1 raw units；
+- `observedAt` 等于生成本次快照时的 `block.timestamp`，只用于前端、索引器和调试元数据，不参与任何协议计算或状态门控。
 
 ### 8.3 DEVIATION 定义
 
-对一个固定的 `referenceAmount0`（通常为一个 token0 的 decimals。）分别使用 `shortTwapTick` 和 `twapTick` 报价：
+对固定的 `referenceAmount0 = 10^{token0Decimals}`（1 个完整 token0）分别使用 `shortTwapTick` 和 `twapTick` 报价：
 
 $$
 P_{short} = Q_1(referenceAmount_0; shortTwapTick)
@@ -626,6 +629,8 @@ $$
 $$
 P_{twap} = Q_1(referenceAmount_0; twapTick)
 $$
+
+`P_short` 和 `P_twap` 同时分别作为 `shortTwapPriceToken1` 和 `twapPriceToken1` 写入 OracleSnapshot；`spotPriceToken1` 使用相同参考量和 `spotTick` 计算。三个字段均为 token1 raw units，并按 `Q1` 向下取整。
 
 $$
  deviationBps = \left\lfloor \frac{|P_{short} - P_{twap}| \times BPS}{P_{twap}} \right\rfloor
@@ -643,22 +648,23 @@ $$
 
 ### 8.4 Oracle Healthy 与失败门控
 
-以下任一条件不满足时，`OracleSnapshot.healthy` 必须为 `false`：
+**部署期固定约束与绑定失败**
 
-- canonical Pool 地址或资产绑定不匹配；
-- `twapWindowSeconds == 0`、`shortTwapWindowSeconds == 0` 或 `shortTwapWindowSeconds >= twapWindowSeconds`；
-- Observation 历史不足或 `observe` 调用失败；
-- Tick、平方根价格或报价计算溢出；
-- `P_twap == 0`、报价为零或无法进行方向转换；
-- Pool 代码或关键配置不符合初始化记录。
+`CanonicalV3Oracle` 构造时必须校验 canonical Pool 地址和合约代码、Factory、Fee Tier、代码哈希、有序 `token0/token1`、Token metadata、窗口关系和协议硬边界。配置不合法时构造交易直接以对应错误回滚，不得部署一个以 `healthy == false` 表示错误配置的 Oracle。
 
-Oracle 不健康时：
+**运行时快照可用性**
 
-- 关闭 Deposit；
-- 禁止普通 Rebalance 和 `rebalanceWithSwap`；
-- 允许正常双资产 Redeem；
-- 允许 Guardian/Manager 执行不依赖价格估值的无 Swap Emergency Exit；
-- 不把不健康状态强行归类为 LOW/MEDIUM/HIGH/EXTREME。
+Oracle 每次生成快照时检查动态 Pool 数据。以下任一情况发生时，`snapshot()` 必须返回 `OracleSnapshot.healthy == false`：
+
+- Observation 历史不足以覆盖 `twapWindowSeconds` 或 `shortTwapWindowSeconds`；
+- `observe()`、`slot0()` 或其他必要的 Pool 数据读取失败；
+- `P_twap == 0`，或任一必需报价为零。
+
+不健康快照中的 Tick、价格和 `deviationBps` 不得用于任何协议计算或计划生成；实现必须捕获可处理的外部读取失败并避免让上述动态失败穿透为 revert。Observation 历史是否充足不作为 Oracle 构造成功的必要条件，但部署脚本可以在部署或 Bootstrap 前执行非规范性的预检查。
+
+**Vault 运行时门控**
+
+Bootstrap、Deposit、Preview、普通 Rebalance 和 `rebalanceWithSwap` 读取到 `healthy == false` 时，必须统一以 `OracleUnhealthy()` 回滚，不得生成或返回 `PositionPlan`，也不得修改资产位置、计划版本或 Hysteresis 历史。正常双资产 Redeem 继续开放；Guardian/Manager 仍可执行不依赖价格估值的无 Swap Emergency Exit。
 
 极端 `deviationBps` 是健康 Oracle 下的策略状态，不自动等同于 Oracle 不健康。
 
@@ -670,10 +676,10 @@ Vault 内部的策略逻辑是只读且确定性的计划生成器。输入仅�
 
 - 当前 Oracle Snapshot；
 - 当前 `activeVenue` 和 Position Snapshot；
-- Vault 资产比例和 Idle 比例；
+- Vault 原始资产数量；
 - `lastExecutedPlan.marketRegime` 作为持久化的 Hysteresis 历史；
 - 当前 `planVersion`；
-- 固定 `token0Decimals` 和 `token1Decimals`，用于 raw units 的 Token 价值换算；
+- 固定缓存的 `token0Decimals` 和 `token1Decimals`，用于 raw units 的 Token 价值换算；
 - 已配置并验证的低费率 Pool 和高费率 Pool `tickSpacing`；
 - 部署时固定且受硬边界约束的策略参数。
 
@@ -863,7 +869,7 @@ Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_asse
 
 仅 Keeper/Manager 可以调用：`rebalanceWithSwap(expectedPlanHash, expectedDirection, amountIn, keeperMinAmountOut, deadline)`。
 
-固定的 Swap 基础设施：`ControlledSwapExecutor` 在部署或不可变初始化时固定。Vault 在调用 `executeSwap()` 前向该 Executor 转入精确的 `amountIn`；Executor 只在本次调用期间持有输入资产，Router 的输出接收方固定为 Vault，调用者不能覆盖。
+固定的 Swap 基础设施：`ControlledSwapExecutor` 在部署或不可变初始化时固定。Executor 从 `swapPool` 读取并保存 `token0/token1`，且必须与 Vault 和 canonical Pool 完全一致；Vault 在调用 `executeSwap()` 前向该 Executor 转入精确的 `amountIn`；Executor 只在本次调用期间持有输入资产，Router 的输出接收方固定为 Vault，调用者不能覆盖。
 
 `maxSwapSlippageBps` 是部署时固定的协议滑点上限，任何调用者都不能覆盖。Vault 使用本次迁移开始时捕获的 canonical TWAP 计算协议最低输出 `protocolMinOut`；方向报价和滑点折算均向上取整。Vault 将 `minAmountOut = max(protocolMinOut, keeperMinAmountOut)` 写入本次 `SwapPlan`。
 
@@ -1045,8 +1051,8 @@ Bootstrap 成功后不可替换：
 
 身份与初始化：
 
-- 固定 token0/token1、canonical Oracle、Adapter 和 shares 语义已在链上验证；
-- `token0Decimals/token1Decimals` 的链上值与配置一致且均不超过 18，任一 Token 超限时部署回滚；
+- `token0/token1`、canonical Pool、canonical Oracle、Swap Executor、所有 Adapter 和绑定 Pool 的有序 Token 一致性已在部署或绑定时验证；标准 Uniswap 顺序要求 `token0 < token1`；
+- 两个支持 Token 的链上 decimals 均不超过 18，且由 Token metadata 派生并缓存，Token metadata 读取失败或超限时相关部署回滚；
 - Bootstrap 只能成功一次；
 - Bootstrap 的最低 NAV、最低部署率、锁定 shares 和回滚语义完整。
 
@@ -1071,7 +1077,8 @@ Oracle 与策略：
 
 - `observe([twapWindowSeconds, shortTwapWindowSeconds, 0])` 的调用经过测试；
 - 负 Tick 向负无穷取整经过测试；
-- `Q1/Q0` 双向报价、Token 顺序、decimals 和向上/向下取整经过测试；
+- `spotPriceToken1`、`twapPriceToken1` 和 `shortTwapPriceToken1` 均以 `10^token0Decimals` 个 token0 raw units 为参考量，返回 token1 raw units，并与对应 Tick 的 `Q1` 向下取整结果一致；`observedAt` 等于快照生成时的 `block.timestamp`；
+- `Q1/Q0` 双向报价、统一有序 Token、decimals 和向上/向下取整经过测试；
 - `deviationBps` 由 Oracle 内部根据 `shortTwapTick` 和 `twapTick` 生成；
 - 未初始化 Preview 以 `NotInitialized()` 回滚；
 - Oracle 不健康时，Preview 和执行入口均以 `OracleUnhealthy()` 回滚，且不生成占位计划；

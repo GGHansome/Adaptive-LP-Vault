@@ -183,7 +183,7 @@ Q_0(x; twapTick), & token1 \rightarrow token0
 \end{cases}
 $$
 
-两个报价函数均处理 Pool 内部 Token 顺序、Vault Token 顺序、raw units 和 decimals。
+两个报价函数均使用统一的 Vault/canonical Pool 有序 Token 对；Token decimals 和具体取整规则遵循 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §6.1、§8.2，不执行 Pool 与 Vault 顺序之间的运行时转换。
 
 允许的最大价格偏差为 `maxSwapSlippageBps` 时，协议最低输出为：
 
@@ -269,24 +269,24 @@ $$
 
 ### 7.1 V2
 
-目标 Pair 比例为 `1 WETH : 2,000 USDC`。退出旧 Position 后 Vault 有 `2 WETH` 和 `1,000 USDC`。
+目标 Pair 比例为 `1 WETH : 2,000 USDC`，且统一顺序为 `token0 = USDC`、`token1 = WETH`。退出旧 Position 后 Vault 有 `1,000 USDC` 和 `2 WETH`。
 
 不 Swap 预览只能使用：
 
 ```text
-used0 = 0.5 WETH
-used1 = 1,000 USDC
-unused0 = 1.5 WETH
-unused1 = 0 USDC
+used0 = 1,000 USDC
+used1 = 0.5 WETH
+unused0 = 0 USDC
+unused1 = 1.5 WETH
 ```
 
-因此首次部署评估方向为 WETH → USDC。Keeper 可以提交一个 `amountIn`，Vault 用最差 `protocolMinOut` 模拟 Swap 后的 `H0/H1`，再执行部署评估并确认达到部署率和 Idle 要求。传入过小的 `amountIn` 会因部署率不足回滚，传入过大的 `amountIn` 会因换过头或 Idle 条件不满足回滚。
+因此首次部署评估方向为 token1 → token0，即 WETH → USDC。Keeper 可以提交一个 `amountIn`，Vault 用最差 `protocolMinOut` 模拟 Swap 后的 `H0/H1`，再执行部署评估并确认达到部署率和 Idle 要求。传入过小的 `amountIn` 会因部署率不足回滚，传入过大的 `amountIn` 会因换过头或 Idle 条件不满足回滚。
 
 ### 7.2 V3
 
 目标 V3 Range 由 `PositionPlan` 的 `tickLower/tickUpper` 定义。当前价格靠近 Range 上沿时，目标 Position 可能主要需要 token1，不是 50:50。
 
-例如 Adapter 根据当前价格和 Range 计算目标比例约为 `0.2 WETH : 1,500 USDC`。如果退出旧 Position 后 Vault 有 `2 WETH` 和 `500 USDC`，部署评估会报告 token0 明显过量，方向为 WETH → USDC。Vault 使用同一目标 Range 的 V3 liquidity 数学模拟 `amountIn`，并在实际建仓后重新读取 Position，不能用固定 50:50 或仅用 Swap 输出判断成功。
+例如 Adapter 根据当前价格和 Range 计算目标比例约为 `1,500 USDC : 0.2 WETH`。如果退出旧 Position 后 Vault 有 `500 USDC` 和 `2 WETH`，部署评估会报告 token1 明显过量，方向为 token1 → token0，即 WETH → USDC。Vault 使用同一目标 Range 的 V3 liquidity 数学模拟 `amountIn`，并在实际建仓后重新读取 Position，不能用固定 50:50 或仅用 Swap 输出判断成功。
 
 ## 8. 失败条件
 
@@ -303,7 +303,7 @@ unused1 = 0 USDC
 - 无 Swap 路径的逐 Token 资产守恒失败；
 - Vault 的实际输出 Token 余额增量低于 `minAmountOut`，或与 Executor 返回值不一致；
 - Executor 的 token0/token1 余额未恢复调用前基线，或 Router allowance 未清零；
-- Router、Token 对、Pool、Fee Tier 或输出接收方不符合封存配置，或 Router/Pool 回调发送方校验失败；
+- Router、Token 对、Pool、Fee Tier 或输出接收方不符合封存配置；任一 `swapPool`、Executor 或 Vault 的有序 `token0/token1` 不一致，或 Router/Pool 回调发送方校验失败；
 - Oracle 不健康或 Swap 安全边界不满足。
 
 失败交易不得更新 `lastExecutedPlan`、`planVersion`、`lastPositionChangeAt` 或资产位置。

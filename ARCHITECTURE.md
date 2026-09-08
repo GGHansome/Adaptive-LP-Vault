@@ -218,10 +218,6 @@ enum SwapDirection {
 
 ```solidity
 struct VaultConfig {
-    address token0;
-    address token1;
-    uint8 token0Decimals;
-    uint8 token1Decimals;
     uint256 dustTolerance0;
     uint256 dustTolerance1;
     address canonicalOracle;
@@ -252,19 +248,34 @@ struct StrategyConfig {
 }
 
 struct OracleConfig {
-    address token0;
-    address token1;
     address canonicalPool;
     uint32 twapWindowSeconds;
     uint32 shortTwapWindowSeconds;
 }
+
+struct SwapExecutorConfig {
+    address vault;
+    address router;
+    address swapPool;
+}
+
+struct PositionAdapterConfig {
+    address vault;
+    VenueType venue;
+    address pool;
+    address positionManager;
+}
 ```
 
-`VaultConfig`、`OracleConfig` 和 `StrategyConfig` 仅作为构造参数与内存传参结构，不作为整体状态变量写入普通 storage。各字段在部署时通过协议硬边界与字段关系校验后，分别写入所属合约的 Solidity `immutable` 状态变量；部署后任何角色均不得修改。
+`VaultConfig`、`StrategyConfig`、`OracleConfig`、`SwapExecutorConfig` 和 `PositionAdapterConfig` 仅作为构造参数与内存传参结构，不作为整体状态变量写入普通 storage。各字段在部署时通过协议硬边界与字段关系校验后，分别写入所属合约的 Solidity `immutable` 状态变量；部署后任何角色均不得修改。
 
-`VaultConfig.token0Decimals/token1Decimals` 必须分别等于两个固定 Token 的 `IERC20Metadata.decimals()` 返回值，且两者均不得大于 18；不一致或超限时以 `InvalidTokenDecimals(token, configured, actual)` 拒绝部署。
+`CanonicalV3Oracle` 从 `OracleConfig.canonicalPool` 读取 Pool 原生有序的 `token0/token1`，再从两个 Token 合约读取 `IERC20Metadata.decimals()`；Token 地址必须非零、互不相同并满足 `token0 < token1`，两个 decimals 均不得大于 18。Token metadata 调用失败或返回值超限时拒绝部署。
 
-`OracleConfig.token0/token1` 使用 Vault 的 Token 顺序；`canonicalPool` 的内部 Token 与对应 Uniswap 顺序可以不同，但其资产对必须与这两个地址一致。
+`ControlledSwapExecutor` 使用 `SwapExecutorConfig` 固定唯一可调用它的 `vault`、白名单 `router` 和 `swapPool`。Executor 从 `swapPool` 派生有序的 `token0/token1` 与 `feeTier`，并验证 Pool、Router、Factory 和代码绑定；v1 的 exact-input、single-hop `swapMethod` 由实现固定，不允许通过部署配置选择或在部署后替换。
+
+`UniswapV2Adapter` 和 `UniswapV3Adapter` 使用 `PositionAdapterConfig` 固定 `vault`、`venue` 与 `pool`，并从绑定 Pool 派生有序的 `token0/token1`。V2 配置的 `venue` 必须为 `UNISWAP_V2`、`positionManager` 必须为零地址，且 `feeTier/tickSpacing` 固定为零；V3 配置的 `venue` 必须为对应的 Low-Fee 或 High-Fee Venue、`positionManager` 必须为非零地址，`feeTier/tickSpacing` 从 Pool 读取并验证。所有这些绑定在 Adapter 部署后均不可替换。
+
+`AdaptiveLPVault` 从 `canonicalOracle` 的只读绑定中取得 `canonicalPool`、`token0/token1` 和 `token0Decimals/token1Decimals`，校验这些值与 canonical Pool 的实际有序资产和 Token metadata 一致后分别缓存为 immutable；`VaultConfig` 不重复接收这些派生值。
 
 `AccessControlConfig` 仅作为 Vault 构造参数传入 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules`。`initialDefaultAdmin` 必须非零；`initialDefaultAdminDelay` 是根管理员转移的初始等待时间，应在部署前校准，Mainnet 部署应采用非零值。
 
@@ -292,9 +303,6 @@ struct AssetSnapshot {
     uint256 position1;
     uint256 total0;
     uint256 total1;
-    uint256 nav1;
-    uint256 idleValue1;
-    uint256 idleBps;
     uint256 totalShares;
 }
 
@@ -380,8 +388,8 @@ struct AdapterConfig {
 
 | 存储项                                             | 类型             | 存储方式        | 写入时机                               | 约束                                                 |
 | ----------------------------------------------- | -------------- | ----------- | ---------------------------------- | -------------------------------------------------- |
-| `token0/token1`                                 | `address`      | `immutable` | 构造                                 | 固定资产对和顺序；部署后不可修改                                   |
-| `token0Decimals/token1Decimals`                 | `uint8`        | `immutable` | 构造                                 | 分别等于固定 Token 的 `decimals()` 且不超过 18；部署后不可修改               |
+| `token0/token1`                                 | `address`      | `immutable` | 构造                                 | 从 canonical Oracle/canonical Pool 派生的固定有序资产对；部署后不可修改                       |
+| `token0Decimals/token1Decimals`                 | `uint8`        | `immutable` | 构造                                 | 从固定 Token 的 `decimals()` 派生且均不超过 18；部署后不可修改               |
 | `dustTolerance0/dustTolerance1`                 | `uint256`      | `immutable` | 构造                                 | 仅用于整数舍入和最小单位容忍；部署后不可修改                             |
 | `canonicalOracle`                               | `address`      | `immutable` | 构造                                 | 固定 `CanonicalV3Oracle` 合约；部署后不可替换                  |
 | `swapExecutor`                                  | `address`      | `immutable` | 构造                                 | 固定 `ControlledSwapExecutor` 合约；部署后不可替换             |
@@ -422,12 +430,13 @@ Vault 不保存由 Registry 遍历产生的冗余资产总额。`totalAssets()` 
 | 存储项                      | 类型       | 存储方式        | 写入时机      | 约束                                                       |
 | ------------------------ | -------- | ----------- | --------- | -------------------------------------------------------- |
 | `canonicalPool`          | `address` | `immutable` | Oracle 构造 | 固定 canonical Uniswap V3 Pool；部署后不可替换                      |
-| `token0/token1`          | `address` | `immutable` | Oracle 构造 | 与 Vault 的 immutable Token 地址及顺序一致；两者必须组成 canonical Pool 资产对 |
+| `token0/token1`          | `address` | `immutable` | Oracle 构造 | 从 canonical Pool 读取的有序 Token；必须非零、互不相同且 `token0 < token1`；部署后不可替换 |
+| `token0Decimals/token1Decimals` | `uint8` | `immutable` | Oracle 构造 | 从对应 Token `decimals()` 读取且均不超过 18；部署后不可替换 |
 | `twapWindowSeconds`      | `uint32` | `immutable` | Oracle 构造 | 大于零且不超过协议硬上限；部署后不可修改                                     |
 | `shortTwapWindowSeconds` | `uint32` | `immutable` | Oracle 构造 | `0 < shortTwapWindowSeconds < twapWindowSeconds`；部署后不可修改 |
 
 
-Oracle 在构造时完成 canonical Pool、Vault Token 顺序、窗口关系和协议硬边界校验。实现可以使用独立的 `immutable` 字段承载，而不要求把整个 `OracleConfig` 结构体写入普通 storage。
+Oracle 在构造时完成 canonical Pool 代码与 Factory 绑定、有序 Token 地址、Token metadata、窗口关系和协议硬边界校验。实现可以使用独立的 `immutable` 字段承载，而不要求把整个 `OracleConfig` 结构体写入普通 storage。
 
 ### 5.4 Registry 存储
 
@@ -451,7 +460,7 @@ Oracle 在构造时完成 canonical Pool、Vault Token 顺序、窗口关系和�
 | `vault`         | `address`   | `immutable` | Adapter 构造 | 只有该 Vault 可以调用资产变更方法；部署后不可替换         |
 | `venue`         | `VenueType` | `immutable` | Adapter 构造 | 必须与 Adapter 实现及 Registry 注册 Venue 一致 |
 | `pool`          | `address`   | `immutable` | Adapter 构造 | 固定绑定的 V2 Pair 或 V3 Pool；部署后不可替换      |
-| `token0/token1` | `address`   | `immutable` | Adapter 构造 | 必须与 Vault 固定资产及顺序一致；部署后不可替换          |
+| `token0/token1` | `address`   | `immutable` | Adapter 构造 | 从绑定 Pool 读取的有序 Token；必须与 Vault 固定资产及顺序一致；部署后不可替换          |
 | `feeTier`       | `uint24`    | `immutable` | Adapter 构造 | V3 必须与 Pool Fee Tier 一致；V2 固定为零      |
 | `tickSpacing`   | `int24`     | `immutable` | Adapter 构造 | V3 必须与 Pool `tickSpacing()` 一致；V2 固定为零 |
 
@@ -476,7 +485,7 @@ V3 Adapter 还保存：
 | --------------- | ---------------------- | ----------- | ----------- | -------------------------------------- |
 | `vault`         | `address`              | `immutable` | Executor 构造 | 只有该 Vault 可以调用 `executeSwap()`；部署后不可替换 |
 | `router`        | `address`              | `immutable` | Executor 构造 | 固定白名单 Router；部署后不可替换                   |
-| `token0/token1` | `address`              | `immutable` | Executor 构造 | 只能交换 Vault 固定的资产对；部署后不可替换              |
+| `token0/token1` | `address`              | `immutable` | Executor 构造 | 从绑定 `swapPool` 读取的有序 Token；必须与 Vault 固定资产及顺序一致；部署后不可替换              |
 | `swapPool`      | `address`              | `immutable` | Executor 构造 | 固定批准使用的 Swap Pool；部署后不可替换              |
 | `feeTier`       | `uint24`               | `immutable` | Executor 构造 | 必须与 `swapPool` 的 Fee Tier 一致；部署后不可替换   |
 | `swapMethod`    | 固定代码逻辑或 `immutable` 枚举 | 部署时固定       | Executor 构造 | 仅允许 v1 规定的 exact-input、single-hop 方法   |
@@ -583,7 +592,7 @@ function _assessDeployment(
 ) internal view returns (DeploymentAssessment memory assessment);
 ```
 
-- `_getPlan()` 显式接收 `OracleSnapshot`、`AssetSnapshot`、`PositionSnapshot`、固定 Token decimals、当前 Venue、最近一次已执行 Regime、固定策略参数、两个 V3 Pool 的 `tickSpacing` 和当前版本；这些参数共同构成计划计算的完整输入；
+- `_getPlan()` 显式接收 `OracleSnapshot`、`AssetSnapshot`、`PositionSnapshot`、Token decimals、当前 Venue、最近一次已执行 Regime、固定策略参数、两个 V3 Pool 的 `tickSpacing` 和当前版本；策略所需的 NAV 与 Idle 比例在函数内按同一次 `twapTick` 即时计算；
 - `_assessDeployment()` 属于 Vault 的内部 `view` 编排职责，直接调用目标 Adapter 的 `previewDeposit()`，使用局部 `used0/used1` 计算 `requiresSwap` 和 `direction`；
 - `PriceMath`、`PositionPlanHash` 和 `SafeTransferLib` 仅提供跨模块通用的无状态工具。
 
@@ -628,14 +637,17 @@ interface ICanonicalV3Oracle {
     function canonicalPool() external view returns (address);
     function token0() external view returns (address);
     function token1() external view returns (address);
+    function token0Decimals() external view returns (uint8);
+    function token1Decimals() external view returns (uint8);
 }
 ```
 
 Oracle 架构边界：
 
-- `snapshot()` 只从部署时绑定的 canonical Pool 读取数据；不得使用目标 Venue 或调用者提供的替代价格；
+- `snapshot()` 只从部署时绑定且已验证的 canonical Pool 读取数据；三个 Tick 和三个规范化价格字段均使用 Pool/Vault 统一的有序 Token 顺序，不得使用目标 Venue 或调用者提供的替代价格；
 - `quoteToken0InToken1()` 和 `quoteToken1InToken0()` 使用固定的 Vault Token 顺序和全精度数学；`roundUp == false` 时向下取整，`roundUp == true` 时向上取整；
-- Oracle 负责输出 `OracleSnapshot` 和健康状态，不负责决定策略状态或目标 Venue；
+- `token0/token1` 和 decimals 由 canonical Pool 及其 Token metadata 派生并以 immutable 暴露；Vault 在构造时校验这些绑定；
+- Oracle 负责输出 `OracleSnapshot` 和健康状态，不负责决定策略状态或目标 Venue；Observation 历史不足或必要 Pool 读取与动态价格计算失败时，`snapshot()` 返回 `healthy == false`，不得让对应底层错误穿透回滚；
 
 ### 6.5 Adapter Registry 接口
 
@@ -653,7 +665,7 @@ interface IAdapterRegistry {
 
 Registry 架构边界：
 
-- `configureAdapter()` 只接受已独立部署的 Adapter 地址；Vault 从 Adapter 读取绑定信息并完成校验，再写入 Adapter 地址、`tickSpacing` 缓存和 `enabled = true`；
+- `configureAdapter()` 只接受已独立部署的 Adapter 地址；Vault 从 Adapter 读取绑定信息，要求 Adapter 与其 Pool 的 `token0/token1` 都按地址升序且与 Vault 的有序资产完全一致，再完成其他绑定校验并写入 Adapter 地址、`tickSpacing` 缓存和 `enabled = true`；
 - `configureAdapter()` 仅在 Bootstrap 前开放并可重复调用；该方法不部署 Adapter、不转移资产、不创建 Position；
 - Bootstrap 成功时重新验证 Adapter 的 immutable 绑定与 Registry 的 `tickSpacing` 缓存并冻结身份字段；此后 `setAdapterEnabled()` 只能修改 `enabled`；
 
@@ -686,7 +698,7 @@ interface IPositionAdapter {
 
 Adapter 架构边界：
 
-- `vault()`、`venue()`、`pool()`、`token0()`、`token1()`、`feeTier()` 和 `tickSpacing()` 返回 Adapter 部署时固定的绑定信息；V2 Adapter 的 `feeTier()` 和 `tickSpacing()` 固定返回零；
+- `vault()`、`venue()`、`pool()`、`token0()`、`token1()`、`feeTier()` 和 `tickSpacing()` 返回 Adapter 部署时固定的绑定信息；Adapter 的 `token0/token1` 从绑定 Pool 读取，必须按地址升序且与 Vault 的有序资产完全一致；V2 Adapter 的 `feeTier()` 和 `tickSpacing()` 固定返回零；
 - 所有资产变更方法只接受 Vault 调用；Adapter 不铸造或销毁 shares，也不修改 Vault 的策略状态；
 - `previewDeposit()` 必须只读，并与真实 `deposit()` 使用一致的底层 AMM 计算路径；Deposit 比例使用当前 Position Snapshot 的 `principal0/principal1`，`amount0Max/amount1Max` 是使用上限，返回的 `used0/used1` 是实际使用数量；
 - Vault 仅可在非 IDLE 目标满足 `isEnterEnabled(targetVenue) == true` 后调用 `previewDeposit()` 或 `deposit()`；用户 Deposit 使用当前 `activeVenue` 作为目标；
@@ -712,7 +724,7 @@ interface IControlledSwapExecutor {
 
 ControlledSwapExecutor 架构边界：
 
-- `vault`、Router、token0/token1、`swapPool`、Fee Tier 和固定 Swap 方法在部署或不可变初始化时固定，Bootstrap 后不能由 Keeper/Manager 替换；
+- `vault`、Router、`swapPool`、Fee Tier 和固定 Swap 方法在部署时固定，Bootstrap 后不能由 Keeper/Manager 替换；Executor 的 `token0/token1` 从 `swapPool` 读取，必须按地址升序且与 Vault/canonical Pool 的有序资产完全一致；
 - Executor 只接受 Vault 调用，只执行 `SwapPlan` 指定的交易级参数和局部 Swap 安全检查；
 - Executor 不调用 Vault 策略逻辑，不退出或建立 Position，也不负责完整迁移损失、部署率、Idle 或单活 Position 的后置校验；这些检查由 Vault 负责；
 
@@ -743,17 +755,20 @@ error Paused(PauseFlag flag);
 /// @dev 该错误路径不得生成或返回 PositionPlan。
 error OracleUnhealthy();
 
-/// @notice Canonical Pool 的可用观察数据不足以覆盖所需时间窗口。
-error ObservationInsufficient();
-
-/// @notice 配置组件绑定的资产对与 Vault 的固定 token0/token1 不一致。
+/// @notice 组件或 Pool 的有序 Token 地址与 Vault 固定的 token0/token1 不一致。
 error InvalidAssetPair();
 
-/// @notice Token 的配置 decimals 与链上返回值不一致，或链上返回值大于 18。
+/// @notice Pool 的 token0/token1 地址为空、相同或未按地址升序排列。
+error InvalidTokenOrder();
+
+/// @notice 无法读取 Token 的 decimals 元数据。
+/// @param token 无法读取元数据的 Token。
+error InvalidTokenMetadata(address token);
+
+/// @notice Token 的链上 decimals 超过 18。
 /// @param token 校验失败的 Token。
-/// @param configured 部署配置中的 decimals。
 /// @param actual IERC20Metadata.decimals() 返回的 decimals。
-error InvalidTokenDecimals(address token, uint8 configured, uint8 actual);
+error InvalidTokenDecimals(address token, uint8 actual);
 
 /// @notice Bootstrap 的初始 NAV 低于 minimumInitialNav。
 error MinimumNavNotMet();
@@ -1185,7 +1200,7 @@ sequenceDiagram
 - 负的非整除结果必须向负无穷取整，而不是 Solidity 默认的向零截断。
 - 用 `TickMath.getSqrtRatioAtTick` 计算 `Q1/Q0` 双向报价，使用全精度乘除防止中间乘法溢出。
 - `Q1` 输入 token0 raw units 并返回 token1 raw units；`Q0` 输入 token1 raw units 并返回 token0 raw units。
-- canonical Uniswap V3 Pool 按地址从小到大定义 Pool token0/token1；在资产对绑定已验证的前提下，报价函数以输入 Token 作为 `baseToken`：`baseToken < quoteToken` 时按 Pool token0 → token1 报价，否则按 Pool token1 → token0 反向报价。
+- Token 顺序、价格字段单位和业务用途遵循 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §6.1 与 §8；本节只规定 `Q1/Q0` 使用统一有序 Token、全精度乘除和明确的向上/向下取整。
 - 报价使用全精度乘除；`roundUp == false` 时返回精确商的向下取整结果，`roundUp == true` 时返回精确商的向上取整结果；`protocolMinOut` 的方向报价和 BPS 滑点折算分别向上取整。
 - Oracle 使用 `shortTwapTick` 和 `twapTick` 计算 `deviationBps`；NAV 和 `protocolMinOut` 仍使用 `twapTick`，`spotTick` 仅用于 V3 Range 越界与 Recenter 判定，不参与 Swap 风控。
 
@@ -1257,6 +1272,7 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | INV-16 | Default Admin 不因根角色自动获得 Vault 业务权限，Guardian 只能收紧暂停和 Adapter 状态                      | 权限操作回滚           |
 | INV-17 | 任一合法 `PositionPlan` 的 `targetVenue` 与 `marketRegime` 严格双射：`IDLE` ↔ `EXTREME_DEVIATION`、`UNISWAP_V2` ↔ `HIGH_DEVIATION`、`UNISWAP_V3_HIGH_FEE` ↔ `MEDIUM_DEVIATION`、`UNISWAP_V3_LOW_FEE` ↔ `LOW_DEVIATION` | 计划校验失败 |
 | INV-18 | 禁用 Adapter 不移除现有 Position 的计价与退出能力，但阻止 Deposit、迁入和同 Venue Recenter 增加其 liquidity | `AdapterDisabled()` |
+| INV-19 | canonical Pool、Vault、Oracle、Swap Executor、所有 Adapter 及其绑定 Pool 使用相同的有序 Token 对，且 `token0 < token1` | 部署或绑定校验回滚 |
 
 
 
@@ -1266,12 +1282,12 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 
 | 测试层                 | 必测场景                                                                                                                                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AdaptiveLPVault` 单元测试 | Vault 会计、Oracle 快照编排、内部 `pure` 的 `_getPlan()` 独立输入测试、Hysteresis、Range、部署评估、`requiresSwap`、`direction`、计划哈希、角色、暂停、Registry 和核心状态边界 |
-| Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足、Pool 绑定、`Q1/Q0` 双向报价、Vault/Pool Token 顺序、向上/向下取整、Short TWAP/TWAP 偏离 |
-| V2 Adapter 测试       | 储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、部分退出、实际退出数量与余额变化、Token 顺序                                                                                                                                                         |
-| V3 Adapter 测试       | principal、tokens owed、fee growth 增量、领取后重读、principal 比例与手续费隔离、`amount0Max/amount1Max` 与实际 `used0/used1`、immutable binding getters、`tickSpacing`、Range、部分退出、实际退出数量与余额变化、旧 NFT 清理                                                                                                                               |
-| Adapter Registry 测试 | `configureAdapter(venue, adapter)` 的绑定校验、`tickSpacing` 缓存、初始化前重复配置、Bootstrap 后绑定和缓存冻结、仅 `enabled` 可变、Pool/Fee Tier 不重复存储                                                                                  |
-| Swap 测试             | 固定 Router/Token 方法、方向、过量资产修复范围、方向报价与 BPS 滑点折算的两段向上取整、派生部署阈值、minOut、deadline、Vault 向 Executor 精确交付输入、Vault 输出余额增量与返回值一致、Executor 余额恢复基线、回调验证和授权清理                                                                                                                         |
+| `AdaptiveLPVault` 单元测试 | Vault 会计、原始资产快照、Oracle 快照编排、内部 `pure` 的 `_getPlan()` 独立输入测试、Hysteresis、Range、部署评估、`requiresSwap`、`direction`、计划哈希、角色、暂停、Registry 和核心状态边界 |
+| Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足和必要 Pool 读取失败返回 `healthy == false` 且 `snapshot()` 不回滚、Pool 当前零流动性、Pool 绑定、Pool 有序 Token 与地址升序、Token metadata 读取和 decimals 上限、`Q1/Q0` 双向报价、向上/向下取整、三个规范化价格字段、`observedAt`、Short TWAP/TWAP 偏离 |
+| V2 Adapter 测试       | 储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、部分退出、实际退出数量与余额变化、有序 Token 绑定 |
+| V3 Adapter 测试       | principal、tokens owed、fee growth 增量、领取后重读、principal 比例与手续费隔离、`amount0Max/amount1Max` 与实际 `used0/used1`、immutable binding getters、Pool 有序 Token、`tickSpacing`、Range、部分退出、实际退出数量与余额变化、旧 NFT 清理 |
+| Adapter Registry 测试 | `configureAdapter(venue, adapter)` 的 Vault/Adapter/Pool 有序 Token 一致性、错误资产对与反向顺序回滚、其他 immutable 绑定校验、`tickSpacing` 缓存、初始化前重复配置、Bootstrap 后绑定和缓存冻结、仅 `enabled` 可变、Pool/Fee Tier 不重复存储 |
+| Swap 测试             | `swapPool`/Executor/Vault 有序 Token 一致性与反向顺序回滚、固定 Router/Token 方法、方向、过量资产修复范围、方向报价与 BPS 滑点折算的两段向上取整、派生部署阈值、minOut、deadline、Vault 向 Executor 精确交付输入、Vault 输出余额增量与返回值一致、Executor 余额恢复基线、回调验证和授权清理 |
 | Deposit/Redeem 集成测试 | 只转实际数量、V3 单边 Active Position 的 `ActivePositionSingleSided()`、双边 Position 零实际存款的 `ZeroAmount()`、按 principal 比例的限制侧与非整除舍入、手续费不影响 Deposit 比例、暂停赎回、Oracle 异常赎回、Redeem 最小双资产输出、持有人自赎不消费 allowance、授权 spender 从显式 `owner` 销毁 shares 并消费有限 allowance、最大 allowance 不递减、任意 `receiver` 收款、owner 余额或 allowance 不足时原子回滚、捐赠、单边/高 Idle、比例公平性、当前 Active Adapter 禁用时 Deposit 在 Adapter 调用和 Token 转入前回滚、禁用后资产仍计价且 Redeem 成功 |
 | Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Bootstrap 初始化 `lastPositionChangeAt`、两类 Rebalance 共用 Cooldown 与 `CooldownActive(availableAt)`、Emergency Exit 绕过检查且不重置计时、IDLE 幂等分支不更新时间戳、全部流通 shares 赎回保留锁定份额对应资产、`activeVenue`/`planVersion`/`lastExecutedPlan` 不因 Redeem 改变、`expectedPlanHash`、`expectedDirection`、模拟 Swap 后评估、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
 | 事件契约测试            | `VaultBootstrapped.initialVenue` 初始化链下位置，`RebalanceExecuted.targetVenue` 更新位置且同 Venue Recenter 保持相同值，`EmergencyExit` 将位置更新为 `IDLE`；已在 IDLE 的幂等 Emergency Exit 不发出 `EmergencyExit`；自定义事件 ABI 不包含额外的通用资产位置或 Idle 状态变化事件 |
