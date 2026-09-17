@@ -8,7 +8,7 @@
 - 实现基线：Foundry + Solidity
 - 实现状态：本文档定义待实现协议，不表示合约已部署、审计或通过测试
 
-本文档只定义产品行为、业务规则和计算口径。合约模块、数据结构、接口、事件、测试目录和调用时序见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+本文档只定义产品行为、业务规则和计算口径。合约模块、数据结构、接口、事件、测试目录和调用时序见 [ARCHITECTURE.md](ARCHITECTURE.md)；部署顺序、链下发布门禁、流动性预检和部署证据见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ## 1. 产品定义与边界
 
@@ -16,7 +16,7 @@
 
 Adaptive LP Vault 是一个针对固定 `token0/token1` 资产对的双资产流动性管理 Vault，其用户会计语义如下：
 
-- 用户按 Vault 存款前的总资产比例提供两种资产；
+- 后续 Deposit 按当前 Active Position 的本金比例提供两种资产；
 - 用户获得可转让的 ERC-20 shares；
 - Shares 代表对 Vault 当前全部底层资产的按比例所有权，包括 Idle 余额、Active Position 的本金和已归属手续费。
 
@@ -40,7 +40,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | 价格来源            | 部署时固定且不可替换的 canonical Uniswap V3 Pool             | Chainlink、后端价格、调用者传入价格、目标池自报价         |
 | 策略输入            | Oracle 内部计算 `deviationBps`；Vault 策略逻辑只读取 Oracle 快照 | 调用者传入 `DEVIATION`、历史标准差、实现波动率、手续费 APR |
 | 普通 Rebalance    | 允许撤出旧仓并使用现有双边资产建仓，不执行 Swap                        | 任意 Router、任意 calldata、调用者指定目标         |
-| Swap Rebalance  | 仅 Keeper/Manager 使用受限的 token0/token1 Swap           | 通用聚合器、用户自定义路径、无上限 Swap                |
+| Swap Rebalance  | 仅 Keeper/Manager 使用受限的 token0/token1 Swap；成交 Pool 与 canonical Pool 为同一地址 | 通用聚合器、独立成交池、用户自定义路径、无上限 Swap                |
 | 支持 Venue        | Uniswap V2、两个指定 Fee Tier 的 Uniswap V3、IDLE        | 动态新增 DEX 或初始化后替换 Adapter              |
 | 底层资产处理          | 直接转入的 token0/token1 永久计入 Vault，视为捐赠               | 对支持资产执行 rescue、sweep 或返还              |
 
@@ -85,6 +85,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | token0 / token1            | canonical Uniswap V3 Pool 按地址升序确定的两种底层资产及其唯一协议顺序                              | Oracle 从 canonical Pool 读取并由 Vault 缓存为 immutable 地址和 decimals | `token0 < token1`；Vault、Oracle、Swap Executor、所有 Adapter 及其 Pool 必须使用相同顺序；前端可独立选择展示顺序 |
 | Venue                      | 一个具体的流动性池实例或 IDLE 状态                                                      | `VenueType` 加 Adapter 配置                | Venue 不是抽象的 DEX 名称                        |
 | Adapter                    | 封装某个 Venue 的存取流动性、费用和 Position 数据的受信模块                                    | Registry 中的固定地址                         | 不能决定 shares；`enabled` 只控制建立或增加 liquidity，禁用后现有 Position 仍可计价和退出 |
+| Active Adapter             | `activeVenue != IDLE` 时与当前资产位置对应的唯一 Adapter；IDLE 时不存在 Active Adapter                    | 由 `getAdapter(activeVenue)` 从 Bootstrap 后冻结的 Registry 绑定派生 | 不单独存储；`getAdapter(IDLE) == address(0)`          |
 | Active Position            | 当前唯一结构有效的外部 LP Position                                                   | Active Adapter 的 Position 快照            | 有效性不包含 Adapter `enabled`；非 IDLE 时最多一个，IDLE 时必须为零 |
 | Idle Assets                | 直接保存在 Vault、未部署到 LP 的 token0/token1                                       | Vault ERC-20 余额                         | 不是固定比例缓冲；由部署结果、费用、舍入或 IDLE 产生             |
 | Principal                  | 当前 LP liquidity 对应的底层 token0/token1 数量，不含未领取手续费                           | V2 储备权益或 V3 liquidity 数学                | 不得与 claimable fee 重复相加                    |
@@ -170,8 +171,8 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 
 - Vault 尚未初始化；
 - `bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓前，重新校验由 canonical Pool 派生并由 canonical Oracle 固化的 token0/token1、Token decimals、canonical Oracle、Swap Executor 和所有 v1 Adapter 的完整 immutable 绑定及 `tickSpacing` 缓存；
-- 上述绑定校验失败时，整笔交易回滚；
-- Oracle Healthy，观察窗口有足够历史；
+- 验证 `swapExecutor.swapPool() == canonicalOracle.canonicalPool()`；
+- Oracle Healthy；
 - 初始 token0 和 token1 均大于零；
 - 初始 `NAV1` 不低于 `minimumInitialNav`。
 
@@ -188,7 +189,7 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 9. 部署评估的 `requiresSwap == true` 时，以 `SwapRequired()` 回滚；具体策略见第 9 节。
 10. 验证部署率、资产守恒和 Position 唯一性。
 11. 将初始计划写入 `lastExecutedPlan`，将 `planVersion` 写为 `1`，并将 `lastPositionChangeAt` 写为当前 `block.timestamp`。
-12. 将 `initialized` 置为 `true`，并发出 `PositionPlanCommitted` 和 `VaultBootstrapped` 事件。
+12. 将 `initialized` 置为 `true`，并发出 `PositionPlanCommitted` 和 `VaultBootstrapped` 事件，按条件发出 `V3RangeChanged`。
 
 Bootstrap 完成后的遵从规则如下：
 
@@ -231,7 +232,7 @@ $$
 
 执行规则：
 
-1. 读取存款前 Oracle、资产和 Active Position Snapshot；费用同步按 §6.8 的统一会计路径执行，且不改变比例来源。
+1. 读取存款前 Oracle、资产和 Active Position Snapshot；费用同步按 §6.8 的统一会计路径执行并按条件发出 `FeesSynchronized`，且不改变 Deposit 比例来源。
 2. 按上述公式计算实际 `d0`、`d1`；若 `d0 == 0` 或 `d1 == 0`，以 `ZeroAmount()` 回滚。
 3. 使用存款前 `NAV1`、`S` 和实际 `d0`、`d1` 计算 `sharesMinted`。
 4. 验证 `sharesMinted >= minSharesOut`；否则以 `SharesSlippage(sharesMinted, minSharesOut)` 回滚。
@@ -260,7 +261,7 @@ $$
 执行规则：
 
 - 校验 `owner` 的 shares 余额；`msg.sender != owner` 时按 ERC-20 规则消费 `allowance(owner, msg.sender)`；
-- 调取 `syncFees()` 同步 Active Adapter 的费用并读取销毁前资产快照。
+- 调取 `syncFees()` 同步 Active Adapter 的费用并按条件发出 `FeesSynchronized`，然后读取销毁前资产快照。
 - 按 `x/S` 从 Active Adapter 部分退出，而不是优先消耗全部 Idle；
 - 将按比例退出的 Position 资产与按同一比例分配的 Idle token0/token1 合并为最终 `amount0Out/amount1Out`；
 - 在 Vault 层验证最终 `amount0Out >= minAmount0Out` 且 `amount1Out >= minAmount1Out`；
@@ -582,6 +583,7 @@ canonical Oracle 在部署时绑定一个 Uniswap V3 Pool。canonical Pool 是 V
 - `CanonicalV3Oracle` 从 canonical Pool 读取该 `token0/token1`，并从对应 Token 合约读取 decimals；
 - Vault 从 canonical Oracle 取得并缓存相同的 `token0/token1` 和 decimals；
 - canonical Pool、Vault、Oracle、ControlledSwapExecutor、所有 Adapter 及其绑定 Pool 的 `token0/token1` 必须完全一致；
+- `ControlledSwapExecutor.swapPool()` 必须与 `canonicalPool` 为同一地址；v1 不允许使用独立成交池；
 - Pool 地址、Factory、Fee Tier 和代码哈希通过初始化检查；
 - `0 < shortTwapWindowSeconds < twapWindowSeconds`；
 - 对 WETH/USDC，标准 Pool 顺序为 `token0 = USDC`、`token1 = WETH`；前端展示可以使用 WETH/USDC 等用户顺序，但不改变协议内部 Token 顺序。
@@ -660,7 +662,7 @@ Oracle 每次生成快照时检查动态 Pool 数据。以下任一情况发生�
 - `observe()`、`slot0()` 或其他必要的 Pool 数据读取失败；
 - `P_twap == 0`，或任一必需报价为零。
 
-不健康快照中的 Tick、价格和 `deviationBps` 不得用于任何协议计算或计划生成；实现必须捕获可处理的外部读取失败并避免让上述动态失败穿透为 revert。Observation 历史是否充足不作为 Oracle 构造成功的必要条件，但部署脚本可以在部署或 Bootstrap 前执行非规范性的预检查。
+不健康快照中的 Tick、价格和 `deviationBps` 不得用于任何协议计算或计划生成；实现必须捕获可处理的外部读取失败并避免让上述动态失败穿透为 revert。Observation 历史是否充足不作为 Oracle 构造成功的必要条件；Bootstrap 仍必须通过本节定义的 Oracle 健康门控，链下发布预检由 [DEPLOYMENT.md](DEPLOYMENT.md) 单独定义。
 
 **Vault 运行时门控**
 
@@ -854,14 +856,14 @@ Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_asse
 1. 生成当前候选 `PositionPlan`；
 2. 目标为非 IDLE 时检查目标 Adapter 已启用
 3. 对当前资产执行部署评估并要求 `requiresSwap == false`；
-4. 同步费用；
+4. 同步费用并按条件发出 `FeesSynchronized`；
 5. 退出旧 Position；
 6. 建立目标 Position 或进入 IDLE；
 7. 归还未使用资产；
 8. 验证资产守恒、Idle 和单活 Position；
 9. 将 `planVersion` 更新为执行计划的 `version`；
 10. 将 `lastExecutedPlan` 更新为执行计划，并更新 `lastPositionChangeAt`；
-11. 发出 `PositionPlanCommitted` 和 `RebalanceExecuted` 事件。
+11. 发出 `PositionPlanCommitted` 和 `RebalanceExecuted` 事件并按条件发出 `V3RangeChanged`。
 
 任一步骤失败时，交易必须回滚，且不得更新上述状态。
 
@@ -891,13 +893,13 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 
 1. 生成当前候选 `PositionPlan`；
 2. 检查目标 Adapter 已启用，再对当前 `T0/T1` 执行首次部署评估，使用派生值 `minDeployBps = BPS - maxHealthyIdleBps` 校验 `initialDeployBps < minDeployBps`、`requiresSwap == true` 以及 `direction == expectedDirection`；
-3. 同步费用并捕获迁移前 TWAP 和 NAV，退出旧 Position 后重新读取实际余额；
+3. 同步费用并按条件发出 `FeesSynchronized`，捕获迁移前 TWAP 和 NAV；退出旧 Position 后重新读取实际余额；
 4. 检查 `amountIn`，根据最差 `protocolMinOut` 模拟 Swap 后余额并计算 `simulatedDeployBps(x)`，验证不会换过头且满足部署率和 Idle 限制，再构造临时 `SwapPlan`；
 5. 记录 Vault 的输入/输出 Token 余额和 Executor 的 token0/token1 余额，将精确的 `amountIn` 从 Vault 转入 Executor，再调用 `ControlledSwapExecutor.executeSwap()` 执行固定 exact-input Swap；
 6. 在调用目标 Adapter 前重新读取余额，以 Vault 的输出 Token 实际余额增量作为 `actualAmountOut`，并验证 Vault 的输入 Token 减少量等于 `amountIn`、`actualAmountOut` 等于 Executor 返回值且不低于 `minAmountOut`、Executor 的 token0/token1 余额恢复到转入前基线、Executor 对 Router 的 allowance 为零；该局部校验不使用 `dustTolerance0/1` 放宽；
 7. 使用 Swap 后的实际余额，在目标 Adapter 建立当前计划指定的 Position；
 8. 重新读取实际资产和 Position，完成最终迁移校验；全部校验通过后，将 `lastExecutedPlan` 更新为执行计划，并提交 `planVersion` 和 `lastPositionChangeAt`；
-9. 发出 `PositionPlanCommitted`、`RebalanceExecuted` 和 `SwapExecuted` 事件，其中 `SwapExecuted.amountOut = actualAmountOut`。
+9. 发出 `PositionPlanCommitted`、`RebalanceExecuted`、`SwapExecuted`和按条件发出 `V3RangeChanged`事件，其中 `SwapExecuted.amountOut = actualAmountOut`。
 
 目标 Adapter 建仓完成后，Vault 必须重新读取实际状态并验证：
 
@@ -914,7 +916,7 @@ Guardian/Manager 可在不依赖价格估值的情况下触发幂等紧急退出
 
 当调用前 `activeVenue != IDLE` 时：
 
-1. 调用当前 Active Adapter 的 `syncFees()` 并领取全部可领取手续费；
+1. 调用当前 Active Adapter 的 `syncFees()`，领取全部可领取手续费并按条件发出 `FeesSynchronized`；
 2. 移除全部 LP liquidity，并验证资产守恒和旧 Position liquidity 为零；
 3. 设置 `activeVenue = IDLE`；
 4. 将 `planVersion` 递增 1，并保持 `lastExecutedPlan` 和 `lastPositionChangeAt` 不变；该时间戳继续约束后续计划性 Rebalance，历史计划的 `marketRegime` 继续作为 Hysteresis 历史。
@@ -964,9 +966,10 @@ Vault 使用 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules` 提供�
 | --- | --- | --- | --- |
 | `grantRole` / `revokeRole`（业务角色） | 当前 Default Admin | 初始化前后均可 | 更新业务角色成员并发出标准角色事件；不改变 Default Admin |
 | `renounceRole`（业务角色） | 角色持有人本人 | 初始化前后均可 | 放弃调用者自己的业务角色并发出 `RoleRevoked` |
-| `renounceRole(DEFAULT_ADMIN_ROLE, ...)` | 当前 Default Admin | 初始化前后均可 | 按 `AccessControlDefaultAdminRules` 标准流程放弃根管理员角色 |
-| `beginDefaultAdminTransfer` / `cancelDefaultAdminTransfer` | 当前 Default Admin | 初始化前后均可 | 计划或取消根管理员转移 |
-| `acceptDefaultAdminTransfer` | 待接任账户 | 初始化前后均可 | 完成两阶段根管理员转移；不自动授予任何业务角色 |
+| `beginDefaultAdminTransfer(newAdmin)` | 当前 Default Admin | 初始化前后均可 | 计划根管理员转移；`newAdmin == address(0)` 表示计划放弃根管理员，必须等待 `pendingDefaultAdminSchedule` 生效 |
+| `cancelDefaultAdminTransfer` | 当前 Default Admin | 初始化前后均可 | 取消尚未完成的根管理员转移或放弃计划 |
+| `acceptDefaultAdminTransfer` | 待接任账户 | 初始化前后均可 | 在计划生效后完成转移；不自动授予任何业务角色 |
+| `renounceRole(DEFAULT_ADMIN_ROLE, msg.sender)` | 当前 Default Admin | 初始化前后均可，但必须先安排 `beginDefaultAdminTransfer(address(0))` 并等待计划生效 | 完成根管理员放弃；否则以 `AccessControlEnforcedDefaultAdminDelay` 回滚；成功后 `defaultAdmin()` 为零地址 |
 | `changeDefaultAdminDelay` / `rollbackDefaultAdminDelay` | 当前 Default Admin | 初始化前后均可 | 计划或回滚根管理员转移延迟变更 |
 | `configureAdapter` | Manager | 仅初始化前 | 注册已独立部署的 Adapter，验证其绑定并缓存 `tickSpacing`，将 `enabled` 初始化为 true，并发出 `AdapterConfigured` |
 | `bootstrap` | Manager | 仅初始化前；只能成功一次 | 健康且部署评估无需 Swap 时进入 ACTIVE，EXTREME 进入 IDLE，铸造并锁定 shares，冻结 Adapter 身份绑定；部署评估的 `requiresSwap` 为 true 时以 `SwapRequired()` 回滚 |
@@ -985,7 +988,7 @@ Vault 使用 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules` 提供�
 Bootstrap 成功后不可替换：
 
 - canonical Oracle Pool 和 Oracle 合约；
-- Swap Executor、固定 Router、Token 对、Pool/Fee Tier 和固定 Swap 方法；
+- Swap Executor、固定 Router、与 canonical Pool 相同的 Swap Pool、Token 对、Pool/Fee Tier 和固定 Swap 方法；
 - Adapter 地址、immutable 绑定；
 - shares 的会计语义和赎回规则。
 
@@ -1028,6 +1031,7 @@ Bootstrap 成功后不可替换：
 ### 11.4 Oracle 与策略安全
 
 - 单区块 Spot 操纵不直接进入 `deviationBps`，因为该指标由 Oracle 根据 `shortTwapTick` 和 `twapTick` 计算，调用者不能传入或覆盖；
+- canonical Pool 同时是唯一 Swap Pool，避免独立成交池与定价池分离；同池约束不消除公开 AMM Swap 的 Sandwich 风险，剩余损失由 Swap 最低输出和迁移 NAV 损失上限约束；
 - Observation 不足、报价为零或资产绑定错误时关闭价值相关操作。
 - TWAP 只提高操纵成本，不构成绝对安全保证。
 - `deviationBps` 不是波动率，也不用于宣称收益最优。
@@ -1047,11 +1051,11 @@ Bootstrap 成功后不可替换：
 
 ## 12. 实现验收清单
 
-实现进入部署前，必须通过以下验收项。
+实现进入 [DEPLOYMENT.md](DEPLOYMENT.md) 定义的部署流程前，必须通过以下协议行为验收项；部署顺序、外部地址核验、流动性预检、Fork 发布门槛和部署证据不在本节重复定义。
 
 身份与初始化：
 
-- `token0/token1`、canonical Pool、canonical Oracle、Swap Executor、所有 Adapter 和绑定 Pool 的有序 Token 一致性已在部署或绑定时验证；标准 Uniswap 顺序要求 `token0 < token1`；
+- `token0/token1`、canonical Pool、canonical Oracle、Swap Executor、所有 Adapter 和绑定 Pool 的有序 Token 一致性已在部署或绑定时验证；`swapExecutor.swapPool() == canonicalOracle.canonicalPool()`；标准 Uniswap 顺序要求 `token0 < token1`；
 - 两个支持 Token 的链上 decimals 均不超过 18，且由 Token metadata 派生并缓存，Token metadata 读取失败或超限时相关部署回滚；
 - Bootstrap 只能成功一次；
 - Bootstrap 的最低 NAV、最低部署率、锁定 shares 和回滚语义完整。
@@ -1060,7 +1064,7 @@ Bootstrap 成功后不可替换：
 
 - `initialDefaultAdmin`、`initialDefaultAdminDelay` 和三个业务角色标识经过测试；
 - Default Admin 单账户约束经过测试；
-- Default Admin 两阶段延迟转移、取消和接受流程经过测试；
+- Default Admin 两阶段延迟转移、取消和接受流程，以及先 `beginDefaultAdminTransfer(address(0))`、等待 `pendingDefaultAdminSchedule < block.timestamp`、再由当前管理员调用 `renounceRole(DEFAULT_ADMIN_ROLE, msg.sender)` 的根管理员放弃流程，均经过测试；直接放弃或延迟未生效时必须以 `AccessControlEnforcedDefaultAdminDelay` 回滚；
 - Default Admin 延迟变更流程经过测试；
 - 根角色无隐式业务权限的限制经过测试；
 - 初始化前治理边界，以及 Guardian 只能收紧暂停和 Adapter 状态的限制，均经过测试。

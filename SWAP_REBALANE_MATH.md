@@ -303,7 +303,7 @@ unused1 = 1.5 WETH
 - 无 Swap 路径的逐 Token 资产守恒失败；
 - Vault 的实际输出 Token 余额增量低于 `minAmountOut`，或与 Executor 返回值不一致；
 - Executor 的 token0/token1 余额未恢复调用前基线，或 Router allowance 未清零；
-- Router、Token 对、Pool、Fee Tier 或输出接收方不符合封存配置；任一 `swapPool`、Executor 或 Vault 的有序 `token0/token1` 不一致，或 Router/Pool 回调发送方校验失败；
+- Router、Token 对、Pool、Fee Tier 或输出接收方不符合封存配置；`swapPool != canonicalPool`；任一 Executor、Vault、Adapter 或绑定 Pool 的有序 `token0/token1` 不一致；或 Router/Pool 回调发送方校验失败；
 - Oracle 不健康或 Swap 安全边界不满足。
 
 失败交易不得更新 `lastExecutedPlan`、`planVersion`、`lastPositionChangeAt` 或资产位置。
