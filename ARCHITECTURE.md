@@ -353,7 +353,8 @@ struct SwapPlan {
 }
 ```
 
-- `PositionPlan.planHash` 覆盖 `targetVenue`、`marketRegime`、`tickLower`、`tickUpper` 和 `version`。
+- `PositionPlan.targetVenue`、`marketRegime` 与 Tick 字段的业务语义和规范化生成规则以 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9.1.2–§9.1.3 为唯一来源，本节不重复定义。
+- `PositionPlan.planHash` 不包含 `planHash` 自身，固定按 `keccak256(abi.encode(uint8(targetVenue), uint8(marketRegime), tickLower, tickUpper, version))` 计算；字段顺序和 Solidity 类型依次为 `uint8`、`uint8`、`int24`、`int24`、`uint64`。
 - `DeploymentAssessment` 是 Vault 根据当前资产和目标 Adapter 生成的临时内存结果，仅包含 `requiresSwap` 与 `direction`，不写入 `lastExecutedPlan` storage。
 - `SwapPlan` 是 Vault 在执行入口内构造、仅传给 `ControlledSwapExecutor` 的交易级对象，不是调用者可自由提交的完整目标结构。
 - `deadline` 由调用入口独立校验；调用者不能传入任意目标字段、Router、实际方向或 calldata。
@@ -845,7 +846,7 @@ error MigrationLossExceeded();
 /// @notice Deposit 或 Rebalance 后的 Idle 比例超过 maxHealthyIdleBps。
 error IdleLimitExceeded();
 
-/// @notice 目标 Position 的实际或模拟部署率低于派生的 minDeployBps。
+/// @notice 目标 Position 的最差结果模拟部署率或最终实际部署率低于派生的 minDeployBps。
 error DeploymentRatioTooLow();
 
 /// @notice 建立目标 Position 前仍存在另一有效 Position。
@@ -1174,12 +1175,14 @@ sequenceDiagram
     Vault->>Vault: verify actual balances against assessed assets; simulate worst-case post-swap balances
     Vault->>NewAdapter: previewDeposit(simulated post-swap balances, plan)
     NewAdapter-->>Vault: simulated used0/used1
-    Vault->>Vault: validate simulatedDeployBps and idle; construct SwapPlan
+    Vault->>Vault: validate simulatedDeployBps and simulatedIdleBps; construct SwapPlan
     Vault->>SwapExecutor: executeSwap(validated SwapPlan)
     SwapExecutor-->>Vault: actual amountOut
     Vault->>NewAdapter: deposit() with adjusted assets
     NewAdapter-->>Vault: unused amounts and liquidity
-    Vault->>Vault: validate NAV loss, deployment, idle, dust tolerance and position
+    Vault->>NewAdapter: snapshot()
+    NewAdapter-->>Vault: final PositionSnapshot
+    Vault->>Vault: calculate finalDeployBps/finalIdleBps from actual balances and position with migration twapTick; validate NAV loss, dust tolerance and position
     Vault->>Vault: commit lastExecutedPlan and incremented planVersion; set lastPositionChangeAt = block.timestamp
     Vault-->>Keeper: PositionPlanCommitted, V3RangeChanged if targetVenue is V3, RebalanceExecuted and SwapExecuted
 ```
@@ -1288,7 +1291,7 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | INV-14 | 每次成功的 Position 结构变化使 `planVersion` 恰好递增 1，失败交易及非结构变化不更新                             | 版本与原子性测试失败       |
 | INV-15 | `DEFAULT_ADMIN_ROLE` 至多由一个账户持有，转移、放弃和延迟变更只能通过 `AccessControlDefaultAdminRules` 标准流程 | 权限操作回滚           |
 | INV-16 | Default Admin 不因根角色自动获得 Vault 业务权限，Guardian 只能收紧暂停和 Adapter 状态                      | 权限操作回滚           |
-| INV-17 | 任一合法 `PositionPlan` 的 `targetVenue` 与 `marketRegime` 严格双射：`IDLE` ↔ `EXTREME_DEVIATION`、`UNISWAP_V2` ↔ `HIGH_DEVIATION`、`UNISWAP_V3_HIGH_FEE` ↔ `MEDIUM_DEVIATION`、`UNISWAP_V3_LOW_FEE` ↔ `LOW_DEVIATION` | 计划校验失败 |
+| INV-17 | 任一合法 `PositionPlan` 必须满足 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9.1.2–§9.1.3 定义的 Venue、Regime 与 Tick 字段规范化规则 | 计划校验失败 |
 | INV-18 | 禁用 Adapter 不移除现有 Position 的计价与退出能力，但阻止 Deposit、迁入和同 Venue Recenter 增加其 liquidity | `AdapterDisabled()` |
 | INV-19 | canonical Pool、Vault、Oracle、Swap Executor、所有 Adapter 及其绑定 Pool 使用相同的有序 Token 对，`token0 < token1`，且 `swapExecutor.swapPool() == canonicalOracle.canonicalPool()` | 部署、构造或 Bootstrap 绑定校验回滚 |
 
@@ -1300,14 +1303,14 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 
 | 测试层                 | 必测场景                                                                                                                                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AdaptiveLPVault` 单元测试 | Vault 会计、原始资产快照、Oracle 快照编排、内部 `pure` 的 `_getPlan()` 独立输入测试、Hysteresis、Range、部署评估、`requiresSwap`、`direction`、计划哈希、角色、暂停、Registry 和核心状态边界 |
+| `AdaptiveLPVault` 单元测试 | Vault 会计、原始资产快照、Oracle 快照编排、内部 `pure` 的 `_getPlan()` 独立输入测试、Hysteresis、按 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9.1.3 生成规范化 Tick 字段和 Range、部署评估、`requiresSwap`、`direction`、`PositionPlanHash` 精确 ABI 编码与链下复算、角色、暂停、Registry 和核心状态边界 |
 | Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足和必要 Pool 读取失败返回 `healthy == false` 且 `snapshot()` 不回滚、Pool 当前零流动性、Pool 绑定、Pool 有序 Token 与地址升序、Token metadata 读取和 decimals 上限、`Q1/Q0` 双向报价、向上/向下取整、三个规范化价格字段、`observedAt`、Short TWAP/TWAP 偏离 |
 | V2 Adapter 测试       | 储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、部分退出、实际退出数量与余额变化、有序 Token 绑定 |
 | V3 Adapter 测试       | principal、tokens owed、fee growth 增量、领取后重读、principal 比例与手续费隔离、`amount0Max/amount1Max` 与实际 `used0/used1`、immutable binding getters、Pool 有序 Token、`tickSpacing`、Range、部分退出、实际退出数量与余额变化、旧 NFT 清理 |
 | Adapter Registry 测试 | `configureAdapter(venue, adapter)` 的 Vault/Adapter/Pool 有序 Token 一致性、错误资产对与反向顺序回滚、其他 immutable 绑定校验、`tickSpacing` 缓存、初始化前重复配置、Bootstrap 后绑定和缓存冻结、仅 `enabled` 可变、Pool/Fee Tier 不重复存储 |
 | Swap 测试             | `swapPool == canonicalPool`、不同地址即使 Token 对相同也以 `InvalidSwapPool()` 回滚、swapPool/Executor/Vault 有序 Token 一致性与反向顺序回滚、固定 Router/Token 方法、方向、过量资产修复范围、方向报价与 BPS 滑点折算的两段向上取整、派生部署阈值、minOut、deadline、Vault 向 Executor 精确交付输入、Vault 输出余额增量与返回值一致、Executor 余额恢复基线、回调验证和授权清理 |
 | Deposit/Redeem 集成测试 | 只转实际数量、V3 单边 Active Position 的 `ActivePositionSingleSided()`、双边 Position 零实际存款的 `ZeroAmount()`、按 principal 比例的限制侧与非整除舍入、手续费不影响 Deposit 比例、暂停赎回、Oracle 异常赎回、Redeem 最小双资产输出、持有人自赎不消费 allowance、授权 spender 从显式 `owner` 销毁 shares 并消费有限 allowance、最大 allowance 不递减、任意 `receiver` 收款、owner 余额或 allowance 不足时原子回滚、捐赠、单边/高 Idle、比例公平性、当前 Active Adapter 禁用时 Deposit 在 Adapter 调用和 Token 转入前回滚、禁用后资产仍计价且 Redeem 成功 |
-| Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Bootstrap 初始化 `lastPositionChangeAt`、两类 Rebalance 共用 Cooldown 与 `CooldownActive(availableAt)`、Emergency Exit 绕过检查且不重置计时、IDLE 幂等分支不更新时间戳、全部流通 shares 赎回保留锁定份额对应资产、`activeVenue`/`planVersion`/`lastExecutedPlan` 不因 Redeem 改变、`expectedPlanHash`、`expectedDirection`、模拟 Swap 后评估、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
+| Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Bootstrap 初始化 `lastPositionChangeAt`、两类 Rebalance 共用 Cooldown 与 `CooldownActive(availableAt)`、Emergency Exit 绕过检查且不重置计时、IDLE 幂等分支不更新时间戳、全部流通 shares 赎回保留锁定份额对应资产、`activeVenue`/`planVersion`/`lastExecutedPlan` 不因 Redeem 改变、`expectedPlanHash`、`expectedDirection`、`simulatedDeployBps(x)`/`simulatedIdleBps(x)` 最差结果模拟、基于最终实际 Vault 余额与 `PositionSnapshot` 且复用迁移 `twapTick` 的 `finalDeployBps`/`finalIdleBps`、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
 | 事件契约测试            | `VaultBootstrapped.initialVenue` 初始化链下位置，`RebalanceExecuted.targetVenue` 更新位置且同 Venue Recenter 保持相同值，`EmergencyExit` 将位置更新为 `IDLE`；`FeesSynchronized` 仅在 V3 实际归集至少一种非零费用时恰好发出一次，V2、IDLE、V3 双零及最终回滚均不发出，事件费用等于 Vault 余额增量且 `total0/total1` 使用同步完成瞬间快照；Bootstrap 建立 V3、V2/IDLE 迁入 V3、同 Venue Recenter 和 V3 跨 Venue 迁移均发出 `V3RangeChanged`，无旧 V3 时 old Tick 为 0/0，跨 V3 Venue 且 Tick 相同仍发出；Deposit、Redeem、费用同步、目标为 V2/IDLE 的 Rebalance、Emergency Exit 和失败交易不发出 `V3RangeChanged`；已在 IDLE 的幂等 Emergency Exit 不发出 `EmergencyExit`；自定义事件 ABI 不包含额外的通用资产位置或 Idle 状态变化事件 |
 | Invariant/Fuzz      | 资产守恒、shares 公平性、单活 Position、费用不重复、任意调用者不能越权                                                                                                                                                                               |
 | Mainnet Fork        | 真实 canonical Pool TWAP、canonical/Swap Pool 地址相等、双向指定金额 Router 报价、V2 Pair、V3 Position Manager 和 Tick spacing；部署流程的完整 Fork 验收以 `DEPLOYMENT.md` 为准 |

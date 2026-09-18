@@ -685,7 +685,7 @@ Vault 内部的策略逻辑是只读且确定性的计划生成器。输入仅�
 - 已配置并验证的低费率 Pool 和高费率 Pool `tickSpacing`；
 - 部署时固定且受硬边界约束的策略参数。
 
-Vault 内部根据当前资产、Position、Oracle 快照、历史 Regime、当前 Venue、固定策略参数和已验证的目标 Pool 配置，确定性生成完整的 `PositionPlan`；其内容包含 `targetVenue`、`marketRegime`、V3 Tick Range、`version` 和 `planHash`。
+Vault 内部根据当前资产、Position、Oracle 快照、历史 Regime、当前 Venue、固定策略参数和已验证的目标 Pool 配置，确定性生成完整的 `PositionPlan`；其内容包含 `targetVenue`、`marketRegime`、规范化的 `tickLower/tickUpper`、`version` 和 `planHash`。Tick 字段在 V3 计划中表示目标 Range，在非 V3 计划中使用 §9.1.3 定义的固定占位值。
 
 - `planHash` 是对所有影响仓位结构且可稳定复算的计划字段计算的哈希；
 - `version` 和 `planHash` 用于执行时的计划身份校验；
@@ -765,9 +765,15 @@ Vault 策略逻辑根据 `planVersion` 选择 Hysteresis 的分类方式：
 - `planVersion > 0`：使用 `lastExecutedPlan.marketRegime` 作为 Hysteresis 历史执行上述状态转换；
 - Hysteresis 只控制幅度，Cooldown 只控制时间频率，两者不可互相替代。
 
-### 9.1.3 Position V3 Range 计算与 Recenter
+### 9.1.3 Position Tick 字段、V3 Range 计算与 Recenter
 
-Vault 策略逻辑使用由已验证 Adapter 配置提供的目标 Pool spacing：
+`PositionPlan.tickLower/tickUpper` 按目标 Venue 规范化生成：
+
+- `LOW_DEVIATION` 和 `MEDIUM_DEVIATION` 的 V3 计划按本节后续规则生成有效 Range；`0/0` 不是合法 V3 Range；
+- `HIGH_DEVIATION` 的 `UNISWAP_V2` 计划固定使用 `tickLower = 0`、`tickUpper = 0`；
+- `EXTREME_DEVIATION` 的 `IDLE` 计划固定使用 `tickLower = 0`、`tickUpper = 0`；
+
+对于 V3 计划，Vault 策略逻辑使用由已验证 Adapter 配置提供的目标 Pool spacing：
 
 - `LOW_DEVIATION` 的目标 Venue 是 `UNISWAP_V3_LOW_FEE`，使用低费率 Pool 的 `tickSpacing`；
 - `MEDIUM_DEVIATION` 的目标 Venue 是 `UNISWAP_V3_HIGH_FEE`，使用高费率 Pool 的 `tickSpacing`；
@@ -894,17 +900,17 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 1. 生成当前候选 `PositionPlan`；
 2. 检查目标 Adapter 已启用，再对当前 `T0/T1` 执行首次部署评估，使用派生值 `minDeployBps = BPS - maxHealthyIdleBps` 校验 `initialDeployBps < minDeployBps`、`requiresSwap == true` 以及 `direction == expectedDirection`；
 3. 同步费用并按条件发出 `FeesSynchronized`，捕获迁移前 TWAP 和 NAV；退出旧 Position 后重新读取实际余额；
-4. 检查 `amountIn`，根据最差 `protocolMinOut` 模拟 Swap 后余额并计算 `simulatedDeployBps(x)`，验证不会换过头且满足部署率和 Idle 限制，再构造临时 `SwapPlan`；
+4. 检查 `amountIn`，根据最差 `protocolMinOut` 模拟 Swap 后余额并计算 `simulatedDeployBps(x)` 与 `simulatedIdleBps(x)`，验证不会换过头且满足部署率和 Idle 限制，再构造临时 `SwapPlan`；
 5. 记录 Vault 的输入/输出 Token 余额和 Executor 的 token0/token1 余额，将精确的 `amountIn` 从 Vault 转入 Executor，再调用 `ControlledSwapExecutor.executeSwap()` 执行固定 exact-input Swap；
 6. 在调用目标 Adapter 前重新读取余额，以 Vault 的输出 Token 实际余额增量作为 `actualAmountOut`，并验证 Vault 的输入 Token 减少量等于 `amountIn`、`actualAmountOut` 等于 Executor 返回值且不低于 `minAmountOut`、Executor 的 token0/token1 余额恢复到转入前基线、Executor 对 Router 的 allowance 为零；该局部校验不使用 `dustTolerance0/1` 放宽；
 7. 使用 Swap 后的实际余额，在目标 Adapter 建立当前计划指定的 Position；
-8. 重新读取实际资产和 Position，完成最终迁移校验；全部校验通过后，将 `lastExecutedPlan` 更新为执行计划，并提交 `planVersion` 和 `lastPositionChangeAt`；
+8. 重新读取最终 Vault 余额和实际 `PositionSnapshot`，复用迁移开始时捕获的同一个 `twapTick` 计算 `finalDeployBps`、`finalIdleBps` 和迁移后 NAV，完成最终迁移校验；全部校验通过后，将 `lastExecutedPlan` 更新为执行计划，并提交 `planVersion` 和 `lastPositionChangeAt`；
 9. 发出 `PositionPlanCommitted`、`RebalanceExecuted`、`SwapExecuted`和按条件发出 `V3RangeChanged`事件，其中 `SwapExecuted.amountOut = actualAmountOut`。
 
 目标 Adapter 建仓完成后，Vault 必须重新读取实际状态并验证：
 
-- `deployBps >= minDeployBps`，其中 `minDeployBps = BPS - maxHealthyIdleBps`；
-- `idleBps <= maxHealthyIdleBps`；
+- `finalDeployBps >= minDeployBps`，其中 `minDeployBps = BPS - maxHealthyIdleBps`；
+- `finalIdleBps <= maxHealthyIdleBps`；
 - 完整迁移后的 NAV 损失不超过 `maxMigrationLossBps`；
 - 资产位置和余额守恒成立，允许的舍入差异仅限 `dustTolerance0/1`；
 
@@ -1087,7 +1093,8 @@ Oracle 与策略：
 - 未初始化 Preview 以 `NotInitialized()` 回滚；
 - Oracle 不健康时，Preview 和执行入口均以 `OracleUnhealthy()` 回滚，且不生成占位计划；
 - Vault 策略逻辑使用 `planVersion == 0` 识别首次分类；之后使用 `lastExecutedPlan.marketRegime` 作为 Hysteresis 历史；
-- `narrowRangeHalfWidthSteps` 和 `wideRangeHalfWidthSteps` 按对应 Pool 的 `tickSpacing` 换算，低费率与高费率 Pool 的 spacing 来源及缓存一致，非法或越界 Range 以 `InvalidTickRange()` 回滚；
+- `narrowRangeHalfWidthSteps` 和 `wideRangeHalfWidthSteps` 按对应 Pool 的 `tickSpacing` 换算，低费率与高费率 Pool 的 spacing 来源及缓存一致，非法或越界 Range 以 `InvalidTickRange()` 回滚；HIGH/V2 与 EXTREME/IDLE 计划按 §9.1.3 生成规范化 Tick 占位值；
+- `planHash` 的字段规范化与架构文档定义的精确 ABI 编码经过链上、链下复算一致性测试；
 - Position 结构变化的版本递增和 Range 规则均经过测试。
 
 Rebalance、退出与接口：

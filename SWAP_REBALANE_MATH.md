@@ -94,7 +94,7 @@ Vault 必须验证：
 - 输入 Token 与首次 `DeploymentAssessment.direction` 一致；
 - `amountIn` 不超过 Vault 当前该输入 Token 的可用余额；
 - Swap 后不会把资产比例从一侧过量变成另一侧明显过量；
-- Swap 后的 `deployBps` 和 `idleBps` 满足部署时固定的协议参数；
+- Swap 后的 `simulatedDeployBps(x)` 和 `simulatedIdleBps(x)` 满足部署时固定的协议参数；
 - Swap 后的完整迁移满足 `maxMigrationLossBps` 和资产状态不变量。
 
 对输入 `x`，先使用协议允许的最差 Swap 输出模拟余额，再验证目标 Position：
@@ -143,14 +143,14 @@ simulatedDeployBps(x) =
 $$
 
 $$
-IdleValue_1(x) =
+simulatedIdleValue_1(x) =
 (H_1(x)-used_1) + Q_1(H_0(x)-used_0; twapTick)
 $$
 
 $$
-IdleBps(x) =
+simulatedIdleBps(x) =
 \left\lfloor
-\frac{IdleValue_1(x) \times BPS}
+\frac{simulatedIdleValue_1(x) \times BPS}
 {NAV_{after,sim}(x)}
 \right\rfloor
 $$
@@ -162,7 +162,7 @@ simulatedDeployBps(x) \ge minDeployBps
 $$
 
 $$
-IdleBps(x) \le maxHealthyIdleBps
+simulatedIdleBps(x) \le maxHealthyIdleBps
 $$
 
 带 Swap Rebalance 的首次评估使用 `initialDeployBps < minDeployBps` 识别 Swap 必要性；对 `amountIn` 的模拟校验使用同一派生阈值 `simulatedDeployBps(x) \ge minDeployBps` 判断最差输出下能否建立目标 Position。
@@ -198,7 +198,7 @@ $$
 
 该计算先对方向报价向上取整，再对 BPS 滑点折算向上取整。与仅在最终结果处取整的精确有理数公式相比，结果相同或最多高一个输出 Token raw unit。
 
-为了避免 Swap 后才发现部署率不足，Keeper 计算 `x` 时必须使用 `protocolMinOut(x)` 作为最差输出，而不是使用未折算滑点的方向报价。因此， `x` 在协议允许的最差成交结果下，也必须满足上一节的 `DeployBps` 和 `IdleBps` 条件。
+为了避免 Swap 后才发现部署率不足，Keeper 计算 `x` 时必须使用 `protocolMinOut(x)` 作为最差输出，而不是使用未折算滑点的方向报价。因此， `x` 在协议允许的最差成交结果下，也必须满足上一节的 `simulatedDeployBps(x)` 和 `simulatedIdleBps(x)` 条件。
 
 Keeper/Manager 可以额外提供更严格的 `keeperMinAmountOut`。实际传给 Router 的最低输出为：
 
@@ -245,10 +245,46 @@ $$
 
 Executor 返回值等于 `actualAmountOut`；Executor 的 token0/token1 余额恢复到 Vault 转入前的基线，且其 Router allowance 为零。
 
+目标 Adapter 建仓后，Vault 必须重新读取最终 Vault 余额与 `PositionSnapshot`。设 `I0Final/I1Final` 为 Vault 最终实际余额，`P0Final/P1Final` 为最终 `PositionSnapshot.amount0/amount1`，并定义：
+
+$$
+F_0 = I0Final + P0Final, \qquad F_1 = I1Final + P1Final
+$$
+
+$$
+FinalDeployedNAV_1 = P1Final + Q_1(P0Final; twapTick)
+$$
+
+$$
+FinalNAV_1 = F_1 + Q_1(F_0; twapTick)
+$$
+
+$$
+finalDeployBps =
+\left\lfloor
+\frac{FinalDeployedNAV_1 \times BPS}
+{FinalNAV_1}
+\right\rfloor
+$$
+
+$$
+FinalIdleValue_1 = I1Final + Q_1(I0Final; twapTick)
+$$
+
+$$
+finalIdleBps =
+\left\lfloor
+\frac{FinalIdleValue_1 \times BPS}
+{FinalNAV_1}
+\right\rfloor
+$$
+
+`P0Final/P1Final` 必须来自建仓后重新读取的实际 Position 快照，不能使用 `previewDeposit()` 的预估值或仅使用 `deposit()` 返回的 `used0/used1`。以上最终公式与本次迁移的其他价值校验复用迁移开始时捕获的同一个 `twapTick`，不得重新读取 Oracle。
+
 完整迁移校验由 Vault 在目标 Adapter 建仓后负责，包括：
 
-- `deployBps >= minDeployBps`；
-- `idleBps <= maxHealthyIdleBps`；
+- `finalDeployBps >= minDeployBps`；
+- `finalIdleBps <= maxHealthyIdleBps`；
 - 目标 Position 唯一且有效；
 - 无 Swap 路径的逐 Token 资产守恒，允许差异仅在 `dustTolerance0/1` 范围内；
 - 带 Swap 路径按 `amountIn` 和 `actualAmountOut` 调整后的资产位置与余额守恒；
@@ -299,7 +335,7 @@ unused1 = 1.5 WETH
 - `amountIn` 方向错误、超过可用余额或导致资产比例换过头；
 - Vault 的实际输入 Token 减少量不等于 `amountIn`；
 - `deadline` 已过期；
-- `DeployBps`、`IdleBps` 或 NAV 损失校验失败；
+- `simulatedDeployBps(x)`、`simulatedIdleBps(x)`、`finalDeployBps`、`finalIdleBps` 或 NAV 损失校验失败；
 - 无 Swap 路径的逐 Token 资产守恒失败；
 - Vault 的实际输出 Token 余额增量低于 `minAmountOut`，或与 Executor 返回值不一致；
 - Executor 的 token0/token1 余额未恢复调用前基线，或 Router allowance 未清零；

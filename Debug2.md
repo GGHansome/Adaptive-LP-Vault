@@ -69,8 +69,18 @@ tickLower/tickUpper 参与 planHash 的计算，但 HIGH 与 EXTREME 两档计�
 
 缺口其实有两层。第一层是填充约定：字段值没有规定。第二层更根本：生成端规则也没有——§9.1.3 只定义了 LOW 和 MEDIUM 两档的 Range 计算规则，Strategy 生成 V2 或 IDLE 计划时如何设置这两个字段，全文没有任何条文。两层叠加的结果是：单一实现内部自洽（生成与校验同源），但跨实现无法复算。前端或 Keeper 想在链下复算一个 V2 计划的哈希，只能靠猜测实现者的填充约定；lastExecutedPlan 里存的历史计划哈希，第三方也无法独立验证。上轮 AUD-047 的 version 取值问题与此同族，但本条影响的是 HIGH/EXTREME 这些常态路径，直击 planHash「稳定可复算」的承诺。 
 
+修改：
+- 在 `PRODUCT_SPEC.md` §9.1.3 将 Tick 字段规范化规则设为唯一产品事实来源：LOW/MEDIUM 按 V3 Range 公式生成，HIGH/V2 与 EXTREME/IDLE 固定使用 `0/0`；非 V3 计划不得根据 TWAP 或 V3 `tickSpacing` 生成占位 Tick。
+- 在 `ARCHITECTURE.md` §4.4 仅引用产品规则，不重复枚举 Venue/Regime/Tick 语义；同时固定 `planHash` 的字段顺序、类型与 `abi.encode` 算法，排除 `abi.encodePacked`、部署地址、`chainId` 和其他字段。
+- 同步产品验收项、架构不变量和单元测试矩阵，覆盖非 V3 Tick 规范化及链上、链下哈希复算；Swap 数学不使用非 V3 Tick，因此 `SWAP_REBALANE_MATH.md` 无需修改。
+
 ## 问题 7
 在你本次修改（Debug 11）把部署率指标拆成了两个带阶段的名称：initialDeployBps（生成计划时算）和 simulatedDeployBps(x)（模拟最差 Swap 结果时算）。但建仓完成后的第三次校验，文档里仍用没有前缀的裸名 deployBps——它的公式和名字都没定义：分子用 Adapter 实际返回的 used0/used1 还是预估值？TWAP 用迁移前捕获的值还是重新读？
+
+修改：
+- 将最差 Swap 结果模拟阶段的 Idle 指标规范化为 `simulatedIdleBps(x)`，与 `simulatedDeployBps(x)` 使用相同的模拟资产和迁移 `twapTick`。
+- 将建仓后第三阶段指标命名为 `finalDeployBps` 和 `finalIdleBps`：分子分别使用建仓后重新读取的实际 `PositionSnapshot.amount0/amount1` 与 Vault 最终余额，分母使用两者合计的最终实际资产；不得使用 `previewDeposit()` 预估值或仅使用 `deposit()` 返回值。
+- 三个阶段统一复用迁移开始时捕获的同一个健康 Oracle `twapTick`，最终阶段不得重新读取 Oracle；同步产品流程、架构时序、错误说明和测试矩阵。
 
 ## 问题 8
 §5.4 的公式说用户赎回 x 份 shares 能拿到 ⌊f×T⌋（按总资产一次取整）。但实际执行是分两步走的：先从仓位退出一部分（Adapter 自己取整），再从闲置资产分配一部分（Vault 再取整），两步各自向下取整后加起来。两次取整的结果可能比一次取整少 1~2 个最小单位。文档没说公式值是「保证拿到」还是「理论上限」，前端按公式预估的输出可能比用户实际到手的高一点，恰好卡在 minAmountOut 边界时就会出现预期外行为。
