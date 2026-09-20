@@ -247,29 +247,33 @@ $$
 
 调用者提交 `shares`、`minAmount0Out`、`minAmount1Out`、`receiver` 和 `owner`。`owner` 是被销毁 shares 的持有人，`receiver` 是接收最终 token0/token1 的地址，`msg.sender` 是实际调用者；`owner != msg.sender` 检查并消费 `owner` 授予 `msg.sender` 的 shares allowance。赎回不执行 Swap，不以 Oracle 价值判断是否允许，并且不因三个业务暂停开关而关闭。
 
-设销毁前总供应量为 `S`，`owner` 销毁 `x` shares：
+设销毁前总供应量为 `S`，`owner` 销毁 `x` shares。非 IDLE 时完成费用同步后、调用 Active Adapter 退出前，记 Vault 实际持有的 Idle 余额为 `I0/I1`；IDLE 时直接使用当前 Vault 余额。Idle 部分分别向下取整：
 
 $$
- f = \frac{x}{S}
+ idleOut_0 = \left\lfloor\frac{x \times I_0}{S}\right\rfloor, \qquad
+ idleOut_1 = \left\lfloor\frac{x \times I_1}{S}\right\rfloor
 $$
 
+非 IDLE 时，`positionOut0/positionOut1` 是 Active Adapter 按 `x/S` 退出其原生 Position 单位后实际返回 Vault 的 token0/token1 余额增量；IDLE 时二者均为零。最终实际输出为：
+
 $$
- out_0 = \left\lfloor f \times T_0 \right\rfloor, \qquad
- out_1 = \left\lfloor f \times T_1 \right\rfloor
+ amount0Out = idleOut_0 + positionOut_0, \qquad
+ amount1Out = idleOut_1 + positionOut_1
 $$
 
 执行规则：
 
 - 校验 `owner` 的 shares 余额；`msg.sender != owner` 时按 ERC-20 规则消费 `allowance(owner, msg.sender)`；
-- 调取 `syncFees()` 同步 Active Adapter 的费用并按条件发出 `FeesSynchronized`，然后读取销毁前资产快照。
-- 按 `x/S` 从 Active Adapter 部分退出，而不是优先消耗全部 Idle；
-- 将按比例退出的 Position 资产与按同一比例分配的 Idle token0/token1 合并为最终 `amount0Out/amount1Out`；
-- 在 Vault 层验证最终 `amount0Out >= minAmount0Out` 且 `amount1Out >= minAmount1Out`；
+- 非 IDLE 时调取 `syncFees()` 同步 Active Adapter 的费用并按条件发出 `FeesSynchronized`；IDLE 时不得调用 Adapter。随后读取销毁前总供应量和资产快照；
+- 在 Adapter 退出前固定 `I0/I1`，按上述公式计算 `idleOut0/idleOut1`；不得把 Adapter 退出后转入 Vault 的资产再次计入 Idle 分配；
+- 非 IDLE 时调用 Active Adapter `withdraw(x, S)` 按规则向下取整，并将底层 AMM 实际退出资产返回 Vault。Vault 必须验证 Adapter 返回值分别等于本次调用造成的 token0/token1 实际余额增量，不一致时以 `AdapterBalanceMismatch()` 回滚；IDLE 时不得调用 Adapter，`positionOut0/positionOut1` 固定为零；
+- 将 `positionOut0/positionOut1` 与 `idleOut0/idleOut1` 合并为最终实际 `amount0Out/amount1Out`；
+- 在 Vault 层验证最终实际 `amount0Out >= minAmount0Out` 且 `amount1Out >= minAmount1Out`；
 - 从 `owner` 销毁 shares 后，将最终 token0/token1 转账给 `receiver`。
 
 如果除 `minimumLockedShares` 外的流通 shares 全部赎回，Vault 不发生生命周期或资产位置转换：
 
-- 仍按 `x/S` 从当前 Active Adapter 部分退出，保留 `minimumLockedShares` 对应的剩余 Position；如果当前资产位置为 IDLE，则保持 IDLE；
+- 仍按上述分段输出规则从当前 Active Adapter 部分退出并分配 Idle，保留 `minimumLockedShares` 对应的剩余 Position 或 Idle 资产；如果当前资产位置为 IDLE，则保持 IDLE；
 - `activeVenue`、`planVersion` 和 `lastExecutedPlan` 保持不变；
 - 按既定 Position 一致性和资产守恒规则校验剩余 Position；
 - 后续 Deposit、Redeem 和 Rebalance 继续按照已初始化 Vault 的既定规则执行。
@@ -300,7 +304,7 @@ v1 规则如下：
 - `Q1(amount0; tick)` 返回 token1 raw units，`Q0(amount1; tick)` 返回 token0 raw units；canonical Pool、Vault、Oracle、Swap Executor、所有 Adapter 及其绑定 Pool 使用相同的有序 Token 顺序，因此 `Q1` 固定表示 token0 → token1，`Q0` 固定表示 token1 → token0。价格函数必须处理 Token decimals，具体取整规则由使用它的公式定义。
 - 百分比使用 `BPS = 10_000`。
 - 所有乘除使用全精度 `mulDiv` 语义；不足一单位时按照每个公式规定的方向舍入。
-- Shares 铸造和资产输出向下舍入；零 shares 或零实际存款必须回滚。
+- Shares 铸造向下舍入；Redeem 的 Idle 分配和 Adapter 原生 Position 单位按各自公式向下舍入，最终 token 输出使用底层 AMM 实际退出量；零 shares 或零实际存款必须回滚。
 
 
 
@@ -535,11 +539,15 @@ Bootstrap 对 Registry 执行最终封存：
 
 V2 Adapter 必须固定绑定一个 Pair、Vault 以及从该 Pair 读取的 token0/token1，并提供：
 
+- `snapshot()` 固定返回 `venue = UNISWAP_V2` 和 `adapter = address(this)`；
 - 按 Pair 当前储备计算的 LP Token 权益作为 `PositionSnapshot` 的 `principal0/principal1` 和 `amount0/amount1`；`claimableFee0/1` 为零；
+- `PositionSnapshot.liquidity` 等于 Adapter 实际持有的 LP Token 余额，使用 LP Token raw units；`positionId`、`tickLower` 和 `tickUpper` 固定为零；
 - 按 Pair 当前储备比例增加流动性；
 - 读取 LP Token 余额和 Pair 总供应量；
 - 完整退出和按比例部分退出；
 - 将未使用输入退回 Vault；
+
+V2 的 `liquidity` 是 Adapter 原生 Position 单位，只用于 V2 内部计算和通用的零/非零有效性判断，不得与 V3 liquidity 比较或换算。Adapter 的 LP Token 余额为零时，`venue` 和 `adapter` 仍返回固定绑定值，其余 Position 数量字段均为零。
 
 V2 Position 覆盖全价格区间，不存在 Tick Range，但仍承担 AMM 价格风险、无常损失、流动性风险和 MEV 风险。
 
@@ -567,7 +575,9 @@ IDLE 不是 Adapter，而是 `activeVenue == IDLE` 的资产位置状态。IDLE 
 - 不产生 LP 手续费；
 - 不执行外部 LP Position；
 - 仍承担 token 本身、ERC-20、Vault 和角色权限风险；
-- 新 Deposit 关闭，双资产 Redeem 保持开放。
+- 新 Deposit 关闭，双资产 Redeem 保持开放；
+- 需要向策略逻辑传入 `currentPosition` 时，由 Vault 在内存中构造规范空快照：`venue = IDLE`、`adapter = address(0)`，`principal0/principal1`、`claimableFee0/1`、`amount0/amount1`、`liquidity`、`positionId` 和 `tickLower/tickUpper` 全部为零；
+- Bootstrap 在尚无 Active Position 时使用同一个规范空快照。
 
 
 
@@ -1019,7 +1029,7 @@ Bootstrap 成功后不可替换：
 - Deposit 使用存款前 NAV 和总供应量。
 - Shares 铸造向下舍入，零 shares 回滚。
 - 已有持有人在 Deposit 前产生的收益不被新用户分享。
-- Redeem 使用销毁前供应量，并按同一比例退出 Idle 与 Position；shares 必须从显式 `owner` 销毁，非 owner 调用者必须消费 `allowance(owner, msg.sender)`。
+- Redeem 使用销毁前供应量，分别按同一 `x/S` 比例分配退出前 Idle 和退出 Adapter 原生 Position 单位，并以 Adapter 实际返回 Vault 的资产增量形成最终输出；shares 必须从显式 `owner` 销毁，非 owner 调用者必须消费 `allowance(owner, msg.sender)`。
 
 
 
@@ -1078,8 +1088,8 @@ Bootstrap 成功后不可替换：
 会计与用户操作：
 
 - Deposit 只提取实际数量，按存款前 NAV 铸造 shares；当前 Active Adapter 禁用时在任何 Adapter 外部调用和 Token 转入前以 `AdapterDisabled()` 回滚，其他健康门控同样有效；
-- Redeem 在暂停和 Oracle 异常时仍能按比例返回双资产；持有人自赎不消费 allowance，授权 spender 代赎从显式 `owner` 销毁 shares、消费足额 allowance，并可将双资产发送给指定 `receiver`；余额或 allowance 不足时整笔回滚；
-- V2 费用只通过 LP Token 储备权益计价；
+- Redeem 在暂停和 Oracle 异常时仍能按 §5.4 分别计算退出前 Idle 份额与 Adapter 原生 Position 单位份额，以 Adapter 实际返回 Vault 的资产增量形成最终双资产输出，并仅以该最终实际输出校验 `minAmount0Out/minAmount1Out`；持有人自赎不消费 allowance，授权 spender 代赎从显式 `owner` 销毁 shares、消费足额 allowance，并可将双资产发送给指定 `receiver`；余额或 allowance 不足及任一最终最小输出不满足时整笔回滚；
+- V2 费用只通过 LP Token 储备权益计价；V2 `PositionSnapshot` 和 IDLE/Bootstrap 的策略 `currentPosition` 分别按 §7.2、§7.4 规范化，并覆盖有效与空 Position 测试；
 - V3 principal 与 claimable fees 不重复计价；
 - Donation 自动进入总资产，且不存在支持资产 rescue/sweep 权限。
 

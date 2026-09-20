@@ -85,8 +85,19 @@ tickLower/tickUpper 参与 planHash 的计算，但 HIGH 与 EXTREME 两档计�
 ## 问题 8
 §5.4 的公式说用户赎回 x 份 shares 能拿到 ⌊f×T⌋（按总资产一次取整）。但实际执行是分两步走的：先从仓位退出一部分（Adapter 自己取整），再从闲置资产分配一部分（Vault 再取整），两步各自向下取整后加起来。两次取整的结果可能比一次取整少 1~2 个最小单位。文档没说公式值是「保证拿到」还是「理论上限」，前端按公式预估的输出可能比用户实际到手的高一点，恰好卡在 minAmountOut 边界时就会出现预期外行为。
 
+修改：
+- 在 `PRODUCT_SPEC.md` §5.4 删除 `floor(x × T0/T1 / S)` 作为规范输出的表述，改为分别按销毁前 `x/S` 向下取整分配 Adapter 退出前的 Idle，以及 Adapter 原生 Position 单位；最终输出使用底层 AMM 实际退出并转入 Vault 的资产数量与 Idle 份额之和。
+- 明确 V2 Adapter 以销毁前 Supply 为分母向下取整 LP Token，V3 Adapter 以同一口径向下取整 liquidity；原生 Position 单位为零时返回 `0/0`，不得向上取整或完整退出。
+- Vault 必须验证 Adapter 返回值等于调用造成的 token0/token1 实际余额增量，不一致时以 `AdapterBalanceMismatch()` 回滚；`minAmount0Out/minAmount1Out` 只与合并后的最终实际输出比较，任何不满足均原子回滚。
+- 同步产品不变量与验收项、架构 Redeem 时序、舍入规则、Adapter 测试和 Deposit/Redeem 集成测试；`SWAP_REBALANE_MATH.md` 不涉及 Redeem，无需修改。
+
 ## 问题 9
 PositionSnapshot 有四个字段是 V3 专属概念：liquidity、positionId、tickLower、tickUpper。V2 Adapter 返回快照时这四个字段填什么没有定义——liquidity 填 LP Token 余额还是 0？positionId 是不是恒 0？tick 边界用 0/0 还是 MIN/MAX？V2 是常态 ACTIVE Venue，策略逻辑和测试断言都需要这些字段有固定值。同族问题还有一处：IDLE 状态下调用 _getPlan 时，currentPosition 参数该传什么样的快照（全零值？）同样没有定义。
+
+修改：
+- 在 `PRODUCT_SPEC.md` §7.2 将 V2 `PositionSnapshot` 规范化：`liquidity` 使用 Adapter 实际 LP Token 余额的 raw units，`positionId` 与两个 Tick 固定为零；快照继续返回固定 V2 Venue 和 Adapter，空 Position 的其余数量字段归零。
+- 在 `PRODUCT_SPEC.md` §7.4 明确 IDLE 及尚无 Active Position 的 Bootstrap 向策略传入由 Vault 内存构造的规范空快照，禁止调用 Adapter、复用退出前快照或以 `lastExecutedPlan` 代替当前 Position。
+- `ARCHITECTURE.md` 仅保留 `PositionSnapshot` ABI 并引用产品规则，同步 `_getPlan()` 输入约束、不变量和测试矩阵；Swap 数学继续只消费规范快照的资产金额，无需重复字段填充规则。
 
 ## 问题 10
 Oracle 不健康时 snapshot() 不回滚、照常返回结构体，只是 healthy = false。但结构体里其他字段这时候填什么，没有定义：observe() 中途失败时，twapTick 是填 0 还是填已经算出来的那部分？特别是 deviationBps——如果填 0，任何不先检查 healthy 就直接消费这个字段的链下逻辑，会把 0 偏离误读成「市场平静、LOW 状态」。协议内部有强制门控不会用错，但测试断言和前端展示需要确定的填充规则。
