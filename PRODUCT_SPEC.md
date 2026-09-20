@@ -263,6 +263,7 @@ $$
 
 执行规则：
 
+- 首先检查 `initialized == true`；未初始化时以 `NotInitialized()` 回滚
 - 校验 `owner` 的 shares 余额；`msg.sender != owner` 时按 ERC-20 规则消费 `allowance(owner, msg.sender)`；
 - 非 IDLE 时调取 `syncFees()` 同步 Active Adapter 的费用并按条件发出 `FeesSynchronized`；IDLE 时不得调用 Adapter。随后读取销毁前总供应量和资产快照；
 - 在 Adapter 退出前固定 `I0/I1`，按上述公式计算 `idleOut0/idleOut1`；不得把 Adapter 退出后转入 Vault 的资产再次计入 Idle 分配；
@@ -672,7 +673,16 @@ Oracle 每次生成快照时检查动态 Pool 数据。以下任一情况发生�
 - `observe()`、`slot0()` 或其他必要的 Pool 数据读取失败；
 - `P_twap == 0`，或任一必需报价为零。
 
-不健康快照中的 Tick、价格和 `deviationBps` 不得用于任何协议计算或计划生成；实现必须捕获可处理的外部读取失败并避免让上述动态失败穿透为 revert。Observation 历史是否充足不作为 Oracle 构造成功的必要条件；Bootstrap 仍必须通过本节定义的 Oracle 健康门控，链下发布预检由 [DEPLOYMENT.md](DEPLOYMENT.md) 单独定义。
+`OracleSnapshot.healthy` 是快照有效性的判别字段。不健康时，`snapshot()` 不回滚，并返回以下规范快照：
+
+- `spotTick`、`twapTick`、`shortTwapTick`、三个价格字段和 `deviationBps` 全部为零；
+- `twapWindowSeconds`、`shortTwapWindowSeconds` 返回 Oracle 的 immutable 配置；
+- `observedAt` 等于本次调用的 `block.timestamp`；
+- `healthy = false`。
+
+上述零值仅为无效占位值，不表示实际 Tick、价格或偏离为零。链上及链下消费者必须先检查 `healthy`；不健康时不得生成或展示 Market Regime。
+
+无论失败发生在读取还是计算阶段，Oracle 都不得返回部分结果或上一次健康结果。实现必须捕获可处理的外部读取失败，避免动态失败穿透为 revert。Observation 历史是否充足不影响 Oracle 构造；Bootstrap 仍须通过本节的健康门控，链下发布预检见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 **Vault 运行时门控**
 
@@ -857,7 +867,8 @@ Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_asse
 
 前置条件：
 
-- `expectedPlanHash` 和 `deadline` 不为空
+- `initialized == true`；未初始化时以 `NotInitialized()` 回滚
+- `expectedPlanHash` 和 `deadline` 不为空；
 - `plainRebalancePaused == false`；
 - Oracle Healthy；
 - `deadline` 尚未到期；
@@ -928,7 +939,7 @@ Swap 方向、`previewDeposit`、 `amountIn`、`protocolMinOut`、`keeperMinAmou
 
 ### 9.5 Emergency Exit to IDLE
 
-Guardian/Manager 可在不依赖价格估值的情况下触发幂等紧急退出 `emergencyExitToIdle()`。该入口不检查 `minRebalanceCooldown`，紧急撤仓不会被计划性 Rebalance 的时间限制阻塞。
+Guardian/Manager 可在不依赖价格估值的情况下触发幂等紧急退出 `emergencyExitToIdle()`。该入口先检查 Guardian/Manager 角色，再检查 `initialized == true`；已授权调用者在未初始化时以 `NotInitialized()` 回滚。该入口不检查 `minRebalanceCooldown`，紧急撤仓不会被计划性 Rebalance 的时间限制阻塞。
 
 当调用前 `activeVenue != IDLE` 时：
 
@@ -998,6 +1009,8 @@ Vault 使用 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules` 提供�
 | `setAdapterEnabled(venue, true)` | Manager | 仅初始化后 | 恢复在该 Adapter 建立或增加 liquidity，并发出 `AdapterStatusChanged` |
 | `emergencyExitToIdle` | Guardian/Manager | 仅初始化后 | 不依赖 Oracle 健康且不执行 Swap；非 IDLE 时清空 Position、进入 IDLE 并递增版本，已在 IDLE 时不调用 Adapter；两个分支均将三个暂停位设为 true |
 | `previewRebalance` | 任意地址 | 仅初始化后 | 返回基于当前状态的只读候选计划和部署评估；非 IDLE 目标 Adapter 禁用时以 `AdapterDisabled()` 回滚，不修改任何状态 |
+
+表中所有“仅初始化后”入口在 `initialized == false` 时统一以 `NotInitialized()` 回滚。`deposit`、`redeem`、`rebalance` 和 `previewRebalance` 必须首先执行生命周期检查；`rebalanceWithSwap`、`setPauseState`、`setAdapterEnabled` 和 `emergencyExitToIdle` 必须先执行角色授权，再立即执行生命周期检查。
 
 ### 10.4 依赖封存
 
@@ -1074,6 +1087,7 @@ Bootstrap 成功后不可替换：
 - `token0/token1`、canonical Pool、canonical Oracle、Swap Executor、所有 Adapter 和绑定 Pool 的有序 Token 一致性已在部署或绑定时验证；`swapExecutor.swapPool() == canonicalOracle.canonicalPool()`；标准 Uniswap 顺序要求 `token0 < token1`；
 - 两个支持 Token 的链上 decimals 均不超过 18，且由 Token metadata 派生并缓存，Token metadata 读取失败或超限时相关部署回滚；
 - Bootstrap 只能成功一次；
+- `deposit`、`redeem`、`rebalance`、`rebalanceWithSwap`、`setPauseState`、`setAdapterEnabled`、`emergencyExitToIdle` 和 `previewRebalance` 在未初始化时均按 §10.3 的检查优先级以 `NotInitialized()` 回滚；
 - Bootstrap 的最低 NAV、最低部署率、锁定 shares 和回滚语义完整。
 
 治理与权限：
@@ -1101,7 +1115,7 @@ Oracle 与策略：
 - `Q1/Q0` 双向报价、统一有序 Token、decimals 和向上/向下取整经过测试；
 - `deviationBps` 由 Oracle 内部根据 `shortTwapTick` 和 `twapTick` 生成；
 - 未初始化 Preview 以 `NotInitialized()` 回滚；
-- Oracle 不健康时，Preview 和执行入口均以 `OracleUnhealthy()` 回滚，且不生成占位计划；
+- Oracle 不健康时，`snapshot()` 不回滚并按 §8.4 返回规范不健康快照；不同失败阶段均不得泄露部分结果或复用上一次健康结果，链上及链下消费者不得从不健康快照生成 Market Regime；Preview 和执行入口均以 `OracleUnhealthy()` 回滚，且不生成占位计划；
 - Vault 策略逻辑使用 `planVersion == 0` 识别首次分类；之后使用 `lastExecutedPlan.marketRegime` 作为 Hysteresis 历史；
 - `narrowRangeHalfWidthSteps` 和 `wideRangeHalfWidthSteps` 按对应 Pool 的 `tickSpacing` 换算，低费率与高费率 Pool 的 spacing 来源及缓存一致，非法或越界 Range 以 `InvalidTickRange()` 回滚；HIGH/V2 与 EXTREME/IDLE 计划按 §9.1.3 生成规范化 Tick 占位值；
 - `planHash` 的字段规范化与架构文档定义的精确 ABI 编码经过链上、链下复算一致性测试；

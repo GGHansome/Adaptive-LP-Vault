@@ -749,7 +749,8 @@ ControlledSwapExecutor 架构边界：
 error AlreadyInitialized();
 
 /// @notice 要求已初始化状态的入口在 Vault 尚未初始化时被调用。
-/// @dev 适用于 setPauseState、setAdapterEnabled、Emergency Exit 和 previewRebalance；检查必须早于业务状态读取。
+/// @dev 适用于 deposit、redeem、rebalance、rebalanceWithSwap、setPauseState、setAdapterEnabled、emergencyExitToIdle 和 previewRebalance。
+/// @dev 无角色入口首先执行本检查；角色门控入口先校验角色，再立即执行本检查。
 error NotInitialized();
 
 /// @notice Guardian 尝试把任一暂停位从 true 改为 false。
@@ -1116,6 +1117,7 @@ sequenceDiagram
     participant Adapter
 
     Caller->>Vault: redeem(shares, min0, min1, receiver, owner)
+    Vault->>Vault: require initialized before shares, allowance, and other business checks
     Vault->>Vault: verify owner balance and allowance(owner, Caller) when Caller != owner
     alt activeVenue != IDLE
         Vault->>Adapter: syncFees() and snapshot()
@@ -1145,6 +1147,7 @@ sequenceDiagram
     participant NewAdapter
 
     Caller->>Vault: rebalance(expectedPlanHash, deadline)
+    Vault->>Vault: require initialized before parameters and other business checks
     Vault->>Oracle: snapshot()
     Vault->>Vault: generate current PositionPlan
     Vault->>Vault: require target Adapter enter enabled if targetVenue is non-IDLE
@@ -1174,6 +1177,7 @@ sequenceDiagram
     participant NewAdapter
 
     Keeper->>Vault: rebalanceWithSwap(expectedPlanHash, expectedDirection, amountIn, keeperMinAmountOut, deadline)
+    Vault->>Vault: validate Keeper/Manager role, then require initialized before business checks
     Vault->>Oracle: snapshot()
     Vault->>Vault: generate current PositionPlan
     Vault->>Vault: require target Adapter enter enabled
@@ -1208,6 +1212,7 @@ sequenceDiagram
     participant Adapter
 
     Guardian->>Vault: emergencyExitToIdle()
+    Vault->>Vault: validate Guardian/Manager role, then require initialized before business checks
     Vault->>Vault: bypass minRebalanceCooldown
     alt activeVenue != IDLE
         Vault->>Adapter: syncFees()
@@ -1315,8 +1320,8 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 
 | 测试层                 | 必测场景                                                                                                                                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AdaptiveLPVault` 单元测试 | Vault 会计、原始资产快照、Oracle 快照编排、内部 `pure` 的 `_getPlan()` 独立输入测试及 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.4 的 IDLE/Bootstrap 规范空快照、Hysteresis、按 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9.1.3 生成规范化 Tick 字段和 Range、部署评估、`requiresSwap`、`direction`、`PositionPlanHash` 精确 ABI 编码与链下复算、角色、暂停、Registry 和核心状态边界 |
-| Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足和必要 Pool 读取失败返回 `healthy == false` 且 `snapshot()` 不回滚、Pool 当前零流动性、Pool 绑定、Pool 有序 Token 与地址升序、Token metadata 读取和 decimals 上限、`Q1/Q0` 双向报价、向上/向下取整、三个规范化价格字段、`observedAt`、Short TWAP/TWAP 偏离 |
+| `AdaptiveLPVault` 单元测试 | Vault 会计、原始资产快照、Oracle 快照编排、内部 `pure` 的 `_getPlan()` 独立输入测试及 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.4 的 IDLE/Bootstrap 规范空快照、Hysteresis、按 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9.1.3 生成规范化 Tick 字段和 Range、部署评估、`requiresSwap`、`direction`、`PositionPlanHash` 精确 ABI 编码与链下复算、八个仅初始化后入口的 `NotInitialized()` 覆盖及无角色入口先检查生命周期、角色门控入口先授权再检查生命周期的错误优先级、角色、暂停、Registry 和核心状态边界 |
+| Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足和必要 Pool 读取失败时 `snapshot()` 不回滚并按 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §8.4 返回规范不健康快照、早期与晚期失败均不泄露部分结果或复用上一次健康结果、`isHealthy()` 与 `snapshot().healthy` 判定一致、故障恢复后返回完整健康快照、Pool 当前零流动性、Pool 绑定、Pool 有序 Token 与地址升序、Token metadata 读取和 decimals 上限、`Q1/Q0` 双向报价、向上/向下取整、三个规范化价格字段、`observedAt`、Short TWAP/TWAP 偏离 |
 | V2 Adapter 测试       | [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.2 的 `PositionSnapshot` 规范化、储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、按销毁前 Supply 向下取整 LP Token 的部分退出、零 LP 单位返回 `0/0`、返回值与 Vault 实际余额增量一致、有序 Token 绑定 |
 | V3 Adapter 测试       | principal、tokens owed、fee growth 增量、领取后重读、principal 比例与手续费隔离、`amount0Max/amount1Max` 与实际 `used0/used1`、immutable binding getters、Pool 有序 Token、`tickSpacing`、Range、按销毁前 Supply 向下取整 liquidity 的部分退出、零 liquidity 单位返回 `0/0`、返回值与 Vault 实际余额增量一致、旧 NFT 清理 |
 | Adapter Registry 测试 | `configureAdapter(venue, adapter)` 的 Vault/Adapter/Pool 有序 Token 一致性、错误资产对与反向顺序回滚、其他 immutable 绑定校验、`tickSpacing` 缓存、初始化前重复配置、Bootstrap 后绑定和缓存冻结、仅 `enabled` 可变、Pool/Fee Tier 不重复存储 |

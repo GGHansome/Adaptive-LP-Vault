@@ -102,10 +102,29 @@ PositionSnapshot 有四个字段是 V3 专属概念：liquidity、positionId、t
 ## 问题 10
 Oracle 不健康时 snapshot() 不回滚、照常返回结构体，只是 healthy = false。但结构体里其他字段这时候填什么，没有定义：observe() 中途失败时，twapTick 是填 0 还是填已经算出来的那部分？特别是 deviationBps——如果填 0，任何不先检查 healthy 就直接消费这个字段的链下逻辑，会把 0 偏离误读成「市场平静、LOW 状态」。协议内部有强制门控不会用错，但测试断言和前端展示需要确定的填充规则。
 
+修改：
+- 在 `PRODUCT_SPEC.md` §8.4 将 `healthy` 定义为快照有效性判别字段；不健康时三个 Tick、三个价格和 `deviationBps` 固定归零，两个窗口字段保留 immutable 配置，`observedAt` 使用本次调用的 `block.timestamp`。
+- 明确不健康零值仅为无效占位值，禁止返回任意阶段的部分结果或上一次健康结果；链上及链下消费者必须先检查 `healthy`，不健康时不得生成或展示 Market Regime。
+- 在 `ARCHITECTURE.md` 固定全量局部计算成功后再一次性提交健康字段的实现边界，并要求 `isHealthy()` 与 `snapshot().healthy` 使用相同判定语义；同步 Oracle 单元测试矩阵。
+- `SWAP_REBALANE_MATH.md` 只消费已通过健康门控的迁移快照，无需修改。
+
 ## 问题 11
 SPEC §10.3 说 deposit、redeem、rebalance、rebalanceWithSwap 都是「仅初始化后」可用。但 NotInitialized 错误的注释里列的适用场景只有四个入口（setPauseState、setAdapterEnabled、Emergency Exit、previewRebalance），漏了这四个。实现者在未初始化时调用这四个入口，该回滚什么错误就没有依据，可能各自选别的错误名，违反错误契约「名称固定」的要求。
+
+修改：
+- 在 `PRODUCT_SPEC.md` §5.4、§9.3 和 §10.3 补齐统一生命周期门控：无角色入口首先检查 `initialized`；角色门控入口先检查角色，再立即检查 `initialized`；已授权调用者在未初始化时统一以 `NotInitialized()` 回滚。
+- 明确生命周期检查早于调用参数、shares 余额与 allowance、暂停状态、Oracle、资产位置、Adapter/Registry 状态和任何外部调用；未授权账户调用角色门控入口仍使用 `AccessControlUnauthorizedAccount`。
+- 在 `ARCHITECTURE.md` 扩展 `NotInitialized()` 的适用入口，更新 Deposit、Redeem、两类 Rebalance 和 Emergency Exit 时序，并同步八个入口及错误优先级测试。
+- `SWAP_REBALANE_MATH.md` 只定义通过入口门控后的 Swap 计算，无需修改。
 
 ## 问题 12
 未初始化阶段 Manager 角色丢失导致 Vault 永久死壳
 分两种情况。第一种：Default Admin 误把 MANAGER_ROLE 撤销了——这不是死局，Default Admin 还在，随时可以重新授予，只是恢复之前 Vault 没法 Bootstrap。第二种才是真死局：initialDefaultAdmin 本身失效（私钥丢失，或误填了零地址），这时未初始化的 Vault 永远无法 Bootstrap，只能当作部署成本扔掉——好在这个阶段还没有用户资金。另外，Bootstrap 之后如果 Manager 空缺，解暂停、恢复 Adapter 这些治理操作会冻结，但存款、赎回、任何人可调的 rebalance 都还开着，用户有退路。这本质上是运维风险而不是协议缺陷，但文档里连一条部署检查项都没有。
-处理完这些 低风险问题之后你就可以开始开发了
+
+结论：已由此前的权限与部署规范处理，无需继续修改产品、架构或 Swap 数学文档。
+- `PRODUCT_SPEC.md` §10.1 与 `ARCHITECTURE.md` §4.2 已要求 `initialDefaultAdmin` 非零；OpenZeppelin `AccessControlDefaultAdminRules` 的构造流程也会拒绝零地址，因此误填零地址只会使部署回滚，不会产生已部署的死壳 Vault。
+- `DEPLOYMENT.md` 已要求部署前记录并静态检查 `initialDefaultAdmin`、初始 Manager/Guardian/Keeper，随后由 Default Admin 授予角色并逐项查询确认；发送 Bootstrap 前还必须确认调用者持有 Manager 角色，并使用同一调用者和参数完成 `eth_call` 模拟。
+- Default Admin 私钥丢失且同时没有现存 Manager、也没有可接受的待接任管理员时，未初始化实例仍可能因运维失误而废弃；该阶段尚未通过协议接收用户资金，属于剩余密钥管理风险，不是规格行为缺口。
+- 问题 12 标记为已解决；`SWAP_REBALANE_MATH.md` 与角色生命周期无关，无需修改。
+
+处理完这些低风险问题之后你就可以开始开发了。
