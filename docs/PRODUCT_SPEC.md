@@ -485,14 +485,14 @@ Vault 使用 `amount0/amount1` 计入 Position 资产后，不得再次加入 `c
 调用时机：`Deposit`、`Redeem`、`Plain Rebalance`、`Swap Rebalance`、`Emergency Exit` 在形成用于定价或迁移的最终资产快照前，必须按统一会计路径调用当前 Active Adapter 的 `syncFees()`；普通 shares 转账和只读接口无需同步。
 
 
-V3 Adapter 的 `syncFees()` 执行前必须满足前：
+V3 Adapter 的 `syncFees()` 执行前必须满足：
 
 - `activeVenue != IDLE`；`activeVenue == IDLE` 时跳过费用同步，并将本次同步费用视为零；
-- Active Position 存在：V2 Adapter 持有的 LP Token 余额必须大于零；V3 Adapter 的 `positionId` 和 `liquidity` 必须大于零。
+- Active Position 存在：V2 Adapter 持有的 LP Token 余额必须大于零；V3 Adapter 的 `positionId` 必须大于零。
 
 V3 Adapter 的 `syncFees()` 必须按以下顺序执行：
 
-1. 记录 Vault 同步前的 token0/token1 实际余额，并读取同步前的 PositionSnapshot；
+1. 记录 Vault 同步前的 token0/token1 实际余额；
 2. 通过零 liquidity poke 结晶截至当前 Pool 状态的全部 fee growth；
 3. 调用固定 Position Manager，将该 Position 的全部可领取 token0/token1 领取到 Vault；
 4. 重新读取 Vault 的 token0/token1 实际余额和 PositionSnapshot；
@@ -546,7 +546,7 @@ V2 Adapter 必须固定绑定一个 Pair、Vault 以及从该 Pair 读取的 tok
 - 按 Pair 当前储备比例增加流动性；
 - 读取 LP Token 余额和 Pair 总供应量；
 - 完整退出和按比例部分退出；
-- 将未使用输入退回 Vault；
+- 只从 Vault 拉取实际部署所需的 `used0/used1`；相对 `amount0Max/amount1Max` 未使用的数量继续保留在 Vault 作为 Idle。
 
 V2 的 `liquidity` 是 Adapter 原生 Position 单位，只用于 V2 内部计算和通用的零/非零有效性判断，不得与 V3 liquidity 比较或换算。Adapter 的 LP Token 余额为零时，`venue` 和 `adapter` 仍返回固定绑定值，其余 Position 数量字段均为零。
 

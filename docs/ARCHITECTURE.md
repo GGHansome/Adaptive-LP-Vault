@@ -103,6 +103,7 @@ AdaptiveLPVault/
 ├── src/
 │   ├── core/
 │   │   ├── AdaptiveLPVault.sol
+│   │   ├── VaultTypes.sol
 │   │   ├── VaultRoles.sol
 │   │   ├── VaultPause.sol
 │   │   └── AdapterRegistry.sol
@@ -464,11 +465,10 @@ Oracle 在构造时完成 canonical Pool 代码与 Factory 绑定、有序 Token
 | 存储项             | 类型          | 存储方式        | 写入时机       | 约束                                   |
 | --------------- | ----------- | ----------- | ---------- | ------------------------------------ |
 | `vault`         | `address`   | `immutable` | Adapter 构造 | 只有该 Vault 可以调用资产变更方法；部署后不可替换         |
-| `venue`         | `VenueType` | `immutable` | Adapter 构造 | 必须与 Adapter 实现及 Registry 注册 Venue 一致 |
+| `venue`         | `VenueType` | `实现常量或 immutable` | Adapter 构造校验 | 固定-Venue 实现可校验构造输入后由常量 Getter 返回；必须与 Adapter 实现及 Registry 注册 Venue 一致 |
 | `pool`          | `address`   | `immutable` | Adapter 构造 | 固定绑定的 V2 Pair 或 V3 Pool；部署后不可替换      |
 | `token0/token1` | `address`   | `immutable` | Adapter 构造 | 从绑定 Pool 读取的有序 Token；必须与 Vault 固定资产及顺序一致；部署后不可替换          |
-| `feeTier`       | `uint24`    | `immutable` | Adapter 构造 | V3 必须与 Pool Fee Tier 一致；V2 固定为零      |
-| `tickSpacing`   | `int24`     | `immutable` | Adapter 构造 | V3 必须与 Pool `tickSpacing()` 一致；V2 固定为零 |
+
 
 
 V3 Adapter 还保存：
@@ -478,6 +478,8 @@ V3 Adapter 还保存：
 | ----------------- | --------- | ----------- | ----------------- | ----------------------------------------------- |
 | `positionManager` | `address` | `immutable` | Adapter 构造        | 固定的 NonfungiblePositionManager；部署后不可替换          |
 | `positionId`      | `uint256` | `storage`   | 创建 Position 或完整退出 | 无有效 NFT Position 时为零；同一 Adapter 最多一个有效 Position |
+| `feeTier`       | `uint24`    | `immutable` | Adapter 构造 | V3 必须与 Pool Fee Tier 一致；V2 固定为零      |
+| `tickSpacing`   | `int24`     | `immutable` | Adapter 构造 | V3 必须与 Pool `tickSpacing()` 一致；V2 固定为零 |
 
 
 
@@ -707,6 +709,7 @@ Adapter 架构边界：
 - `vault()`、`venue()`、`pool()`、`token0()`、`token1()`、`feeTier()` 和 `tickSpacing()` 返回 Adapter 部署时固定的绑定信息；Adapter 的 `token0/token1` 从绑定 Pool 读取，必须按地址升序且与 Vault 的有序资产完全一致；V2 Adapter 的 `feeTier()` 和 `tickSpacing()` 固定返回零；
 - 所有资产变更方法只接受 Vault 调用；Adapter 不铸造或销毁 shares，也不修改 Vault 的策略状态；
 - `previewDeposit()` 必须只读，并与真实 `deposit()` 使用一致的底层 AMM 计算路径；Deposit 比例使用当前 Position Snapshot 的 `principal0/principal1`，`amount0Max/amount1Max` 是使用上限，返回的 `used0/used1` 是实际使用数量；
+- Vault 在调用 `deposit()` 前只为目标 Adapter 建立本次调用所需的 token0/token1 allowance，并在调用后清零；Adapter 只能从 Vault 拉取不超过 `used0/used1` 的数量，未使用输入继续保留或退回 Vault，不得在 Adapter 中形成未计价余额；
 - Vault 仅可在非 IDLE 目标满足 `isEnterEnabled(targetVenue) == true` 后调用 `previewDeposit()` 或 `deposit()`；用户 Deposit 使用当前 `activeVenue` 作为目标；
 - `snapshot()` 返回完整的 Position 资产快照，费用和本金不得在同一会计路径中重复计价；
 - `withdraw(shares, totalShares)` 的 `totalShares` 必须是本次销毁前 Vault 总供应量。V2 Adapter 以 `floor(LPBalanceBefore × shares / totalShares)` 计算并销毁 LP Token；V3 Adapter 以 `floor(liquidityBefore × shares / totalShares)` 计算并移除 liquidity。原生 Position 单位取整结果为零时必须返回 `0/0`，不得向上取整或改为完整退出；
@@ -764,8 +767,22 @@ error Paused(PauseFlag flag);
 /// @dev 该错误路径不得生成或返回 PositionPlan。
 error OracleUnhealthy();
 
-/// @notice 组件或 Pool 的有序 Token 地址与 Vault 固定的 token0/token1 不一致。
+/// @notice Adapter 部署配置与实现类型不匹配，包括零 Vault/Pool、错误 Venue、V2 配置了 Position Manager 或 V3 缺少 Position Manager。
+error InvalidAdapterConfiguration();
+
+/// @notice PositionPlan 的目标 Venue 与 Adapter 绑定的 Venue 不一致。
+/// @param expected Adapter 绑定的 Venue。
+/// @param actual PositionPlan 请求的 Venue。
+error InvalidPlanVenue(VenueType expected, VenueType actual);
+
+/// @notice Adapter 的部分退出收到无效的销毁前 Vault shares 总供应量，或 shares 大于该供应量。
+error InvalidShareSupply();
+
+/// @notice Adapter 或 Pool 暴露的 Token 地址不是预期资产对。
 error InvalidAssetPair();
+
+/// @notice Pool、Pair、Factory 或 Position Manager 的绑定无效或彼此不一致。
+error InvalidPoolBinding();
 
 /// @notice ControlledSwapExecutor 绑定的 Swap Pool 不是 Vault 的 canonical Pool。
 error InvalidSwapPool();
@@ -858,8 +875,17 @@ error DeploymentRatioTooLow();
 /// @notice 建立目标 Position 前仍存在另一有效 Position。
 error ActivePositionExists();
 
-/// @notice 退出后旧 Position 的 liquidity 或资产状态未完全清空。
+/// @notice 完整退出后旧 Position 的 liquidity 或资产状态未完全清空。
 error PositionNotCleared();
+
+/// @notice V3 手续费归集后仍存在可领取费用。
+error FeeCollectionIncomplete();
+
+/// @notice Position Manager 返回的 Position 标识、所有者或状态不符合 Adapter 绑定。
+error InvalidManagedPosition();
+
+/// @notice 计算出的 V3 liquidity 超过 Position Manager 的 uint128 上限。
+error LiquidityOverflow();
 
 /// @notice 请求的非 IDLE Venue 尚未绑定 Adapter。
 error AdapterNotRegistered();
@@ -870,9 +896,6 @@ error AdapterDisabled();
 
 /// @notice Adapter 或 ControlledSwapExecutor 的资产方法由 Vault 以外的地址调用。
 error NotVaultCaller();
-
-/// @notice 外部回调或资产操作涉及 Vault 不支持的 Token。
-error UnsupportedToken();
 
 /// @notice 非重入保护检测到重入调用。
 error Reentrancy();
@@ -1102,7 +1125,7 @@ sequenceDiagram
     Vault->>Vault: compute deposit amounts and shares from pre-state
     Vault->>Vault: transferFrom only used amounts
     Vault->>Adapter: deposit(used0, used1, lastExecutedPlan)
-    Adapter-->>Vault: unused amounts and liquidity
+    Adapter-->>Vault: actual used amounts and liquidity
     Vault->>Vault: validate idle, position and slippage
     Vault->>Vault: mint shares
     Vault-->>User: Deposit
