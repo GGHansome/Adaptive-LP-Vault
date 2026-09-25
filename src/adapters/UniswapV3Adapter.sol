@@ -66,11 +66,12 @@ contract UniswapV3Adapter is IPositionAdapter, ReentrancyGuard {
     }
 
     /// @notice Deploys an adapter bound to one vault, V3 pool, and position manager.
-    /// @param config Immutable vault, venue, pool, and position-manager configuration.
+    /// @param config Immutable vault, venue, pool, expected-factory, and position-manager configuration.
     constructor(PositionAdapterConfig memory config) {
         if (
-            config.vault == address(0) || config.pool == address(0) || config.positionManager == address(0)
-                || !_isV3Venue(config.venue) || config.pool.code.length == 0 || config.positionManager.code.length == 0
+            config.vault == address(0) || config.pool == address(0) || config.factory == address(0)
+                || config.positionManager == address(0) || !_isV3Venue(config.venue) || config.pool.code.length == 0
+                || config.factory.code.length == 0 || config.positionManager.code.length == 0
         ) {
             revert InvalidAdapterConfiguration();
         }
@@ -124,13 +125,13 @@ contract UniswapV3Adapter is IPositionAdapter, ReentrancyGuard {
             revert InvalidPoolBinding();
         }
 
-        if (poolFactory.code.length == 0 || managerFactory != poolFactory || poolFee == 0) {
+        if (poolFactory != config.factory || managerFactory != config.factory || poolFee == 0) {
             revert InvalidPoolBinding();
         }
         if (poolTickSpacing <= 0) revert InvalidTickSpacing();
 
         address registeredPool;
-        try IUniswapV3Factory(poolFactory).getPool(poolToken0, poolToken1, poolFee) returns (address value) {
+        try IUniswapV3Factory(config.factory).getPool(poolToken0, poolToken1, poolFee) returns (address value) {
             registeredPool = value;
         } catch {
             revert InvalidPoolBinding();

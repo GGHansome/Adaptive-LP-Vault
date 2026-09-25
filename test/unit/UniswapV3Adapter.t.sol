@@ -255,6 +255,7 @@ contract UniswapV3AdapterTest is Test {
             vault: address(this),
             venue: VenueType.UNISWAP_V3_HIGH_FEE,
             pool: address(pool),
+            factory: address(factory),
             positionManager: address(manager)
         });
         adapter = new UniswapV3Adapter(config);
@@ -272,6 +273,37 @@ contract UniswapV3AdapterTest is Test {
             tickUpper: TICK_SPACING,
             version: 1
         });
+    }
+
+    function test_constructorRejectsExpectedFactoryWithoutCode() external {
+        PositionAdapterConfig memory config = PositionAdapterConfig({
+            vault: address(this),
+            venue: VenueType.UNISWAP_V3_HIGH_FEE,
+            pool: address(pool),
+            factory: address(0xBEEF),
+            positionManager: address(manager)
+        });
+
+        vm.expectRevert(IPositionAdapter.InvalidAdapterConfiguration.selector);
+        new UniswapV3Adapter(config);
+    }
+
+    function test_constructorRejectsSelfCertifiedPoolFromUnexpectedFactory() external {
+        MockV3Factory unexpectedFactory = new MockV3Factory();
+        MockV3Pool unexpectedPool =
+            new MockV3Pool(address(unexpectedFactory), address(token0), address(token1), FEE, TICK_SPACING);
+        unexpectedFactory.registerPool(address(token0), address(token1), FEE, address(unexpectedPool));
+        MockV3PositionManager unexpectedManager = new MockV3PositionManager(address(unexpectedFactory));
+        PositionAdapterConfig memory config = PositionAdapterConfig({
+            vault: address(this),
+            venue: VenueType.UNISWAP_V3_HIGH_FEE,
+            pool: address(unexpectedPool),
+            factory: address(factory),
+            positionManager: address(unexpectedManager)
+        });
+
+        vm.expectRevert(IPositionAdapter.InvalidPoolBinding.selector);
+        new UniswapV3Adapter(config);
     }
 
     function test_previewRejectsLiquidityAboveUint128() external {

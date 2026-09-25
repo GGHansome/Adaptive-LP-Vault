@@ -7,11 +7,13 @@ import {VenueType} from "../core/VaultTypes.sol";
 /// @param vault Address of the only vault allowed to mutate adapter assets.
 /// @param venue Venue represented by the adapter.
 /// @param pool Address of the bound Uniswap pool or pair.
+/// @param factory Address of the expected Uniswap factory used to validate the pool or pair.
 /// @param positionManager Address of the V3 position manager, or zero for a V2 adapter.
 struct PositionAdapterConfig {
     address vault;
     VenueType venue;
     address pool;
+    address factory;
     address positionManager;
 }
 

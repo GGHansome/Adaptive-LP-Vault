@@ -34,11 +34,12 @@ contract UniswapV2Adapter is IPositionAdapter, ReentrancyGuard {
     }
 
     /// @notice Deploys an adapter bound to one vault and one validated Uniswap V2 pair.
-    /// @param config Immutable vault, venue, pair, and position-manager configuration.
+    /// @param config Immutable vault, venue, pair, expected-factory, and position-manager configuration.
     constructor(PositionAdapterConfig memory config) {
         if (
-            config.vault == address(0) || config.pool == address(0) || config.venue != VenueType.UNISWAP_V2
-                || config.positionManager != address(0) || config.pool.code.length == 0
+            config.vault == address(0) || config.pool == address(0) || config.factory == address(0)
+                || config.venue != VenueType.UNISWAP_V2 || config.positionManager != address(0)
+                || config.pool.code.length == 0 || config.factory.code.length == 0
         ) {
             revert InvalidAdapterConfiguration();
         }
@@ -71,10 +72,10 @@ contract UniswapV2Adapter is IPositionAdapter, ReentrancyGuard {
         } catch {
             revert InvalidPoolBinding();
         }
-        if (pairFactory.code.length == 0) revert InvalidPoolBinding();
+        if (pairFactory != config.factory) revert InvalidPoolBinding();
 
         address registeredPair;
-        try IUniswapV2Factory(pairFactory).getPair(pairToken0, pairToken1) returns (address value) {
+        try IUniswapV2Factory(config.factory).getPair(pairToken0, pairToken1) returns (address value) {
             registeredPair = value;
         } catch {
             revert InvalidPoolBinding();

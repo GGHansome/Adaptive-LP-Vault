@@ -211,7 +211,7 @@ $$
 
 ## 5. Router 与固定 Swap 方法
 
-v1 的 Router、Token 对、Pool/Fee Tier 和固定 Swap 方法在 `ControlledSwapExecutor` 部署或不可变初始化时配置，并在 Bootstrap 时校验。Bootstrap 后不能由 Keeper/Manager 通过调用参数替换；
+v1 的 Router、Token 对、Pool/Fee Tier 和固定 Swap 方法在 Vault 构造时创建 `ControlledSwapExecutor` 的过程中封存，并在 Bootstrap 时复核。Bootstrap 后不能由 Keeper/Manager 通过调用参数替换；
 
 推荐使用固定的 exact-input、single-hop 方法：
 

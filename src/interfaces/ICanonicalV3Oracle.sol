@@ -8,7 +8,7 @@ interface ICanonicalV3Oracle {
     /// @notice Indicates that the immutable oracle configuration is invalid.
     error InvalidOracleConfiguration();
 
-    /// @notice Indicates that the configured canonical pool is not a valid factory-registered V3 pool.
+    /// @notice Indicates that the configured canonical pool is not registered by the expected V3 factory.
     error InvalidCanonicalPool();
 
     /// @notice Indicates that pool tokens are zero, equal, or not ordered by address.
@@ -22,6 +22,10 @@ interface ICanonicalV3Oracle {
     /// @param token Address of the token with an invalid decimal count.
     /// @param actual Decimal count returned by the token.
     error InvalidTokenDecimals(address token, uint8 actual);
+
+    /// @notice Indicates that a supplied tick is outside the range supported by Uniswap V3.
+    /// @param tick Invalid tick supplied to a quote function.
+    error InvalidTick(int24 tick);
 
     /// @notice Returns one canonical spot and time-weighted observation.
     /// @dev Observation or dynamic-price failures are represented by `healthy == false` rather than bubbled reverts.

@@ -47,7 +47,7 @@
 4. 两个 Token 的 metadata 可读取，`decimals()` 均不超过 18。
 5. Router 支持协议固定的 exact-input、single-hop 方法，并能路由 canonical Pool 的 Fee Tier。
 6. `swapPool` 配置与 canonical Pool 地址完全相同；不得通过仅校验 Token 对相同来替代地址相等。
-7. 每个 Adapter 的计划构造参数与 `ARCHITECTURE.md` 定义的 Vault、Venue、Pool、Token 顺序、Fee Tier、Tick Spacing 和 Position Manager 关系一致。
+7. 每个 Adapter 除 `vault` 外的计划构造参数与 `ARCHITECTURE.md` 定义的 Venue、Pool、Token 顺序、Fee Tier、Tick Spacing 和 Position Manager 关系一致；`vault` 参数在第 5.2 节使用实际已部署 Vault 地址填入。
 8. `initialDefaultAdmin` 非零，Mainnet 的 `initialDefaultAdminDelay` 使用经部署负责人确认的非零值。
 9. 策略阈值、Range 宽度、Dust、Idle、Swap 滑点和迁移损失参数满足全部链上硬边界与字段关系。
 
@@ -109,21 +109,21 @@ Fork 测试必须使用与真实部署相同的外部地址、构造参数和固
 
 主网部署按以下阶段执行；每一阶段的交易和校验结果必须在进入下一阶段前确认。
 
-### 5.1 准备 Vault 地址
+### 5.1 准备 Vault 构造输入
 
-Executor 和 Adapter 使用 immutable `vault` 绑定，而 Vault 使用 immutable `canonicalOracle` 和 `swapExecutor` 绑定。部署脚本必须在部署这些相互绑定的合约前确定预期 Vault 地址，并在 Vault 部署后验证实际地址与预期地址一致。
+`ControlledSwapExecutor` 由 Vault 构造函数创建并绑定，不由部署脚本提前部署。部署前必须确认已部署的 canonical Oracle、 `VaultConfig`、`StrategyConfig` 和访问控制配置；Vault 构造函数从 Oracle 读取 canonical Pool，使用 `address(this)`、`VaultConfig.router` 和 canonical Pool 组装完整 `SwapExecutorConfig`，再创建专属 Executor。
 
-地址可以通过部署账户 nonce 预计算或确定性部署机制获得，但同一次部署必须只采用一种可复算方法，并把 deployer、nonce 或 salt、init code hash 和预期地址写入部署记录。
+Adapter 在 Vault 部署完成后使用实际 Vault 地址部署，不需要通过 deployer nonce 或 salt 预测 Vault 地址。Executor 地址由 Vault 创建交易确定，作为部署结果记录，不作为 Vault 构造输入。
 
 ### 5.2 Deploy
 
 1. 部署 `CanonicalV3Oracle`，固定 canonical Pool 和 Oracle 窗口。
-2. 部署 `ControlledSwapExecutor`，固定预期 Vault、Router 和与 canonical Pool 相同的 `swapPool`。
-3. 部署三个非 IDLE Venue Adapter，固定预期 Vault、Venue、Pool 和所需 Position Manager。
-4. 部署 `AdaptiveLPVault`，固定 Oracle、Executor、策略参数、会计参数和访问控制配置。
-5. 验证 Vault 实际地址等于 Executor 与所有 Adapter 保存的 `vault()`。
+2. 部署 `AdaptiveLPVault`，传入 `VaultConfig`、策略参数、会计参数和访问控制配置；Vault 构造函数组装完整 `SwapExecutorConfig` 并创建专属 `ControlledSwapExecutor`，再将其地址保存为 immutable `swapExecutor`。
+3. 验证 Executor 的 `vault()` 等于实际 Vault 地址、`router()` 等于部署输入 Router、`swapPool()` 等于 canonical Pool，且 Executor 与 Vault 的 `token0/token1` 完全一致。
+4. 使用实际 Vault 地址部署三个非 IDLE Venue Adapter，固定各自的 Venue、Pool 和所需 Position Manager。
+5. 验证所有 Adapter 保存的 `vault()` 等于实际 Vault 地址。
 
-任一步骤出现地址预测、构造参数或链上读取不一致时，停止流程并重新部署整组依赖；不得继续进入角色配置或 Bootstrap。
+任一步骤出现构造参数、子合约创建或链上读取不一致时，停止流程并重新部署受影响的未初始化实例；不得继续进入角色配置或 Bootstrap。
 
 ### 5.3 Grant Roles
 
@@ -166,7 +166,7 @@ Bootstrap 成功后必须生成可复核的部署记录，至少包括：
 
 - 网络、`chainId`、部署区块和全部交易哈希；
 - 源码提交、编译器、EVM、优化器和依赖版本；
-- deployer、实际 Vault 地址及地址预计算依据；
+- deployer、实际 Vault 地址及 Vault 构造交易创建的 Executor 地址；
 - Oracle、Executor、Router、canonical/Swap Pool、三个 Adapter、三个 Venue Pool和 Position Manager 地址；
 - 全部 immutable 配置和策略参数；
 - Default Admin、Manager、Guardian、Keeper 的最终成员；
@@ -192,7 +192,7 @@ Bootstrap 成功后必须生成可复核的部署记录，至少包括：
 以下变化必须同步更新本文档并重新执行对应预检：
 
 - 目标网络、外部 Uniswap 地址、Router 或 Position Manager 改变；
-- 构造参数、immutable 字段、部署顺序或地址预测方式改变；
+- Vault 构造参数、Executor 创建参数、immutable 字段或部署顺序改变；
 - Oracle 窗口、策略硬边界、Swap 方法或滑点公式改变；
 - Adapter 数量、Venue、Pool、Fee Tier 或 Tick Spacing 改变；
 - Bootstrap 参数或角色初始化流程改变；

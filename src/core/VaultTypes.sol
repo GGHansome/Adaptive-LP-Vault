@@ -33,14 +33,18 @@ enum MarketRegime {
 /// @param dustTolerance0 Maximum accepted token0 rounding residue in raw token units.
 /// @param dustTolerance1 Maximum accepted token1 rounding residue in raw token units.
 /// @param canonicalOracle Address of the canonical V3 oracle.
-/// @param swapExecutor Address of the controlled swap executor.
+/// @param router Address of the approved exact-input router used by the vault-created swap executor.
+/// @param uniswapV2Factory Address of the expected Uniswap V2 factory used to validate V2 pairs.
+/// @param uniswapV3Factory Address of the expected Uniswap V3 factory used to validate V3 pools.
 /// @param minimumLockedShares Number of shares permanently minted to the vault during bootstrap.
 /// @param minimumInitialNav Minimum bootstrap net asset value, denominated in raw token1 units.
 struct VaultConfig {
     uint256 dustTolerance0;
     uint256 dustTolerance1;
     address canonicalOracle;
-    address swapExecutor;
+    address router;
+    address uniswapV2Factory;
+    address uniswapV3Factory;
     uint256 minimumLockedShares;
     uint256 minimumInitialNav;
 }

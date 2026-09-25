@@ -5,14 +5,17 @@ import {SwapDirection, SwapPlan} from "../swap/SwapTypes.sol";
 
 /// @notice Defines a vault-only exact-input swap executor bound to one router and canonical pool.
 interface IControlledSwapExecutor {
-    /// @notice Indicates that the executor token pair differs from the vault pair.
+    /// @notice Indicates that one or both pool token addresses are not deployed contracts.
     error InvalidAssetPair();
 
-    /// @notice Indicates that the bound swap pool is not the vault's canonical pool.
+    /// @notice Indicates that the configured swap pool is malformed or not registered by the expected V3 factory.
     error InvalidSwapPool();
 
     /// @notice Indicates that pool tokens are zero, equal, or not ordered by address.
     error InvalidTokenOrder();
+
+    /// @notice Indicates that the configured vault is zero or differs from the executor creator.
+    error InvalidVaultBinding();
 
     /// @notice Indicates that the swap deadline has passed.
     error DeadlineExpired();
@@ -20,17 +23,31 @@ interface IControlledSwapExecutor {
     /// @notice Indicates that the supplied plan does not permit a swap.
     error SwapNotAllowed();
 
-    /// @notice Indicates that execution targeted a router other than the immutable approved router.
+    /// @notice Indicates that the configured router is missing, malformed, or bound to a different factory.
     error RouterNotAllowed();
 
-    /// @notice Indicates that the swap tokens do not match the canonical pair and direction.
-    error TokenNotAllowed();
+    /// @notice Indicates that the executor does not hold enough input tokens for the requested exact-input swap.
+    /// @param token Address of the input token.
+    /// @param required Amount required by the swap plan.
+    /// @param actual Amount held by the executor.
+    error InsufficientExecutorInputBalance(address token, uint256 required, uint256 actual);
 
-    /// @notice Indicates that `amountIn` exceeds the inventory-repair amount permitted by the vault.
-    error SwapAmountExceeded();
+    /// @notice Indicates that an executor token balance differs from the balance required by the swap flow.
+    /// @param token Address of the token whose executor balance is inconsistent.
+    /// @param expected Expected executor balance after the router call.
+    /// @param actual Actual executor balance after the router call.
+    error ExecutorBalanceMismatch(address token, uint256 expected, uint256 actual);
+
+    /// @notice Indicates that the vault's output-token balance decreased during the swap.
+    /// @param token Address of the output token.
+    /// @param beforeBalance Vault balance before the router call.
+    /// @param afterBalance Vault balance after the router call.
+    error VaultOutputBalanceDecreased(address token, uint256 beforeBalance, uint256 afterBalance);
 
     /// @notice Indicates that the actual output is below the effective minimum output.
-    error SwapSlippage();
+    /// @param minimumAmountOut Effective minimum output required by the plan.
+    /// @param actualAmountOut Actual output-token balance increase received by the vault.
+    error SwapSlippage(uint256 minimumAmountOut, uint256 actualAmountOut);
 
     /// @notice Indicates that `executeSwap` was called by an account other than the vault.
     error NotVaultCaller();

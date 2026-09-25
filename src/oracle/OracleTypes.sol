@@ -3,10 +3,12 @@ pragma solidity ^0.8.24;
 
 /// @notice Contains immutable canonical-oracle configuration.
 /// @param canonicalPool Address of the canonical Uniswap V3 pool.
+/// @param factory Address of the expected Uniswap V3 factory used to validate the canonical pool.
 /// @param twapWindowSeconds Long time-weighted-average window in seconds.
 /// @param shortTwapWindowSeconds Short time-weighted-average window in seconds.
 struct OracleConfig {
     address canonicalPool;
+    address factory;
     uint32 twapWindowSeconds;
     uint32 shortTwapWindowSeconds;
 }

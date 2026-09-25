@@ -204,7 +204,11 @@ contract UniswapV2AdapterTest is Test {
 
     function test_constructorRejectsWrongAdapterKind() external {
         PositionAdapterConfig memory config = PositionAdapterConfig({
-            vault: address(this), venue: VenueType.UNISWAP_V3_LOW_FEE, pool: address(pair), positionManager: address(1)
+            vault: address(this),
+            venue: VenueType.UNISWAP_V3_LOW_FEE,
+            pool: address(pair),
+            factory: address(factory),
+            positionManager: address(1)
         });
 
         vm.expectRevert(IPositionAdapter.InvalidAdapterConfiguration.selector);
@@ -224,6 +228,19 @@ contract UniswapV2AdapterTest is Test {
 
         vm.expectRevert(IPositionAdapter.InvalidPoolBinding.selector);
         _deployAdapter(address(this), address(unregisteredPair));
+    }
+
+    function test_constructorRejectsSelfCertifiedPairFromUnexpectedFactory() external {
+        MockV2Factory unexpectedFactory = new MockV2Factory();
+        address unexpectedPair = unexpectedFactory.createPair(address(token0), address(token1));
+
+        vm.expectRevert(IPositionAdapter.InvalidPoolBinding.selector);
+        _deployAdapter(address(this), unexpectedPair);
+    }
+
+    function test_constructorRejectsExpectedFactoryWithoutCode() external {
+        vm.expectRevert(IPositionAdapter.InvalidAdapterConfiguration.selector);
+        _deployAdapterWithFactory(address(this), address(pair), address(0xBEEF));
     }
 
     function test_snapshotIsCanonicalEmptySnapshotWithoutLpTokens() external view {
@@ -452,8 +469,16 @@ contract UniswapV2AdapterTest is Test {
     }
 
     function _deployAdapter(address vault, address pool) internal returns (UniswapV2Adapter deployed) {
-        PositionAdapterConfig memory config =
-            PositionAdapterConfig({vault: vault, venue: VenueType.UNISWAP_V2, pool: pool, positionManager: address(0)});
+        return _deployAdapterWithFactory(vault, pool, address(factory));
+    }
+
+    function _deployAdapterWithFactory(address vault, address pool, address expectedFactory)
+        internal
+        returns (UniswapV2Adapter deployed)
+    {
+        PositionAdapterConfig memory config = PositionAdapterConfig({
+            vault: vault, venue: VenueType.UNISWAP_V2, pool: pool, factory: expectedFactory, positionManager: address(0)
+        });
         deployed = new UniswapV2Adapter(config);
     }
 }

@@ -42,6 +42,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | 普通 Rebalance    | 允许撤出旧仓并使用现有双边资产建仓，不执行 Swap                        | 任意 Router、任意 calldata、调用者指定目标         |
 | Swap Rebalance  | 仅 Keeper/Manager 使用受限的 token0/token1 Swap；成交 Pool 与 canonical Pool 为同一地址 | 通用聚合器、独立成交池、用户自定义路径、无上限 Swap                |
 | 支持 Venue        | Uniswap V2、两个指定 Fee Tier 的 Uniswap V3、IDLE        | 动态新增 DEX 或初始化后替换 Adapter              |
+| 外部 AMM 身份       | 每次部署固定官方 Uniswap V2 Factory 与 V3 Factory；canonical Pool、Swap Pool 和全部 Venue Pool 必须由对应固定 Factory 登记 | 信任 Pool 自报的 Factory、运行时更换 Factory、Uniswap Fork 或其他 DEX |
 | 底层资产处理          | 直接转入的 token0/token1 永久计入 Vault，视为捐赠               | 对支持资产执行 rescue、sweep 或返还              |
 
 
@@ -523,7 +524,7 @@ Donation 直接增加 `I0/I1`，没有对应 `sharesMinted`。因此 Donation �
 `configureAdapter(venue, adapter)` 的调用规则如下：
 
 - 仅 Manager 可在 `initialized == false` 时调用；
-- 调用时必须验证 Adapter 合约代码、Vault、Venue、Pool、Adapter 与 Pool 的 `token0/token1`、Fee Tier 和 `tickSpacing` 的绑定关系；V3 Adapter 的 `tickSpacing` 必须为正且与其 Pool 的实际 `tickSpacing()` 一致，V2 Adapter 的 Fee Tier 和 `tickSpacing` 固定为零；验证失败时以 `InvalidTokenOrder()`、`InvalidTickSpacing()` 或对应绑定错误回滚；
+- 调用时必须验证 Adapter 合约代码、Vault、Venue、Pool、Adapter 与 Pool 的 `token0/token1`、Fee Tier 和 `tickSpacing` 的绑定关系，并验证 Pool 固定 Factory 的登记关系 ；V3 Adapter 的 `tickSpacing` 必须为正且与其 Pool 的实际 `tickSpacing()` 一致，V2 Adapter 的 Fee Tier 和 `tickSpacing` 固定为零；验证失败时以 `InvalidTokenOrder()`、`InvalidTickSpacing()` 或对应绑定错误回滚；
 - 成功后将 Adapter 地址、经过验证的 `tickSpacing` 缓存和 `enabled = true` 写入 `_adapterByVenue`，并发出 `AdapterConfigured`；
 - 该方法不转移资产、不创建 Position，也不改变 shares 或策略状态；
 - 初始化前可重复调用，以修正绑定。
@@ -595,7 +596,7 @@ canonical Oracle 在部署时绑定一个 Uniswap V3 Pool。canonical Pool 是 V
 - Vault 从 canonical Oracle 取得并缓存相同的 `token0/token1` 和 decimals；
 - canonical Pool、Vault、Oracle、ControlledSwapExecutor、所有 Adapter 及其绑定 Pool 的 `token0/token1` 必须完全一致；
 - `ControlledSwapExecutor.swapPool()` 必须与 `canonicalPool` 为同一地址；v1 不允许使用独立成交池；
-- Pool 地址、Factory、Fee Tier 和代码哈希通过初始化检查；
+- canonical Pool 必须满足 §1.2 的外部 AMM 身份边界；Pool 地址、对应固定 V3 Factory 的登记关系、Fee Tier 和代码哈希通过初始化检查；
 - `0 < shortTwapWindowSeconds < twapWindowSeconds`；
 - 对 WETH/USDC，标准 Pool 顺序为 `token0 = USDC`、`token1 = WETH`；前端展示可以使用 WETH/USDC 等用户顺序，但不改变协议内部 Token 顺序。
 
@@ -898,7 +899,7 @@ Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_asse
 
 仅 Keeper/Manager 可以调用：`rebalanceWithSwap(expectedPlanHash, expectedDirection, amountIn, keeperMinAmountOut, deadline)`。
 
-固定的 Swap 基础设施：`ControlledSwapExecutor` 在部署或不可变初始化时固定。Executor 从 `swapPool` 读取并保存 `token0/token1`，且必须与 Vault 和 canonical Pool 完全一致；Vault 在调用 `executeSwap()` 前向该 Executor 转入精确的 `amountIn`；Executor 只在本次调用期间持有输入资产，Router 的输出接收方固定为 Vault，调用者不能覆盖。
+固定的 Swap 基础设施：每个 `AdaptiveLPVault` 在构造时创建并永久绑定自己的 `ControlledSwapExecutor`。Vault 从 canonical Oracle 取得 `canonicalPool`，以 `address(this)`、固定 Router 和该 Pool 构造 Executor；Executor 从 `swapPool` 读取并保存 `token0/token1`，且必须与 Vault 和 canonical Pool 完全一致。Vault 在调用 `executeSwap()` 前向该 Executor 转入精确的 `amountIn`；Executor 只在本次调用期间持有输入资产，Router 的输出接收方固定为 Vault，调用者不能覆盖。
 
 `maxSwapSlippageBps` 是部署时固定的协议滑点上限，任何调用者都不能覆盖。Vault 使用本次迁移开始时捕获的 canonical TWAP 计算协议最低输出 `protocolMinOut`；方向报价和滑点折算均向上取整。Vault 将 `minAmountOut = max(protocolMinOut, keeperMinAmountOut)` 写入本次 `SwapPlan`。
 
@@ -1017,7 +1018,7 @@ Vault 使用 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules` 提供�
 Bootstrap 成功后不可替换：
 
 - canonical Oracle Pool 和 Oracle 合约；
-- Swap Executor、固定 Router、与 canonical Pool 相同的 Swap Pool、Token 对、Pool/Fee Tier 和固定 Swap 方法；
+- Vault 构造时创建并永久绑定的 Swap Executor、固定 Router、与 canonical Pool 相同的 Swap Pool、Token 对、Pool/Fee Tier 和固定 Swap 方法；
 - Adapter 地址、immutable 绑定；
 - shares 的会计语义和赎回规则。
 
@@ -1084,7 +1085,7 @@ Bootstrap 成功后不可替换：
 
 身份与初始化：
 
-- `token0/token1`、canonical Pool、canonical Oracle、Swap Executor、所有 Adapter 和绑定 Pool 的有序 Token 一致性已在部署或绑定时验证；`swapExecutor.swapPool() == canonicalOracle.canonicalPool()`；标准 Uniswap 顺序要求 `token0 < token1`；
+- `token0/token1`、canonical Pool、canonical Oracle、Vault 构造时创建的 Swap Executor、所有 Adapter 和绑定 Pool 的有序 Token 一致性已在部署或绑定时验证；`swapExecutor.vault() == address(vault)` 且 `swapExecutor.swapPool() == canonicalOracle.canonicalPool()`；标准 Uniswap 顺序要求 `token0 < token1`；
 - 两个支持 Token 的链上 decimals 均不超过 18，且由 Token metadata 派生并缓存，Token metadata 读取失败或超限时相关部署回滚；
 - Bootstrap 只能成功一次；
 - `deposit`、`redeem`、`rebalance`、`rebalanceWithSwap`、`setPauseState`、`setAdapterEnabled`、`emergencyExitToIdle` 和 `previewRebalance` 在未初始化时均按 §10.3 的检查优先级以 `NotInitialized()` 回滚；
