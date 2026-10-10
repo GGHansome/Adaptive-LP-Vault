@@ -6,15 +6,25 @@ import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
 import {AdapterRegistry} from "../../src/core/AdapterRegistry.sol";
+import {VaultControl} from "../../src/core/VaultControl.sol";
 import {VaultPause} from "../../src/core/VaultPause.sol";
 import {VaultRoles} from "../../src/core/VaultRoles.sol";
 import {AccessControlConfig, AdapterConfig, PauseFlag, PauseState, VenueType} from "../../src/core/VaultTypes.sol";
 import {IAdapterRegistry} from "../../src/interfaces/IAdapterRegistry.sol";
 import {IPositionAdapter} from "../../src/interfaces/IPositionAdapter.sol";
 import {IVaultPause} from "../../src/interfaces/IVaultPause.sol";
+import {IVaultControl} from "../../src/interfaces/IVaultControl.sol";
 import {IVaultRoles} from "../../src/interfaces/IVaultRoles.sol";
 
 contract MockCoreToken {}
+
+contract MockCoreVaultLifecycle {
+    bool public initialized;
+
+    function setInitialized(bool initialized_) external {
+        initialized = initialized_;
+    }
+}
 
 contract MockCoreFactory {
     mapping(address tokenA => mapping(address tokenB => address pair)) public getPair;
@@ -157,6 +167,10 @@ contract AdapterRegistryHarness is AdapterRegistry {
         return _initialized;
     }
 
+    function _registryVault() internal view override returns (address) {
+        return address(this);
+    }
+
     function _registryToken0() internal view override returns (address) {
         return _TOKEN0;
     }
@@ -200,6 +214,10 @@ contract CombinedCoreHarness is VaultPause, AdapterRegistry {
 
     function _vaultInitialized() internal view override(VaultPause, AdapterRegistry) returns (bool) {
         return _initialized;
+    }
+
+    function _registryVault() internal view override returns (address) {
+        return address(this);
     }
 
     function _registryToken0() internal view override returns (address) {
@@ -325,6 +343,45 @@ contract CoreModulesTest is Test {
         pause.requireNotPaused(PauseFlag.SWAP_REBALANCE);
     }
 
+    function test_controlBindsVaultAndEnforcesVaultOnlyOperationalChecks() external {
+        MockCoreVaultLifecycle lifecycle = new MockCoreVaultLifecycle();
+        VaultControl control =
+            new VaultControl(address(lifecycle), accessConfig, token0, token1, address(v2Factory), address(v3Factory));
+        control.grantRole(control.MANAGER_ROLE(), MANAGER);
+        control.grantRole(control.GUARDIAN_ROLE(), GUARDIAN);
+
+        assertEq(control.vault(), address(lifecycle));
+        assertEq(control.token0(), token0);
+        assertEq(control.token1(), token1);
+        assertTrue(control.supportsInterface(type(IVaultControl).interfaceId));
+
+        (MockCoreAdapter v2, MockCoreAdapter low, MockCoreAdapter high) = _deployAdaptersForVault(address(lifecycle));
+        vm.startPrank(MANAGER);
+        control.configureAdapter(VenueType.UNISWAP_V2, address(v2));
+        control.configureAdapter(VenueType.UNISWAP_V3_LOW_FEE, address(low));
+        control.configureAdapter(VenueType.UNISWAP_V3_HIGH_FEE, address(high));
+        vm.stopPrank();
+
+        vm.expectRevert(IVaultControl.NotVaultCaller.selector);
+        control.validateConfiguredAdapters();
+
+        vm.prank(address(lifecycle));
+        control.validateConfiguredAdapters();
+        vm.prank(address(lifecycle));
+        (int24 lowSpacing, int24 highSpacing) = control.adapterTickSpacings();
+        assertEq(lowSpacing, 10);
+        assertEq(highSpacing, 60);
+
+        lifecycle.setInitialized(true);
+        vm.prank(MANAGER);
+        control.setPauseState(
+            PauseState({depositPaused: true, plainRebalancePaused: false, swapRebalancePaused: false})
+        );
+        vm.expectRevert(abi.encodeWithSelector(IVaultPause.Paused.selector, PauseFlag.DEPOSIT));
+        vm.prank(address(lifecycle));
+        control.requireDepositEnabled(VenueType.UNISWAP_V3_LOW_FEE);
+    }
+
     function test_registryConfiguresAndFreezesValidatedBindings() external {
         AdapterRegistryHarness registry = _newRegistry();
         (MockCoreAdapter v2, MockCoreAdapter low, MockCoreAdapter high) = _deployAdapters(registry);
@@ -439,6 +496,13 @@ contract CoreModulesTest is Test {
         private
         returns (MockCoreAdapter v2, MockCoreAdapter low, MockCoreAdapter high)
     {
+        return _deployAdaptersForVault(address(registry));
+    }
+
+    function _deployAdaptersForVault(address vault_)
+        private
+        returns (MockCoreAdapter v2, MockCoreAdapter low, MockCoreAdapter high)
+    {
         MockCoreV2Pool v2Pool = new MockCoreV2Pool(address(v2Factory), token0, token1);
         MockCoreV3Pool lowPool = new MockCoreV3Pool(address(v3Factory), token0, token1, 500, 10);
         MockCoreV3Pool highPool = new MockCoreV3Pool(address(v3Factory), token0, token1, 3000, 60);
@@ -446,12 +510,8 @@ contract CoreModulesTest is Test {
         v3Factory.registerPool(token0, token1, 500, address(lowPool));
         v3Factory.registerPool(token0, token1, 3000, address(highPool));
 
-        v2 = new MockCoreAdapter(address(registry), VenueType.UNISWAP_V2, address(v2Pool), token0, token1, 0, 0);
-        low = new MockCoreAdapter(
-            address(registry), VenueType.UNISWAP_V3_LOW_FEE, address(lowPool), token0, token1, 500, 10
-        );
-        high = new MockCoreAdapter(
-            address(registry), VenueType.UNISWAP_V3_HIGH_FEE, address(highPool), token0, token1, 3000, 60
-        );
+        v2 = new MockCoreAdapter(vault_, VenueType.UNISWAP_V2, address(v2Pool), token0, token1, 0, 0);
+        low = new MockCoreAdapter(vault_, VenueType.UNISWAP_V3_LOW_FEE, address(lowPool), token0, token1, 500, 10);
+        high = new MockCoreAdapter(vault_, VenueType.UNISWAP_V3_HIGH_FEE, address(highPool), token0, token1, 3000, 60);
     }
 }

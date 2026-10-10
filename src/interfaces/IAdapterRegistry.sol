@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {AdapterConfig, VenueType} from "../core/VaultTypes.sol";
 
-/// @notice Exposes adapter registration and entry-status controls at the vault address.
+/// @notice Exposes adapter registration and entry-status controls at a vault's dedicated control address.
 interface IAdapterRegistry {
     /// @notice Indicates that an initialization-only operation was called after bootstrap.
     error AlreadyInitialized();

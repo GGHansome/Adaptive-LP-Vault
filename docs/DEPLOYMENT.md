@@ -21,9 +21,10 @@
 
 - 目标网络和 `chainId`；
 - 源码提交、Solidity 编译器版本、EVM 目标、优化器配置和依赖版本；
+- `VaultStrategyMath` 和 `VaultComponentFactory` 的发布版本及部署或复用选择；
 - canonical Pool、Uniswap Factory、Router、Position Manager 和三个目标 Venue Pool；
 - `initialDefaultAdmin`、`initialDefaultAdminDelay` 以及 Manager、Guardian、Keeper 的初始成员；
-- `VaultConfig`、`StrategyConfig` 和 Oracle 窗口；
+- Vault 名称、符号、`VaultConfig`、`AccessControlConfig`、`StrategyConfig` 和 Oracle 窗口；
 - Bootstrap 的 `amount0`、`amount1` 和 `receiver`；
 - 流动性预检的 `liquidityTestAmount0`、`liquidityTestAmount1` 和 `deploymentMaxPriceImpactBps`。
 
@@ -50,6 +51,8 @@
 7. 每个 Adapter 除 `vault` 外的计划构造参数与 `ARCHITECTURE.md` 定义的 Venue、Pool、Token 顺序、Fee Tier、Tick Spacing 和 Position Manager 关系一致；`vault` 参数在第 5.2 节使用实际已部署 Vault 地址填入。
 8. `initialDefaultAdmin` 非零，Mainnet 的 `initialDefaultAdminDelay` 使用经部署负责人确认的非零值。
 9. 策略阈值、Range 宽度、Dust、Idle、Swap 滑点和迁移损失参数满足全部链上硬边界与字段关系。
+10. 发布配置下，所有合约的 runtime 不超过 24,576 字节，initcode（含构造参数）不超过 49,152 字节；任一超限时阻断发布。
+11. 复用的 `VaultStrategyMath` 和 `VaultComponentFactory` 必须有代码，且与指定源码和发布编译配置对应的部署产物一致；使用不可升级的固定实现。
 
 任一检查失败时不得继续部署。
 
@@ -57,7 +60,7 @@
 
 ### 4.1 Oracle 可用性预检
 
-在计划发送 Bootstrap 交易的目标状态上调用 Oracle `snapshot()`，要求 `healthy == true`，并记录调用网络、区块和返回结果。该动作是链下发布门禁；`bootstrap()` 仍按 `PRODUCT_SPEC.md` §5.2 在交易内部重新读取并检查 Oracle，不信任本次预检结果。
+在计划发送 Bootstrap 交易的目标状态上调用 Oracle `snapshot()`，要求 `healthy == true`，并记录网络、区块和返回结果。
 
 ### 4.2 双向指定金额报价
 
@@ -98,12 +101,12 @@ quotedAmountOut >= protocolMinOut(liquidityTestAmount)
 - Oracle 长短窗口与双向报价；
 - canonical Pool 与 Swap Pool 地址相等校验；
 - 两个方向的固定 Router Swap；
-- Vault、Executor 和 Adapter 的 Token 顺序与绑定校验；
+- Vault、VaultControl、Executor 和 Adapter 的 Token 顺序与绑定校验；
 - Bootstrap 成功路径和所有失败回滚路径；
 - 至少一个完整 `rebalanceWithSwap` 场景，覆盖旧 Position 退出、Swap、新 Position 建立、部署率、Idle、资产守恒和 NAV 损失校验；
 - Router allowance 清零、Executor 余额恢复基线和 Vault 实际输出余额增量校验。
 
-Fork 测试必须使用与真实部署相同的外部地址、构造参数和固定 Swap 方法。
+Fork 测试必须使用与真实部署相同的发布产物、链接配置、外部地址、构造参数和固定 Swap 方法，并通过 `VaultComponentFactory` 创建 Vault 专属组件。
 
 ## 5. 分阶段部署流程
 
@@ -111,38 +114,37 @@ Fork 测试必须使用与真实部署相同的外部地址、构造参数和固
 
 ### 5.1 准备 Vault 构造输入
 
-`ControlledSwapExecutor` 由 Vault 构造函数创建并绑定，不由部署脚本提前部署。部署前必须确认已部署的 canonical Oracle、 `VaultConfig`、`StrategyConfig` 和访问控制配置；Vault 构造函数从 Oracle 读取 canonical Pool，使用 `address(this)`、`VaultConfig.router` 和 canonical Pool 组装完整 `SwapExecutorConfig`，再创建专属 Executor。
+准备 Vault 名称、符号、`VaultConfig`、`AccessControlConfig` 和 `StrategyConfig`。`VaultConfig.canonicalOracle` 与 `VaultConfig.componentFactory` 在第 5.2 节填入实际部署或验证后的地址。
 
-Adapter 在 Vault 部署完成后使用实际 Vault 地址部署，不需要通过 deployer nonce 或 salt 预测 Vault 地址。Executor 地址由 Vault 创建交易确定，作为部署结果记录，不作为 Vault 构造输入。
+使用 `--libraries src/libraries/VaultStrategyMath.sol:VaultStrategyMath:<已验证库地址>` 链接 Vault；编译、部署和源码验证使用同一映射。发送部署交易前确认所有链接引用均已解析且地址正确。
 
 ### 5.2 Deploy
 
-1. 部署 `CanonicalV3Oracle`，固定 canonical Pool 和 Oracle 窗口。
-2. 部署 `AdaptiveLPVault`，传入 `VaultConfig`、策略参数、会计参数和访问控制配置；Vault 构造函数组装完整 `SwapExecutorConfig` 并创建专属 `ControlledSwapExecutor`，再将其地址保存为 immutable `swapExecutor`。
-3. 验证 Executor 的 `vault()` 等于实际 Vault 地址、`router()` 等于部署输入 Router、`swapPool()` 等于 canonical Pool，且 Executor 与 Vault 的 `token0/token1` 完全一致。
-4. 使用实际 Vault 地址部署三个非 IDLE Venue Adapter，固定各自的 Venue、Pool 和所需 Position Manager。
-5. 验证所有 Adapter 保存的 `vault()` 等于实际 Vault 地址。
+1. 部署或验证并复用 `VaultStrategyMath` 和 `VaultComponentFactory`，确认与发布产物一致。
+2. 部署 `CanonicalV3Oracle`，固定 canonical Pool 和 Oracle 窗口。
+3. 使用已验证的库地址链接并部署 `AdaptiveLPVault`，传入第 5.1 节的构造输入；构造函数调用组件工厂创建专属 `VaultControl` 和 `ControlledSwapExecutor`。
+4. 读取 Vault 的 `vaultControl`、`swapExecutor`；验证两个组件的 `vault()` 均等于 Vault 地址，Token 顺序一致，Control 的 V2/V3 Factory 绑定正确，Executor 的 Router 与输入一致且 `swapPool()` 等于 canonical Pool。
+5. 结合构造期 immutable 填充值核对链上 Vault runtime 与最终链接产物，并确认库地址正确。
+6. 使用实际 Vault 地址部署三个非 IDLE Venue Adapter，固定各自的 Venue、Pool 和所需 Position Manager，验证所有 Adapter 的 `vault()` 等于 Vault 地址。
 
 任一步骤出现构造参数、子合约创建或链上读取不一致时，停止流程并重新部署受影响的未初始化实例；不得继续进入角色配置或 Bootstrap。
 
 ### 5.3 Grant Roles
 
-由当前 Default Admin 按部署输入授予 Manager、Guardian 和 Keeper 角色，并通过合约公开查询逐项确认预期账户的角色状态。发送 Bootstrap 交易的账户必须已通过查询确认为 Manager。
+由当前 Default Admin 在 `Vault.vaultControl()` 对应的 `VaultControl` 上授予 Manager、Guardian 和 Keeper 角色，并通过 `hasRole()` 逐项确认。发送 Bootstrap 交易的账户必须具有 Manager 角色。
 
 ### 5.4 Configure
 
-Manager 调用 `configureAdapter()`，将三个非 IDLE Venue 分别绑定到部署输入指定的 Adapter。每次配置后必须验证：
+Manager 在同一 `VaultControl` 上调用 `configureAdapter()`，绑定三个非 IDLE Venue。每次配置后在该 Control 上查询并验证：
 
 - `getAdapter(venue)` 返回预期地址；
 - `isEnterEnabled(venue) == true`；
-- 缓存的 `tickSpacing` 与 Adapter 及 Pool 一致；
+- `getConfig(venue).tickSpacing` 与 Adapter 及 Pool 一致；
 - Adapter 的 immutable Vault、Venue、Pool、Token、Fee Tier 和 Position Manager 绑定正确。
 
 初始化前允许重复配置以修正绑定；Bootstrap 后身份字段和 Tick Spacing 缓存冻结。
 
 ### 5.5 发送 Bootstrap 交易前的链下发布门禁
-
-本节全部动作都发生在 `bootstrap()` 交易之外，由部署脚本或部署负责人执行，只用于阻止明显错误的交易进入主网；不会修改 Vault 状态，也不构成协议前置条件的第二份定义。
 
 发送交易前必须：
 
@@ -152,13 +154,13 @@ Manager 调用 `configureAdapter()`，将三个非 IDLE Venue 分别绑定到部
 4. 使用完全相同的调用者、参数和当前链上状态对 `bootstrap(amount0, amount1, receiver)` 执行 `eth_call` 模拟，要求模拟成功；无法可靠复现计划交易上下文时，必须在对应区块的 Mainnet Fork 上模拟；
 5. 将检查区块、读取结果和模拟结果写入部署记录。
 
-任一门禁失败时不得发送 Bootstrap 交易。门禁通过只表示计划交易在检查时点具备发送条件；真实交易仍以执行区块状态和合约内部校验结果为准。
+任一门禁失败时不得发送 Bootstrap 交易。
 
 ### 5.6 Bootstrap 交易与链上强制校验
 
-Manager 发送 `bootstrap(amount0, amount1, receiver)`。`bootstrap()` 必须在交易内部独立执行 `PRODUCT_SPEC.md` §5.2 定义的全部前置检查、执行规则和后置校验，并按 `ARCHITECTURE.md` 的调用时序完成绑定复核；不得读取或信任第 5.5 节的链下检查结果。
+Manager 在 Vault 上调用 `bootstrap(amount0, amount1, receiver)`，链上校验和状态变化遵循 `PRODUCT_SPEC.md` §5.2。
 
-交易成功并达到部署计划要求的确认数后，进入第 6 节部署后验证。交易失败时记录回滚原因，按第 7 节处理；不得将链下模拟成功或已发送交易视为 Bootstrap 成功。
+交易成功并达到要求的确认数后，执行第 6 节部署后验证；失败时记录回滚原因并按第 7 节处理。
 
 ## 6. 部署后验证与证据
 
@@ -166,12 +168,12 @@ Bootstrap 成功后必须生成可复核的部署记录，至少包括：
 
 - 网络、`chainId`、部署区块和全部交易哈希；
 - 源码提交、编译器、EVM、优化器和依赖版本；
-- deployer、实际 Vault 地址及 Vault 构造交易创建的 Executor 地址；
+- `VaultStrategyMath` 地址、部署来源和 runtime 代码哈希，Vault 链接映射、最终 creation/runtime 产物与尺寸检查结果；
+- deployer、Vault、组件工厂、专属 VaultControl 和 Executor 地址，组件工厂的部署来源与代码哈希、组件绑定验证结果；
 - Oracle、Executor、Router、canonical/Swap Pool、三个 Adapter、三个 Venue Pool和 Position Manager 地址；
 - 全部 immutable 配置和策略参数；
-- Default Admin、Manager、Guardian、Keeper 的最终成员；
-- Adapter Registry 绑定和 `enabled` 状态；
-- `initialized`、`activeVenue`、`planVersion`、`lastExecutedPlan`、`lastPositionChangeAt` 和 PauseState；
+- VaultControl 的角色成员、Adapter Registry 绑定、`enabled` 和 `PauseState`；
+- Vault 的 `initialized`、`activeVenue`、`planVersion`、`lastExecutedPlan` 和 `lastPositionChangeAt`；
 - Bootstrap 输入、接收人、初始 shares、锁定 shares 和初始 Position；
 - Oracle 与流动性预检记录；
 - Mainnet Fork 测试区块和测试结果；
@@ -192,7 +194,8 @@ Bootstrap 成功后必须生成可复核的部署记录，至少包括：
 以下变化必须同步更新本文档并重新执行对应预检：
 
 - 目标网络、外部 Uniswap 地址、Router 或 Position Manager 改变；
-- Vault 构造参数、Executor 创建参数、immutable 字段或部署顺序改变；
+- Vault 构造参数、组件工厂、Control/Executor 创建参数、immutable 字段或部署顺序改变；
+- `VaultStrategyMath` 源码、编译配置、链接地址、链接方式或库代码哈希改变；
 - Oracle 窗口、策略硬边界、Swap 方法或滑点公式改变；
 - Adapter 数量、Venue、Pool、Fee Tier 或 Tick Spacing 改变；
 - Bootstrap 参数或角色初始化流程改变；

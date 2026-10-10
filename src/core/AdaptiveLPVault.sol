@@ -6,15 +6,12 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import {AdapterRegistry} from "./AdapterRegistry.sol";
-import {VaultPause} from "./VaultPause.sol";
-import {VaultRoles} from "./VaultRoles.sol";
 import {
     AccessControlConfig,
     AssetSnapshot,
     DeploymentAssessment,
-    MarketRegime,
     PauseFlag,
     PositionPlan,
     StrategyConfig,
@@ -27,20 +24,21 @@ import {IAdapterRegistry} from "../interfaces/IAdapterRegistry.sol";
 import {ICanonicalV3Oracle} from "../interfaces/ICanonicalV3Oracle.sol";
 import {IControlledSwapExecutor} from "../interfaces/IControlledSwapExecutor.sol";
 import {IPositionAdapter} from "../interfaces/IPositionAdapter.sol";
+import {IUniswapV2Factory} from "../interfaces/IUniswapV2External.sol";
 import {IUniswapV3Factory, IUniswapV3Pool} from "../interfaces/IUniswapV3External.sol";
-import {PositionPlanHash} from "../libraries/PositionPlanHash.sol";
+import {IVaultComponentFactory} from "../interfaces/IVaultComponentFactory.sol";
+import {IVaultControl} from "../interfaces/IVaultControl.sol";
+import {VaultStrategyMath} from "../libraries/VaultStrategyMath.sol";
 import {OracleSnapshot} from "../oracle/OracleTypes.sol";
-import {ControlledSwapExecutor} from "../swap/ControlledSwapExecutor.sol";
-import {SwapDirection, SwapExecutorConfig, SwapPlan} from "../swap/SwapTypes.sol";
+import {SwapDirection, SwapPlan} from "../swap/SwapTypes.sol";
 
 /// @title Adaptive LP Vault
 /// @notice Dual-asset ERC-20 share vault that atomically coordinates one active Uniswap position.
-/// @dev The vault deliberately keeps strategy and accounting decisions here while adapters encapsulate AMM mechanics.
-contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
+/// @dev The vault orchestrates strategy inputs and accounting; the linked planner computes plans and adapters handle AMMs.
+contract AdaptiveLPVault is ERC20, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     uint256 private constant BPS = 10_000;
-    int24 private constant MIN_TICK = -887272;
     int24 private constant MAX_TICK = 887272;
 
     /// @notice Indicates that immutable deployment or strategy configuration is invalid.
@@ -59,10 +57,11 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
 
     uint256 public immutable dustTolerance0;
     uint256 public immutable dustTolerance1;
-    address public immutable canonicalOracle;
-    address public immutable uniswapV2Factory;
-    address public immutable uniswapV3Factory;
-    address public immutable swapExecutor;
+    ICanonicalV3Oracle public immutable canonicalOracle;
+    IUniswapV2Factory public immutable uniswapV2Factory;
+    IUniswapV3Factory public immutable uniswapV3Factory;
+    IVaultControl public immutable vaultControl;
+    IControlledSwapExecutor public immutable swapExecutor;
     uint256 public immutable minimumLockedShares;
     uint256 public immutable minimumInitialNav;
 
@@ -86,7 +85,6 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
     uint64 public planVersion;
 
     PositionPlan private _lastExecutedPlan;
-    uint256 private _reentrancyStatus = 1;
 
     struct MigrationState {
         VenueType previousVenue;
@@ -94,17 +92,6 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         int24 oldTickUpper;
         AssetSnapshot beforeAssets;
         uint256 navBefore;
-    }
-
-    struct PlanInputs {
-        OracleSnapshot oracle;
-        PositionSnapshot currentPosition;
-        StrategyConfig strategy;
-        PositionPlan lastPlan;
-        VenueType activeVenue;
-        int24 lowSpacing;
-        int24 highSpacing;
-        uint64 planVersion;
     }
 
     struct AssessmentInputs {
@@ -127,21 +114,14 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         uint8 token1Decimals;
     }
 
-    modifier nonReentrantVault() {
-        if (_reentrancyStatus != 1) revert IAdaptiveLPVault.Reentrancy();
-        _reentrancyStatus = 2;
-        _;
-        _reentrancyStatus = 1;
-    }
-
-    /// @notice Creates a vault, derives its asset identity from the canonical oracle, and creates its private swap executor.
+    /// @notice Creates a vault, derives its assets from the canonical oracle, and requests its dedicated components.
     constructor(
         string memory name_,
         string memory symbol_,
         VaultConfig memory vaultConfig,
         AccessControlConfig memory accessConfig,
         StrategyConfig memory strategyConfig
-    ) ERC20(name_, symbol_) VaultRoles(accessConfig) {
+    ) ERC20(name_, symbol_) {
         _validateConstructorConfig(vaultConfig, strategyConfig);
 
         OracleBinding memory binding =
@@ -154,9 +134,9 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
 
         dustTolerance0 = vaultConfig.dustTolerance0;
         dustTolerance1 = vaultConfig.dustTolerance1;
-        canonicalOracle = vaultConfig.canonicalOracle;
-        uniswapV2Factory = vaultConfig.uniswapV2Factory;
-        uniswapV3Factory = vaultConfig.uniswapV3Factory;
+        canonicalOracle = ICanonicalV3Oracle(vaultConfig.canonicalOracle);
+        uniswapV2Factory = IUniswapV2Factory(vaultConfig.uniswapV2Factory);
+        uniswapV3Factory = IUniswapV3Factory(vaultConfig.uniswapV3Factory);
         minimumLockedShares = vaultConfig.minimumLockedShares;
         minimumInitialNav = vaultConfig.minimumInitialNav;
 
@@ -174,38 +154,35 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         maxSwapSlippageBps = strategyConfig.maxSwapSlippageBps;
         maxMigrationLossBps = strategyConfig.maxMigrationLossBps;
 
-        ControlledSwapExecutor executor = new ControlledSwapExecutor(
-            SwapExecutorConfig({
-                vault: address(this),
-                router: vaultConfig.router,
-                swapPool: binding.pool,
-                factory: vaultConfig.uniswapV3Factory
-            })
-        );
-        if (
-            executor.vault() != address(this) || executor.swapPool() != binding.pool
-                || executor.token0() != binding.token0 || executor.token1() != binding.token1
-        ) revert IAdapterRegistry.InvalidSwapPool();
-        swapExecutor = address(executor);
+        (IVaultControl control, IControlledSwapExecutor executor) = IVaultComponentFactory(vaultConfig.componentFactory)
+            .deployComponents(
+                accessConfig,
+                binding.token0,
+                binding.token1,
+                vaultConfig.uniswapV2Factory,
+                vaultConfig.uniswapV3Factory,
+                binding.pool,
+                vaultConfig.router
+            );
+        _validateComponentBindings(control, executor, binding, vaultConfig);
+        vaultControl = control;
+        swapExecutor = executor;
     }
 
     /// @notice Implements the corresponding `IAdaptiveLPVault` operation.
-    function bootstrap(uint256 amount0, uint256 amount1, address receiver) external nonReentrantVault {
+    function bootstrap(uint256 amount0, uint256 amount1, address receiver) external nonReentrant {
         _checkManager();
-        if (initialized) revert AlreadyInitialized();
+        if (initialized) revert IAdapterRegistry.AlreadyInitialized();
         if (amount0 == 0 || amount1 == 0) revert IAdaptiveLPVault.ZeroAmount();
 
         _validateConfiguredAdapters();
         _validateRangeWidths();
-        _validateExecutorBinding();
         _validateAllPositionsEmpty();
 
         OracleSnapshot memory oracle = _healthyOracleSnapshot();
-        AssetSnapshot memory seedAssets = AssetSnapshot({
-            idle0: amount0, idle1: amount1, position0: 0, position1: 0, total0: amount0, total1: amount1, totalShares: 0
-        });
-        PositionPlan memory plan = _getPlan(oracle, seedAssets, _emptyPosition());
-        DeploymentAssessment memory assessment = _assessDeployment(plan, amount0, amount1, oracle.twapTick);
+        PositionPlan memory plan = VaultStrategyMath.getPlan(_planInputs(oracle, _emptyPosition()));
+        DeploymentAssessment memory assessment =
+            _assessDeployment(_assessmentInputs(plan, amount0, amount1, oracle.twapTick));
         if (assessment.requiresSwap) revert IAdaptiveLPVault.SwapRequired();
 
         uint256 seedNav = _nav(amount0, amount1, oracle.twapTick);
@@ -248,13 +225,11 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
     /// @notice Implements the corresponding `IAdaptiveLPVault` operation.
     function deposit(uint256 amount0Max, uint256 amount1Max, uint256 minSharesOut, address receiver)
         external
-        nonReentrantVault
+        nonReentrant
         returns (uint256 amount0Used, uint256 amount1Used, uint256 sharesMinted)
     {
         _requireInitialized();
-        _requireNotPaused(PauseFlag.DEPOSIT);
-        if (activeVenue == VenueType.IDLE) revert AdapterDisabled();
-        address adapter = _requireEnterEnabled(activeVenue);
+        address adapter = vaultControl.requireDepositEnabled(activeVenue);
 
         OracleSnapshot memory oracle = _healthyOracleSnapshot();
         _synchronizeFees();
@@ -295,7 +270,7 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
     /// @notice Implements the corresponding `IAdaptiveLPVault` operation.
     function redeem(uint256 shares, uint256 minAmount0Out, uint256 minAmount1Out, address receiver, address owner)
         external
-        nonReentrantVault
+        nonReentrant
         returns (uint256 amount0Out, uint256 amount1Out)
     {
         _requireInitialized();
@@ -336,7 +311,7 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
     }
 
     /// @notice Implements the corresponding `IAdaptiveLPVault` operation.
-    function rebalance(bytes32 expectedPlanHash, uint32 deadline) external nonReentrantVault {
+    function rebalance(bytes32 expectedPlanHash, uint32 deadline) external nonReentrant {
         _requireInitialized();
         _requireNotPaused(PauseFlag.PLAIN_REBALANCE);
         _requireDeadline(deadline);
@@ -376,7 +351,7 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         uint256 amountIn,
         uint256 keeperMinAmountOut,
         uint32 deadline
-    ) external nonReentrantVault {
+    ) external nonReentrant {
         _checkManagerOrKeeper();
         _requireInitialized();
         _requireNotPaused(PauseFlag.SWAP_REBALANCE);
@@ -437,7 +412,7 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
     }
 
     /// @notice Implements the corresponding `IAdaptiveLPVault` operation.
-    function emergencyExitToIdle() external nonReentrantVault {
+    function emergencyExitToIdle() external nonReentrant {
         _checkManagerOrGuardian();
         _requireInitialized();
 
@@ -493,29 +468,36 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         return 18;
     }
 
-    /// @inheritdoc VaultRoles
-    function supportsInterface(bytes4 interfaceId) public view override(VaultRoles) returns (bool) {
-        return interfaceId == type(IAdaptiveLPVault).interfaceId || super.supportsInterface(interfaceId);
+    function _checkManager() private view {
+        vaultControl.checkManager(_msgSender());
     }
 
-    function _vaultInitialized() internal view override(AdapterRegistry, VaultPause) returns (bool) {
-        return initialized;
+    function _checkManagerOrGuardian() private view {
+        vaultControl.checkManagerOrGuardian(_msgSender());
     }
 
-    function _registryToken0() internal view override returns (address) {
-        return token0;
+    function _checkManagerOrKeeper() private view {
+        vaultControl.checkManagerOrKeeper(_msgSender());
     }
 
-    function _registryToken1() internal view override returns (address) {
-        return token1;
+    function _requireNotPaused(PauseFlag flag) private view {
+        vaultControl.requireNotPaused(flag);
     }
 
-    function _registryV2Factory() internal view override returns (address) {
-        return uniswapV2Factory;
+    function _validateConfiguredAdapters() private view {
+        vaultControl.validateConfiguredAdapters();
     }
 
-    function _registryV3Factory() internal view override returns (address) {
-        return uniswapV3Factory;
+    function _getAdapterOrRevert(VenueType venue) private view returns (address adapter) {
+        return vaultControl.getAdapterOrRevert(venue);
+    }
+
+    function _requireEnterEnabled(VenueType venue) private view returns (address adapter) {
+        return vaultControl.requireEnterEnabled(venue);
+    }
+
+    function _pauseAll(address caller) private {
+        vaultControl.pauseAll(caller);
     }
 
     function _validateConstructorConfig(VaultConfig memory vaultConfig, StrategyConfig memory strategyConfig)
@@ -524,6 +506,7 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
     {
         if (
             vaultConfig.canonicalOracle == address(0) || vaultConfig.canonicalOracle.code.length == 0
+                || vaultConfig.componentFactory == address(0) || vaultConfig.componentFactory.code.length == 0
                 || vaultConfig.router == address(0) || vaultConfig.router.code.length == 0
                 || vaultConfig.uniswapV2Factory == address(0) || vaultConfig.uniswapV2Factory.code.length == 0
                 || vaultConfig.uniswapV3Factory == address(0) || vaultConfig.uniswapV3Factory.code.length == 0
@@ -543,31 +526,41 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         ) revert InvalidConfiguration();
     }
 
+    function _validateComponentBindings(
+        IVaultControl control,
+        IControlledSwapExecutor executor,
+        OracleBinding memory binding,
+        VaultConfig memory vaultConfig
+    ) private view {
+        if (
+            address(control) == address(0) || address(control).code.length == 0 || control.vault() != address(this)
+                || control.token0() != binding.token0 || control.token1() != binding.token1
+                || control.uniswapV2Factory() != vaultConfig.uniswapV2Factory
+                || control.uniswapV3Factory() != vaultConfig.uniswapV3Factory
+        ) revert InvalidConfiguration();
+
+        if (
+            address(executor) == address(0) || address(executor).code.length == 0 || executor.vault() != address(this)
+                || executor.router() != vaultConfig.router || executor.swapPool() != binding.pool
+                || executor.token0() != binding.token0 || executor.token1() != binding.token1
+        ) revert IAdapterRegistry.InvalidSwapPool();
+    }
+
     function _validateRangeWidths() private view {
-        uint256 lowHalfWidth =
-            uint256(narrowRangeHalfWidthSteps) * uint256(uint24(_adapterTickSpacing(VenueType.UNISWAP_V3_LOW_FEE)));
-        uint256 highHalfWidth =
-            uint256(wideRangeHalfWidthSteps) * uint256(uint24(_adapterTickSpacing(VenueType.UNISWAP_V3_HIGH_FEE)));
+        (int24 lowSpacing, int24 highSpacing) = vaultControl.adapterTickSpacings();
+        uint256 lowHalfWidth = uint256(narrowRangeHalfWidthSteps) * uint256(uint24(lowSpacing));
+        uint256 highHalfWidth = uint256(wideRangeHalfWidthSteps) * uint256(uint24(highSpacing));
         if (lowHalfWidth >= highHalfWidth || highHalfWidth > uint256(uint24(MAX_TICK))) {
             revert IAdaptiveLPVault.InvalidTickRange();
         }
     }
 
-    function _validateExecutorBinding() private view {
-        IControlledSwapExecutor executor = IControlledSwapExecutor(swapExecutor);
-        if (
-            executor.vault() != address(this) || executor.router() == address(0)
-                || executor.swapPool() != ICanonicalV3Oracle(canonicalOracle).canonicalPool()
-                || executor.token0() != token0 || executor.token1() != token1
-        ) revert IAdapterRegistry.InvalidSwapPool();
-    }
-
     function _requireInitialized() private view {
-        if (!initialized) revert NotInitialized();
+        if (!initialized) revert IAdapterRegistry.NotInitialized();
     }
 
     function _healthyOracleSnapshot() private view returns (OracleSnapshot memory oracle) {
-        oracle = ICanonicalV3Oracle(canonicalOracle).snapshot();
+        oracle = canonicalOracle.snapshot();
         if (!oracle.healthy) revert IAdaptiveLPVault.OracleUnhealthy();
     }
 
@@ -630,62 +623,27 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         returns (PositionPlan memory plan, DeploymentAssessment memory assessment)
     {
         (AssetSnapshot memory assets, PositionSnapshot memory current) = _assetAndPositionSnapshot();
-        plan = _getPlan(oracle, assets, current);
-        assessment = _assessDeployment(plan, assets.total0, assets.total1, oracle.twapTick);
+        plan = VaultStrategyMath.getPlan(_planInputs(oracle, current));
+        assessment = _assessDeployment(_assessmentInputs(plan, assets.total0, assets.total1, oracle.twapTick));
     }
 
-    function _getPlan(OracleSnapshot memory oracle, AssetSnapshot memory, PositionSnapshot memory currentPosition)
+    /// @notice Collects trusted chain state for the linked pure position planner.
+    function _planInputs(OracleSnapshot memory oracle, PositionSnapshot memory currentPosition)
         private
         view
-        returns (PositionPlan memory plan)
+        returns (VaultStrategyMath.PlanInputs memory input)
     {
-        PlanInputs memory input = PlanInputs({
+        (int24 lowSpacing, int24 highSpacing) = vaultControl.adapterTickSpacings();
+        input = VaultStrategyMath.PlanInputs({
             oracle: oracle,
             currentPosition: currentPosition,
             strategy: _strategyConfig(),
-            lastPlan: _lastExecutedPlan,
+            lastExecutedRegime: _lastExecutedPlan.marketRegime,
             activeVenue: activeVenue,
-            lowSpacing: _adapterTickSpacing(VenueType.UNISWAP_V3_LOW_FEE),
-            highSpacing: _adapterTickSpacing(VenueType.UNISWAP_V3_HIGH_FEE),
+            lowSpacing: lowSpacing,
+            highSpacing: highSpacing,
             planVersion: planVersion
         });
-        MarketRegime regime =
-            _nextRegime(input.oracle.deviationBps, input.planVersion, input.lastPlan.marketRegime, input.strategy);
-        VenueType targetVenue = _venueForRegime(regime);
-        int24 tickLower;
-        int24 tickUpper;
-        if (_isV3Venue(targetVenue)) {
-            int24 spacing = targetVenue == VenueType.UNISWAP_V3_LOW_FEE ? input.lowSpacing : input.highSpacing;
-            uint24 steps = regime == MarketRegime.LOW_DEVIATION
-                ? input.strategy.narrowRangeHalfWidthSteps
-                : input.strategy.wideRangeHalfWidthSteps;
-            (tickLower, tickUpper) = _targetRange(input.oracle.twapTick, spacing, steps);
-            if (input.activeVenue == targetVenue && input.currentPosition.liquidity != 0) {
-                int256 currentWidth = int256(input.currentPosition.tickUpper) - int256(input.currentPosition.tickLower);
-                int256 targetWidth = int256(tickUpper) - int256(tickLower);
-                bool widthChanged = currentWidth != targetWidth;
-                bool spotOutside = input.oracle.spotTick < input.currentPosition.tickLower
-                    || input.oracle.spotTick >= input.currentPosition.tickUpper;
-                int256 oldCenter = int256(input.currentPosition.tickLower) + currentWidth / 2;
-                int256 newCenter = int256(tickLower) + targetWidth / 2;
-                uint256 delta = uint256(oldCenter >= newCenter ? oldCenter - newCenter : newCenter - oldCenter);
-                uint256 threshold = Math.mulDiv(uint256(currentWidth / 2), input.strategy.minRecenterBps, BPS);
-                if (!widthChanged && !(spotOutside && delta >= threshold)) {
-                    tickLower = input.currentPosition.tickLower;
-                    tickUpper = input.currentPosition.tickUpper;
-                }
-            }
-        }
-        if (input.planVersion == type(uint64).max) revert IAdaptiveLPVault.InvalidTickRange();
-        plan = PositionPlan({
-            planHash: bytes32(0),
-            targetVenue: targetVenue,
-            marketRegime: regime,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            version: input.planVersion + 1
-        });
-        plan.planHash = PositionPlanHash.compute(plan);
     }
 
     function _strategyConfig() private view returns (StrategyConfig memory config) {
@@ -714,7 +672,7 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         address adapter = plan.targetVenue == VenueType.IDLE ? address(0) : _requireEnterEnabled(plan.targetVenue);
         input = AssessmentInputs({
             adapter: adapter,
-            oracle: canonicalOracle,
+            oracle: address(canonicalOracle),
             plan: plan,
             amount0: amount0,
             amount1: amount1,
@@ -723,14 +681,6 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
             maxIdleBps: maxHealthyIdleBps,
             twapTick: twapTick
         });
-    }
-
-    function _assessDeployment(PositionPlan memory plan, uint256 amount0, uint256 amount1, int24 twapTick)
-        private
-        view
-        returns (DeploymentAssessment memory assessment)
-    {
-        (assessment,,,) = _assessDeploymentWithUnused(_assessmentInputs(plan, amount0, amount1, twapTick));
     }
 
     function _hasStateChange(PositionPlan memory plan) private view returns (bool) {
@@ -810,13 +760,13 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         uint256 inputBefore = IERC20(input).balanceOf(address(this));
         uint256 outputBefore = IERC20(output).balanceOf(address(this));
         if (amountIn > inputBefore) revert IAdaptiveLPVault.SwapNotAllowed();
-        uint256 executorInput = IERC20(input).balanceOf(swapExecutor);
-        uint256 executorOutput = IERC20(output).balanceOf(swapExecutor);
-        IERC20(input).safeTransfer(swapExecutor, amountIn);
-        uint256 reported = IControlledSwapExecutor(swapExecutor)
-            .executeSwap(
-                SwapPlan({direction: direction, amountIn: amountIn, minAmountOut: minAmountOut, deadline: deadline})
-            );
+        address executorAddress = address(swapExecutor);
+        uint256 executorInput = IERC20(input).balanceOf(executorAddress);
+        uint256 executorOutput = IERC20(output).balanceOf(executorAddress);
+        IERC20(input).safeTransfer(executorAddress, amountIn);
+        uint256 reported = swapExecutor.executeSwap(
+            SwapPlan({direction: direction, amountIn: amountIn, minAmountOut: minAmountOut, deadline: deadline})
+        );
         uint256 inputAfter = IERC20(input).balanceOf(address(this));
         uint256 outputAfter = IERC20(output).balanceOf(address(this));
         actualAmountOut = outputAfter - outputBefore;
@@ -824,9 +774,9 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
             revert IAdaptiveLPVault.AdapterBalanceMismatch();
         }
         if (
-            IERC20(input).balanceOf(swapExecutor) != executorInput
-                || IERC20(output).balanceOf(swapExecutor) != executorOutput
-                || IERC20(input).allowance(swapExecutor, IControlledSwapExecutor(swapExecutor).router()) != 0
+            IERC20(input).balanceOf(executorAddress) != executorInput
+                || IERC20(output).balanceOf(executorAddress) != executorOutput
+                || IERC20(input).allowance(executorAddress, swapExecutor.router()) != 0
         ) {
             revert IAdaptiveLPVault.AdapterBalanceMismatch();
         }
@@ -838,8 +788,8 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         returns (uint256 protocolMinOut)
     {
         uint256 oracleQuote = direction == SwapDirection.ZERO_FOR_ONE
-            ? ICanonicalV3Oracle(canonicalOracle).quoteToken0InToken1(amountIn, twapTick, true)
-            : ICanonicalV3Oracle(canonicalOracle).quoteToken1InToken0(amountIn, twapTick, true);
+            ? canonicalOracle.quoteToken0InToken1(amountIn, twapTick, true)
+            : canonicalOracle.quoteToken1InToken0(amountIn, twapTick, true);
         protocolMinOut = Math.mulDiv(oracleQuote, BPS - maxSwapSlippageBps, BPS, Math.Rounding.Ceil);
         if (protocolMinOut == 0) revert IAdaptiveLPVault.SwapNotAllowed();
     }
@@ -988,7 +938,7 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
     }
 
     function _nav(uint256 amount0, uint256 amount1, int24 twapTick) private view returns (uint256) {
-        return amount1 + ICanonicalV3Oracle(canonicalOracle).quoteToken0InToken1(amount0, twapTick, false);
+        return amount1 + canonicalOracle.quoteToken0InToken1(amount0, twapTick, false);
     }
 
     function _idleBps(AssetSnapshot memory assets, int24 twapTick) private view returns (uint256) {
@@ -1017,92 +967,32 @@ contract AdaptiveLPVault is ERC20, AdapterRegistry, VaultPause {
         }
     }
 
-    function _nextRegime(uint256 deviation, uint64 version, MarketRegime previous, StrategyConfig memory config)
-        private
-        pure
-        returns (MarketRegime)
-    {
-        if (version == 0) {
-            if (deviation >= config.enterExtremeBps) return MarketRegime.EXTREME_DEVIATION;
-            if (deviation >= config.enterHighBps) return MarketRegime.HIGH_DEVIATION;
-            if (deviation >= config.enterMediumBps) return MarketRegime.MEDIUM_DEVIATION;
-            return MarketRegime.LOW_DEVIATION;
-        }
-        if (previous == MarketRegime.LOW_DEVIATION) {
-            return deviation >= config.enterMediumBps ? MarketRegime.MEDIUM_DEVIATION : previous;
-        }
-        if (previous == MarketRegime.MEDIUM_DEVIATION) {
-            if (deviation <= config.exitMediumBps) return MarketRegime.LOW_DEVIATION;
-            if (deviation >= config.enterHighBps) return MarketRegime.HIGH_DEVIATION;
-            return previous;
-        }
-        if (previous == MarketRegime.HIGH_DEVIATION) {
-            if (deviation <= config.exitHighBps) return MarketRegime.MEDIUM_DEVIATION;
-            if (deviation >= config.enterExtremeBps) return MarketRegime.EXTREME_DEVIATION;
-            return previous;
-        }
-        return deviation <= config.exitExtremeBps ? MarketRegime.HIGH_DEVIATION : previous;
-    }
-
-    function _venueForRegime(MarketRegime regime) private pure returns (VenueType) {
-        if (regime == MarketRegime.LOW_DEVIATION) return VenueType.UNISWAP_V3_LOW_FEE;
-        if (regime == MarketRegime.MEDIUM_DEVIATION) return VenueType.UNISWAP_V3_HIGH_FEE;
-        if (regime == MarketRegime.HIGH_DEVIATION) return VenueType.UNISWAP_V2;
-        return VenueType.IDLE;
-    }
-
-    function _targetRange(int24 twapTick, int24 spacing, uint24 steps)
-        private
-        pure
-        returns (int24 lowerTick, int24 upperTick)
-    {
-        if (spacing <= 0 || steps == 0) revert IAdaptiveLPVault.InvalidTickRange();
-        int256 s = int256(spacing);
-        int256 tick = int256(twapTick);
-        int256 quotient = tick / s;
-        int256 remainder = tick % s;
-        if (remainder < 0) --quotient;
-        int256 lowerCenter = quotient * s;
-        int256 center = (tick - lowerCenter) * 2 <= s ? lowerCenter : lowerCenter + s;
-        int256 halfWidth = int256(uint256(steps)) * s;
-        int256 lower = center - halfWidth;
-        int256 upper = center + halfWidth;
-        if (lower < MIN_TICK || upper > MAX_TICK || lower >= upper || lower > tick || upper < tick) {
-            revert IAdaptiveLPVault.InvalidTickRange();
-        }
-        lowerTick = int24(lower);
-        upperTick = int24(upper);
-    }
-
     function _validateSimulatedDeployment(AssessmentInputs memory input, SwapDirection expectedDirection) private view {
-        (DeploymentAssessment memory assessment, uint256 unused0, uint256 unused1, uint256 totalNav) =
-            _assessDeploymentWithUnused(input);
+        DeploymentAssessment memory assessment = _assessDeployment(input);
         if (assessment.requiresSwap) revert IAdaptiveLPVault.DeploymentRatioTooLow();
         if (assessment.direction != SwapDirection.NONE && assessment.direction != expectedDirection) {
             revert SwapAmountExceeded();
         }
-        if (Math.mulDiv(_nav(unused0, unused1, input.twapTick), BPS, totalNav) > input.maxIdleBps) {
-            revert IAdaptiveLPVault.IdleLimitExceeded();
-        }
     }
 
-    function _assessDeploymentWithUnused(AssessmentInputs memory input)
+    /// @notice Assesses the target deployment using one adapter preview and the supplied TWAP tick.
+    function _assessDeployment(AssessmentInputs memory input)
         private
         view
-        returns (DeploymentAssessment memory assessment, uint256 unused0, uint256 unused1, uint256 totalNav)
+        returns (DeploymentAssessment memory assessment)
     {
         if (input.plan.targetVenue == VenueType.IDLE) {
-            return (DeploymentAssessment(false, SwapDirection.NONE), 0, 0, 0);
+            return DeploymentAssessment(false, SwapDirection.NONE);
         }
         (uint256 used0, uint256 used1) =
             IPositionAdapter(input.adapter).previewDeposit(input.amount0, input.amount1, input.plan);
         if (used0 > input.amount0 || used1 > input.amount1) revert IAdaptiveLPVault.AdapterBalanceMismatch();
-        unused0 = input.amount0 - used0;
-        unused1 = input.amount1 - used1;
+        uint256 unused0 = input.amount0 - used0;
+        uint256 unused1 = input.amount1 - used1;
         bool excess0 = unused0 > input.dust0;
         bool excess1 = unused1 > input.dust1;
         if (excess0 && excess1) revert IAdaptiveLPVault.DeploymentRatioTooLow();
-        totalNav = _nav(input.amount0, input.amount1, input.twapTick);
+        uint256 totalNav = _nav(input.amount0, input.amount1, input.twapTick);
         uint256 deployedNav = _nav(used0, used1, input.twapTick);
         assessment.requiresSwap = totalNav == 0 || Math.mulDiv(deployedNav, BPS, totalNav) < BPS - input.maxIdleBps;
         assessment.direction =

@@ -74,6 +74,9 @@ abstract contract AdapterRegistry is VaultRoles, IAdapterRegistry {
     /// @dev The final vault overrides this hook with its lifecycle storage.
     function _vaultInitialized() internal view virtual returns (bool);
 
+    /// @notice Returns the asset-bearing vault that every adapter must be bound to.
+    function _registryVault() internal view virtual returns (address);
+
     /// @notice Returns the vault's immutable token0 binding.
     function _registryToken0() internal view virtual returns (address);
 
@@ -148,7 +151,7 @@ abstract contract AdapterRegistry is VaultRoles, IAdapterRegistry {
         } catch {
             revert IPositionAdapter.InvalidAdapterConfiguration();
         }
-        if (adapterVault != address(this) || adapterVenue != venue) {
+        if (adapterVault != _registryVault() || adapterVenue != venue) {
             revert IPositionAdapter.InvalidAdapterConfiguration();
         }
 

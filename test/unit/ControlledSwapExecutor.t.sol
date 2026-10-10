@@ -7,8 +7,11 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+import {VaultComponentFactory} from "../../src/core/VaultComponentFactory.sol";
+import {AccessControlConfig} from "../../src/core/VaultTypes.sol";
 import {ControlledSwapExecutor} from "../../src/swap/ControlledSwapExecutor.sol";
 import {IControlledSwapExecutor} from "../../src/interfaces/IControlledSwapExecutor.sol";
+import {IVaultControl} from "../../src/interfaces/IVaultControl.sol";
 import {IUniswapV3SwapRouter} from "../../src/interfaces/IUniswapV3External.sol";
 import {SwapDirection, SwapExecutorConfig, SwapPlan} from "../../src/swap/SwapTypes.sol";
 
@@ -178,9 +181,29 @@ contract ControlledSwapExecutorTest is Test {
         assertEq(executor.feeTier(), FEE);
     }
 
-    function test_constructorRejectsVaultOtherThanCreator() external {
-        vm.expectRevert(IControlledSwapExecutor.InvalidVaultBinding.selector);
-        _deploy(address(0xBEEF), address(router), address(pool));
+    function test_componentFactoryDeploysComponentsBoundToCallingVault() external {
+        VaultComponentFactory componentFactory = new VaultComponentFactory();
+        (IVaultControl control, IControlledSwapExecutor factoryExecutor) = componentFactory.deployComponents(
+            AccessControlConfig({initialDefaultAdminDelay: 2 days, initialDefaultAdmin: address(this)}),
+            address(token0),
+            address(token1),
+            address(factory),
+            address(factory),
+            address(pool),
+            address(router)
+        );
+
+        assertEq(control.vault(), address(this));
+        assertEq(control.token0(), address(token0));
+        assertEq(control.token1(), address(token1));
+        assertEq(factoryExecutor.vault(), address(this));
+        assertEq(factoryExecutor.swapPool(), address(pool));
+        assertEq(factoryExecutor.router(), address(router));
+    }
+
+    function test_constructorAllowsFactoryToBindAnotherVault() external {
+        ControlledSwapExecutor factoryDeployed = _deploy(address(0xBEEF), address(router), address(pool));
+        assertEq(factoryDeployed.vault(), address(0xBEEF));
     }
 
     function test_constructorRejectsZeroVault() external {

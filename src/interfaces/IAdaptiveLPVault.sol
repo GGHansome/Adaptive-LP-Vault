@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IAdapterRegistry} from "./IAdapterRegistry.sol";
-import {IVaultPause} from "./IVaultPause.sol";
-import {IVaultRoles} from "./IVaultRoles.sol";
 import {AssetSnapshot, DeploymentAssessment, MarketRegime, PositionPlan, VenueType} from "../core/VaultTypes.sol";
 import {SwapDirection} from "../swap/SwapTypes.sol";
 
 /// @notice Defines the external business interface of the adaptive dual-asset liquidity vault.
-/// @dev The deployed vault ABI also includes inherited role, pause, and adapter-registry functions.
-interface IAdaptiveLPVault is IVaultRoles, IVaultPause, IAdapterRegistry {
+/// @dev Role, pause, and adapter administration live at the immutable `vaultControl` address.
+interface IAdaptiveLPVault {
     /// @notice Indicates that a value-sensitive operation could not obtain a healthy oracle snapshot.
     error OracleUnhealthy();
 
@@ -86,9 +83,6 @@ interface IAdaptiveLPVault is IVaultRoles, IVaultPause, IAdapterRegistry {
 
     /// @notice Indicates that an exited position still contains liquidity or assets.
     error PositionNotCleared();
-
-    /// @notice Indicates that a protected call attempted to reenter the vault.
-    error Reentrancy();
 
     /// @notice Emitted after bootstrap commits initial assets, shares, position, and lifecycle state.
     /// @param manager Manager account that executed bootstrap.
@@ -186,6 +180,12 @@ interface IAdaptiveLPVault is IVaultRoles, IVaultPause, IAdapterRegistry {
     /// @param amount1 Token1 controlled directly by the vault after the exit.
     event EmergencyExit(address indexed caller, VenueType previousVenue, uint256 amount0, uint256 amount1);
 
+    /// @notice Returns whether bootstrap has completed.
+    function initialized() external view returns (bool);
+
+    /// @notice Returns the dedicated control contract that owns roles, pause state, and adapter configuration.
+    function vaultControl() external view returns (address);
+
     /// @notice Initializes the vault once with seed assets and a first strategy position.
     /// @dev The function validates all component bindings before transferring assets or committing state.
     /// @param amount0 Maximum token0 amount supplied by the manager.
@@ -244,7 +244,7 @@ interface IAdaptiveLPVault is IVaultRoles, IVaultPause, IAdapterRegistry {
 
     /// @notice Returns the strategy plan and deployment assessment produced from current state.
     /// @return plan Current normalized position plan.
-    /// @return assessment Whether and in which direction deployment requires a swap.
+    /// @return assessment Swap requirements and direction derived from excess assets.
     function previewRebalance() external view returns (PositionPlan memory plan, DeploymentAssessment memory assessment);
 
     /// @notice Returns total token0 and token1 assets controlled by the vault and active adapter.

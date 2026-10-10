@@ -33,7 +33,8 @@ enum MarketRegime {
 /// @param dustTolerance0 Maximum accepted token0 rounding residue in raw token units.
 /// @param dustTolerance1 Maximum accepted token1 rounding residue in raw token units.
 /// @param canonicalOracle Address of the canonical V3 oracle.
-/// @param router Address of the approved exact-input router used by the vault-created swap executor.
+/// @param componentFactory Address of the factory that deploys the vault's dedicated control and swap components.
+/// @param router Address of the approved exact-input router used by the factory-created swap executor.
 /// @param uniswapV2Factory Address of the expected Uniswap V2 factory used to validate V2 pairs.
 /// @param uniswapV3Factory Address of the expected Uniswap V3 factory used to validate V3 pools.
 /// @param minimumLockedShares Number of shares permanently minted to the vault during bootstrap.
@@ -42,6 +43,7 @@ struct VaultConfig {
     uint256 dustTolerance0;
     uint256 dustTolerance1;
     address canonicalOracle;
+    address componentFactory;
     address router;
     address uniswapV2Factory;
     address uniswapV3Factory;
@@ -121,9 +123,9 @@ struct PositionPlan {
     uint64 version;
 }
 
-/// @notice Describes whether deployment requires an inventory-balancing swap.
+/// @notice Describes a target deployment's swap requirements.
 /// @param requiresSwap Whether the target adapter cannot deploy the assets without a swap.
-/// @param direction Required swap direction, or `NONE` when no swap is needed.
+/// @param direction Swap direction derived from excess assets, or `NONE` when neither token exceeds dust.
 struct DeploymentAssessment {
     bool requiresSwap;
     SwapDirection direction;

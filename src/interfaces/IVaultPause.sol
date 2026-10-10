@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {PauseFlag, PauseState} from "../core/VaultTypes.sol";
 
-/// @notice Exposes runtime pause controls implemented at the vault address.
+/// @notice Exposes runtime pause controls implemented by a vault's dedicated control contract.
 interface IVaultPause {
     /// @notice Indicates that a guardian attempted to clear at least one active pause flag.
     error GuardianCannotUnpause();

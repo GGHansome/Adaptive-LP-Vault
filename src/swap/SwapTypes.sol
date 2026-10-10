@@ -11,8 +11,8 @@ enum SwapDirection {
     ONE_FOR_ZERO
 }
 
-/// @notice Contains immutable controlled-swap-executor bindings assembled by the creating vault.
-/// @param vault Address of the creating vault and the only account allowed to call the executor.
+/// @notice Contains immutable controlled-swap-executor bindings assigned at deployment.
+/// @param vault Address of the asset-bearing vault and the only account allowed to call the executor.
 /// @param router Address of the approved exact-input router.
 /// @param swapPool Address of the canonical V3 pool used for the swap.
 /// @param factory Address of the expected Uniswap V3 factory used to validate the pool and router.

@@ -11,7 +11,7 @@ import {SwapDirection, SwapExecutorConfig, SwapPlan} from "./SwapTypes.sol";
 
 /// @title Controlled Swap Executor
 /// @notice Executes exact-input, single-hop swaps for one immutable vault through one approved V3 router and pool.
-/// @dev The creating vault transfers the exact input amount to this contract before calling `executeSwap`.
+/// @dev The bound vault transfers the exact input amount to this contract before calling `executeSwap`.
 contract ControlledSwapExecutor is IControlledSwapExecutor, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -24,7 +24,7 @@ contract ControlledSwapExecutor is IControlledSwapExecutor, ReentrancyGuard {
 
     IUniswapV3SwapRouter private immutable _ROUTER;
 
-    /// @notice Restricts swap execution to the immutable creating vault.
+    /// @notice Restricts swap execution to the immutable bound vault.
     modifier onlyVault() {
         _checkVaultCaller();
         _;
@@ -34,10 +34,11 @@ contract ControlledSwapExecutor is IControlledSwapExecutor, ReentrancyGuard {
         if (msg.sender != _VAULT) revert NotVaultCaller();
     }
 
-    /// @notice Creates an executor bound to its creating vault, one V3 router, and one expected-factory pool.
-    /// @param config Immutable executor bindings and expected V3 factory assembled by the creating vault.
+    /// @notice Creates an executor bound to one vault, one V3 router, and one expected-factory pool.
+    /// @dev The vault binding may be assigned by a component factory; only the bound vault can execute swaps.
+    /// @param config Immutable executor bindings and expected V3 factory.
     constructor(SwapExecutorConfig memory config) {
-        if (config.vault == address(0) || config.vault != msg.sender) revert InvalidVaultBinding();
+        if (config.vault == address(0)) revert InvalidVaultBinding();
         if (config.swapPool == address(0) || config.swapPool.code.length == 0) revert InvalidSwapPool();
         if (config.factory == address(0) || config.factory.code.length == 0) revert InvalidSwapPool();
         if (config.router == address(0) || config.router.code.length == 0) revert RouterNotAllowed();

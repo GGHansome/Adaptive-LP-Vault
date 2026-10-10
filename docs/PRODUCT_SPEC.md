@@ -63,7 +63,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 
 ## 2. 参与者与权限
 
-权限由链上角色控制。角色权限不等于资产所有权；任何角色都不能直接取得 Vault 支持资产本金。
+权限由 Vault 固定绑定的专属 `VaultControl` 管理。角色权限不等于资产所有权；任何角色都不能直接取得 Vault 支持资产本金。
 
 
 | 角色                    | 可调用操作                                      | 业务权限                           | 明确禁止                                                             | 暂停影响                                                                           |
@@ -83,6 +83,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | 术语                         | 规范定义                                                                      | 数据来源或计算方式                               | 可变性与禁止混用                                  |
 | -------------------------- | ------------------------------------------------------------------------- | --------------------------------------- | ----------------------------------------- |
 | Vault                      | 持有 Idle 资产、发行 shares 并编排所有模块的核心合约                                         | 合约存储和 Adapter 快照                        | Vault 不实现 V2/V3 内部数学                      |
+| VaultControl               | 专属的角色、暂停和 Adapter Registry 管理合约 | Vault 的固定绑定 | 不执行资产操作，不修改 shares 或策略状态 |
 | token0 / token1            | canonical Uniswap V3 Pool 按地址升序确定的两种底层资产及其唯一协议顺序                              | Oracle 从 canonical Pool 读取并由 Vault 缓存为 immutable 地址和 decimals | `token0 < token1`；Vault、Oracle、Swap Executor、所有 Adapter 及其 Pool 必须使用相同顺序；前端可独立选择展示顺序 |
 | Venue                      | 一个具体的流动性池实例或 IDLE 状态                                                      | `VenueType` 加 Adapter 配置                | Venue 不是抽象的 DEX 名称                        |
 | Adapter                    | 封装某个 Venue 的存取流动性、费用和 Position 数据的受信模块                                    | Registry 中的固定地址                         | 不能决定 shares；`enabled` 只控制建立或增加 liquidity，禁用后现有 Position 仍可计价和退出 |
@@ -112,16 +113,19 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 
 ## 4. 系统行为总览
 
-Vault 的职责是校验、会计和编排；策略逻辑负责生成目标；Oracle 负责产生价格快照；Adapter 负责与具体 AMM 交互；Swap Executor 只负责受限换币。所有 Vault 专属会计和策略逻辑均在 Vault 内部完成。
+Vault 负责资产会计和原子执行；VaultControl 管理角色、暂停与 Adapter 绑定；策略逻辑生成目标；Oracle 产生价格快照；Adapter 与具体 AMM 交互；Swap Executor 执行受限换币。
 
 ```mermaid
 flowchart LR
     User[LP 用户] -->|双资产 Deposit/Redeem| Vault[AdaptiveLPVault]
     Caller[Permissionless Caller] -->|无 Swap Rebalance| Vault
-    DefaultAdmin[Default Admin] -->|角色指派与根角色管理| Vault
-    Manager[Manager] -->|Bootstrap 与全部受控操作| Vault
+    DefaultAdmin[Default Admin] -->|角色指派与根角色管理| Control[VaultControl]
+    Manager[Manager] -->|Bootstrap 与受控资产操作| Vault
+    Manager -->|暂停与 Adapter 配置| Control
     Keeper[Keeper] -->|受控 Swap Rebalance| Vault
-    Guardian[Guardian] -->|暂停或紧急退出| Vault
+    Guardian[Guardian] -->|暂停与禁用 Adapter| Control
+    Guardian -->|紧急退出| Vault
+    Vault -->|权限与运行时控制检查| Control
     Vault --> Oracle[CanonicalV3Oracle]
     Vault --> Swap[ControlledSwapExecutor]
     Vault --> V2[UniswapV2Adapter]
@@ -519,9 +523,9 @@ Donation 直接增加 `I0/I1`，没有对应 `sharesMinted`。因此 Donation �
 
 ### 7.1 AdapterRegistry 配置
 
-`AdapterRegistry` 由 `AdaptiveLPVault` 继承实现，只负责绑定已独立部署的 Adapter；初始化前，将三个非 IDLE Venue 分别绑定到唯一的 Adapter。Adapter 自身在部署时固定保存其 Vault、Venue、Pool 和（V3）Position Manager，并从绑定 Pool 读取 token0/token1、Fee Tier、Tick Spacing`。
+Adapter 绑定由专属 `VaultControl` 管理；初始化前，将三个非 IDLE Venue 分别绑定到唯一的 Adapter。Adapter 自身在部署时固定保存其 Vault、Venue、Pool 和（V3）Position Manager，并从绑定 Pool 读取 token0/token1、Fee Tier、Tick Spacing`。
 
-`configureAdapter(venue, adapter)` 的调用规则如下：
+在 `VaultControl` 上调用 `configureAdapter(venue, adapter)` 的规则如下：
 
 - 仅 Manager 可在 `initialized == false` 时调用；
 - 调用时必须验证 Adapter 合约代码、Vault、Venue、Pool、Adapter 与 Pool 的 `token0/token1`、Fee Tier 和 `tickSpacing` 的绑定关系，并验证 Pool 固定 Factory 的登记关系 ；V3 Adapter 的 `tickSpacing` 必须为正且与其 Pool 的实际 `tickSpacing()` 一致，V2 Adapter 的 Fee Tier 和 `tickSpacing` 固定为零；验证失败时以 `InvalidTokenOrder()`、`InvalidTickSpacing()` 或对应绑定错误回滚；
@@ -695,18 +699,16 @@ Bootstrap、Deposit、Preview、普通 Rebalance 和 `rebalanceWithSwap` 读取�
 
 ### 9.1 Vault 策略输入和输出
 
-Vault 内部的策略逻辑是只读且确定性的计划生成器。输入仅来自：
+Vault 的策略逻辑是只读且确定性的计划生成器。输入仅来自：
 
 - 当前 Oracle Snapshot；
 - 当前 `activeVenue` 和 Position Snapshot；
-- Vault 原始资产数量；
 - `lastExecutedPlan.marketRegime` 作为持久化的 Hysteresis 历史；
 - 当前 `planVersion`；
-- 固定缓存的 `token0Decimals` 和 `token1Decimals`，用于 raw units 的 Token 价值换算；
 - 已配置并验证的低费率 Pool 和高费率 Pool `tickSpacing`；
 - 部署时固定且受硬边界约束的策略参数。
 
-Vault 内部根据当前资产、Position、Oracle 快照、历史 Regime、当前 Venue、固定策略参数和已验证的目标 Pool 配置，确定性生成完整的 `PositionPlan`；其内容包含 `targetVenue`、`marketRegime`、规范化的 `tickLower/tickUpper`、`version` 和 `planHash`。Tick 字段在 V3 计划中表示目标 Range，在非 V3 计划中使用 §9.1.3 定义的固定占位值。
+计划生成器根据 Position、Oracle 快照、历史 Regime、当前 Venue、固定策略参数和已验证的目标 Pool 配置，确定性生成完整的 `PositionPlan`；其内容包含 `targetVenue`、`marketRegime`、规范化的 `tickLower/tickUpper`、`version` 和 `planHash`。Tick 字段在 V3 计划中表示目标 Range，在非 V3 计划中使用 §9.1.3 定义的固定占位值。
 
 - `planHash` 是对所有影响仓位结构且可稳定复算的计划字段计算的哈希；
 - `version` 和 `planHash` 用于执行时的计划身份校验；
@@ -842,7 +844,7 @@ Spot 越界但 TWAP 目标中心尚未移动足够远时，不立即跟随 Spot 
 
 #### 9.2 部署评估 与 `requiresSwap`
 
-Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_assessDeployment(plan, amount0, amount1, twapTick)` 对指定资产执行部署评估。该函数调用目标 Adapter 的 `previewDeposit()` 获取局部 `used0/used1`，再根据统一部署评估公式计算包含 `requiresSwap` 与 `direction` 的 `DeploymentAssessment`。
+Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_assessDeployment(AssessmentInputs memory input)` 对指定资产执行部署评估。该函数调用目标 Adapter 的 `previewDeposit()` 获取局部 `used0/used1`，再根据统一部署评估公式计算仅包含 `requiresSwap` 与 `direction` 的 `DeploymentAssessment`。
 
 生成部署评估规则如下:
 
@@ -899,7 +901,7 @@ Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_asse
 
 仅 Keeper/Manager 可以调用：`rebalanceWithSwap(expectedPlanHash, expectedDirection, amountIn, keeperMinAmountOut, deadline)`。
 
-固定的 Swap 基础设施：每个 `AdaptiveLPVault` 在构造时创建并永久绑定自己的 `ControlledSwapExecutor`。Vault 从 canonical Oracle 取得 `canonicalPool`，以 `address(this)`、固定 Router 和该 Pool 构造 Executor；Executor 从 `swapPool` 读取并保存 `token0/token1`，且必须与 Vault 和 canonical Pool 完全一致。Vault 在调用 `executeSwap()` 前向该 Executor 转入精确的 `amountIn`；Executor 只在本次调用期间持有输入资产，Router 的输出接收方固定为 Vault，调用者不能覆盖。
+固定的 Swap 基础设施：每个 `AdaptiveLPVault` 在构造时通过组件工厂创建并永久绑定自己的 `ControlledSwapExecutor`。Executor 固定绑定该 Vault、Router 和 canonical Pool，从 `swapPool` 读取并保存 `token0/token1`，且必须与 Vault 和 canonical Pool 完全一致。Vault 在调用 `executeSwap()` 前向该 Executor 转入精确的 `amountIn`；Executor 只在本次调用期间持有输入资产，Router 的输出接收方固定为 Vault，调用者不能覆盖。
 
 `maxSwapSlippageBps` 是部署时固定的协议滑点上限，任何调用者都不能覆盖。Vault 使用本次迁移开始时捕获的 canonical TWAP 计算协议最低输出 `protocolMinOut`；方向报价和滑点折算均向上取整。Vault 将 `minAmountOut = max(protocolMinOut, keeperMinAmountOut)` 写入本次 `SwapPlan`。
 
@@ -961,7 +963,7 @@ Guardian/Manager 可在不依赖价格估值的情况下触发幂等紧急退出
 
 ### 10.1 根管理员与业务角色
 
-Vault 使用 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules` 提供根管理员标准流程：
+VaultControl 使用 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules` 提供根管理员标准流程：
 
 | 角色 | 固定标识 | 角色管理员 | 权限范围 | 初始授权 |
 | --- | --- | --- | --- | --- |
@@ -989,6 +991,8 @@ Vault 使用 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules` 提供�
 - 后续恢复必须由 Manager 显式执行。
 
 ### 10.3 运行时控制权限
+
+角色管理、`configureAdapter`、`setPauseState` 和 `setAdapterEnabled` 在 VaultControl 上调用；资产、计划和 Bootstrap 入口在 Vault 上调用。
 
 | 入口 | 调用者 | 可调用阶段 | 资产流向与结果 |
 | --- | --- | --- | --- |
@@ -1018,7 +1022,8 @@ Vault 使用 OpenZeppelin Contracts v5 `AccessControlDefaultAdminRules` 提供�
 Bootstrap 成功后不可替换：
 
 - canonical Oracle Pool 和 Oracle 合约；
-- Vault 构造时创建并永久绑定的 Swap Executor、固定 Router、与 canonical Pool 相同的 Swap Pool、Token 对、Pool/Fee Tier 和固定 Swap 方法；
+- Vault 固定绑定的 VaultControl 及其权限、暂停和 Registry 管理职责；
+- Vault 构造时通过组件工厂创建并永久绑定的 Swap Executor、固定 Router、与 canonical Pool 相同的 Swap Pool、Token 对、Pool/Fee Tier 和固定 Swap 方法；
 - Adapter 地址、immutable 绑定；
 - shares 的会计语义和赎回规则。
 

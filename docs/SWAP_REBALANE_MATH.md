@@ -26,7 +26,7 @@
 
 ## 2. 部署评估与资产偏差
 
-`_assessDeployment(plan, amount0, amount1, twapTick)` 是 Vault 内部只读的编排函数。它调用目标 Adapter 的 `previewDeposit()`，再使用返回的局部 `used0/used1` 计算仅包含 `requiresSwap` 与 `direction` 的部署评估。
+`_assessDeployment(AssessmentInputs memory input)` 是 Vault 内部只读的编排函数。它调用目标 Adapter 的 `previewDeposit()`，再使用返回的局部 `used0/used1` 计算仅包含 `requiresSwap` 与 `direction` 的部署评估。
 
 对于非 IDLE 计划，Vault 必须先验证 `isEnterEnabled(plan.targetVenue) == true`，再调用目标 Adapter 的 `previewDeposit()`；禁用时以 `AdapterDisabled()` 回滚。该运行时门控不改变以下部署率、Swap 方向或舍入公式；IDLE 计划不检查 Adapter 状态，也不调用 Adapter。
 
@@ -78,7 +78,8 @@ $$
 - `unused1 > dustTolerance1` 且 `unused0 <= dustTolerance0` 时，`direction = ONE_FOR_ZERO`；
 - 两边都不超过对应 Dust 时，`direction = NONE`；
 - 两边都明显超过对应 Dust 时，目标计划、Adapter 预览或资产快照不一致，必须回滚；
-- IDLE 计划由 Vault 在调用 Adapter 前短路处理，固定返回 `requiresSwap = false` 和 `direction = NONE`。
+- 非 IDLE 计划的总 NAV 为零时，固定返回 `requiresSwap = true`，避免除零，`direction` 仍按剩余资产与 Dust 派生；
+- IDLE 计划由 Vault 在调用 Adapter 前短路处理，固定返回 `requiresSwap = false` 和 `direction = NONE`，豁免健康部署比例检查。
 
 `dustTolerance0` 和 `dustTolerance1` 分别使用 token0 和 token1 raw units，仅用于整数舍入、最小单位和 AMM 计算造成的可接受微小剩余；该范围内的余额仍属于 Vault。
 
