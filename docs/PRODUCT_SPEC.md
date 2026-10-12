@@ -18,14 +18,14 @@ Adaptive LP Vault 是一个针对固定 `token0/token1` 资产对的双资产流
 
 - 后续 Deposit 按当前 Active Position 的本金比例提供两种资产；
 - 用户获得可转让的 ERC-20 shares；
-- Shares 代表对 Vault 当前全部底层资产的按比例所有权，包括 Idle 余额、Active Position 的本金和已归属手续费。
+- Shares 代表对 Vault 当前已纳入会计的底层资产的按比例所有权，包括 Idle 余额、Active Position 的本金和已归属手续费；非活跃 V2 LP 按 §5.5 在激活时确认。
 
 Vault 根据 canonical Uniswap V3 Pool 产生的链上价格信号，在以下 Venue 中选择一个目标状态：
 
 - Uniswap V2 全价格区间流动性；
 - Uniswap V3 低费率池的窄区间；
 - Uniswap V3 高费率池的宽区间；
-- IDLE，即不持有外部 LP Position。
+- IDLE，即没有活跃策略 LP Position，允许非活跃 V2 保留未确认捐赠 LP。
 
 v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外部数据服务。策略只提供可重复验证的风险状态和目标 Position Plan。
 
@@ -36,7 +36,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | --------------- | ------------------------------------------------- | ------------------------------------- |
 | 资产              | 每个 Vault 永久绑定一对 `token0/token1`；示例为 WETH/USDC     | 动态更换资产对、Fee-on-Transfer、Rebasing 资产   |
 | Shares          | Vault 自己发行 ERC-20 shares；存取款均为双资产                 | 标准单资产 ERC-4626 接口、自动换币存款              |
-| Active Position | 任意时刻最多一个 Adapter 持有有效 LP Position                 | 多 Venue 并行权重、连续组合优化                   |
+| Active Position | 任意时刻最多一个纳入会计的策略主动 LP Position                 | 多 Venue 并行权重、连续组合优化                   |
 | 价格来源            | 部署时固定且不可替换的 canonical Uniswap V3 Pool             | Chainlink、后端价格、调用者传入价格、目标池自报价         |
 | 策略输入            | Oracle 内部计算 `deviationBps`；Vault 策略逻辑只读取 Oracle 快照 | 调用者传入 `DEVIATION`、历史标准差、实现波动率、手续费 APR |
 | 普通 Rebalance    | 允许撤出旧仓并使用现有双边资产建仓，不执行 Swap                        | 任意 Router、任意 calldata、调用者指定目标         |
@@ -106,7 +106,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | Last Executed Plan / `lastExecutedPlan` | 最近一次成功执行的完整策略计划 | Vault 持久化状态 | 非策略 Position 变化后可与当前资产位置不同；其 `marketRegime` 是 Hysteresis 历史 |
 | Hysteresis                 | 状态进入和退出使用不同阈值形成的滞后区间                                                      | 部署固定的策略参数                             | 不能用 Cooldown 替代                           |
 | Cooldown                   | 两类计划性 Rebalance 距最近一次成功 Bootstrap 或计划性 Rebalance 的最小时间间隔                                        | Vault 存储的 `lastPositionChangeAt`              | Emergency Exit 跳过前置检查且不更新计时；失败交易和 IDLE 幂等调用不更新 |
-| Donation                   | 未铸造 shares 而直接转入 Vault 的支持资产                                              | ERC-20 实际余额增加                           | 永久归现有 shares 持有人；v1 不提供救援                 |
+| Donation                   | 未铸造 shares 而无请求转入的资产，包含 Vault 支持 Token 和 Adapter LP 捐赠                                              | ERC-20 实际余额增加                           | 永久归确认时的 shares 持有人；确认时点见 §5.5，v1 不提供救援                 |
 
 
 
@@ -141,8 +141,8 @@ flowchart LR
 
 ### 4.1 单活 Position 规则
 
-- `activeVenue == IDLE` 时，所有 Adapter 的有效 liquidity、LP Token 余额或 NFT Position liquidity 必须为零。
-- `activeVenue != IDLE` 时，只有对应 Adapter 可以有非零有效 Position；其余 Adapter 只能保留零余额或 `dustTolerance0/1` 范围内的余额。
+- `activeVenue == IDLE` 时，不存在纳入会计的 Active Position；非活跃 V2 Adapter 可保留 §5.5 定义的未确认捐赠 LP。
+- `activeVenue != IDLE` 时，只有对应 Adapter 的 Position 纳入会计；非活跃 V3 Adapter 的受管理仓位必须为空，非活跃 V2 捐赠 LP 不构成第二个策略主动仓位，也不阻止 Bootstrap、Deposit、Rebalance 或 Emergency Exit。
 - Rebalance 必须先完成旧 Position 退出，再建立新 Position；整个过程在一笔交易内原子完成。
 
 
@@ -164,8 +164,8 @@ Vault 的状态由生命周期、资产位置和运行时控制三个独立维�
 
 **资产位置**由 `activeVenue` 和 Position 不变量表达：
 
-- `activeVenue == IDLE` 表示所有 Adapter 的有效 liquidity 为零；
-- `activeVenue != IDLE` 表示只有当前 Venue 对应 Adapter 可以持有唯一有效 Position；
+- `activeVenue == IDLE` 表示没有纳入会计的 Active Position，允许非活跃 V2 保留未确认捐赠 LP；
+- `activeVenue != IDLE` 表示只有当前 Venue 对应 Adapter 的 Position 纳入会计；
 - `IDLE` 和 `ACTIVE` 均可与 `OPEN` 组合。
 
 ### 5.2 Bootstrap
@@ -175,6 +175,7 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 前置条件：
 
 - Vault 尚未初始化；
+- 两个 V3 Adapter 的受管理仓位必须为空；已有 V2 LP 按 §5.5 处理，不要求其实际余额为零；
 - `bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓前，重新校验由 canonical Pool 派生并由 canonical Oracle 固化的 token0/token1、Token decimals、canonical Oracle、Swap Executor 和所有 v1 Adapter 的完整 immutable 绑定及 `tickSpacing` 缓存；
 - 验证 `swapExecutor.swapPool() == canonicalOracle.canonicalPool()`；
 - Oracle Healthy；
@@ -192,7 +193,7 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 7. 计划为 `EXTREME_DEVIATION` 时，资产保留在 Vault 并直接进入 IDLE。
 8. 计划为 LOW、MEDIUM 或 HIGH 时，部署评估必须满足 `requiresSwap == false` 和最低部署率，并在同一交易内建立目标 Position 后进入 ACTIVE。
 9. 部署评估的 `requiresSwap == true` 时，以 `SwapRequired()` 回滚；具体策略见第 9 节。
-10. 验证部署率、资产守恒和 Position 唯一性。
+10. 验证部署率、资产守恒和 Position 唯一性；首次激活 V2 时将已确认的捐赠纳入完整资产快照，初始 shares 仍仅由本次 `amount0/amount1` 计算。
 11. 将初始计划写入 `lastExecutedPlan`，将 `planVersion` 写为 `1`，并将 `lastPositionChangeAt` 写为当前 `block.timestamp`。
 12. 将 `initialized` 置为 `true`，并发出 `PositionPlanCommitted` 和 `VaultBootstrapped` 事件，按条件发出 `V3RangeChanged`。
 
@@ -294,6 +295,16 @@ v1 规则如下：
 - Donation 不改变按 Active Position 本金比例计算的 Deposit 数量，但可能提高 `idleBps` 并关闭后续存款；
 - Vault 不提供支持资产 `rescue`、`sweep`、退款或管理员提取接口；
 - 非支持资产不属于 v1 核心流程，不得通过通用转账接口引入资产转移权限。
+
+V2 LP 捐赠采用激活时确认规则：
+
+- V2 非活跃时，其实际 LP 余额暂不纳入 `totalAssets`、NAV、Deposit 定价或 Redeem；这些 LP 不构成第二个策略主动仓位，也不要求主动清理。
+- Bootstrap 或 Rebalance 激活 V2 后，已有 LP 与本次铸造 LP 一并纳入会计，不增发 shares、不提供捐赠者退款或提取权；收益由激活时全部 shares 持有人（包括锁定份额）按比例分享。协议接受激活前新存款者分享收益，激活前已赎回者不分享。
+- V2 活跃时收到 LP 捐赠立即纳入会计；迁出或紧急退出 V2 时，退出全部实际 LP。Active 为 V3 或 IDLE 时，Emergency Exit 不处理非活跃 V2 的未确认 LP。
+- 激活 V2 的建仓路径必须验证实际 LP 余额增量等于 Adapter 返回的本次铸造量。最终部署率、Idle、逐 Token 守恒和（带 Swap 时）迁移净值损失统一使用包含新确认捐赠的完整会计快照；因此捐赠可以抵补最终资产净值减少，但可能被迁移成本消耗。成功事件、查询、后续定价和赎回使用同一完整会计快照。
+- V3 仅管理内部记录的 `_positionId`；外来 NFT 不自动接管、不计价，也没有取回入口。对活跃受管理 NFT 追加 liquidity 的捐赠随该 Position 纳入会计。
+
+该规则保留单活会计与赎回路径，避免因第三方强制转入 LP 阻断操作；非活跃 V2 捐赠的收益归属取决于激活时点，而非捐赠时点。
 
 
 
@@ -510,7 +521,7 @@ V3 Adapter 的 `syncFees()` 必须按以下顺序执行：
 
 ### 6.9 捐赠对会计的影响
 
-Donation 直接增加 `I0/I1`，没有对应 `sharesMinted`。因此 Donation 发生后：
+以下影响针对直接转入 Vault 的 token0/token1；V2 LP 的确认时点和最终检查口径遵循 §5.5。Donation 直接增加 `I0/I1`，没有对应 `sharesMinted`。因此 Donation 发生后：
 
 - `NAV1` 和 `sharePrice1` 可能上升；
 - Donation 不改变按 Active Position 本金比例计算的 Deposit 数量；
@@ -577,8 +588,8 @@ V3 Adapter 的 Position 管理规则如下：
 
 IDLE 不是 Adapter，而是 `activeVenue == IDLE` 的资产位置状态。IDLE 状态下：
 
-- 全部支持资产直接保存在 Vault；
-- 不产生 LP 手续费；
+- 全部已纳入会计的支持资产直接保存在 Vault；非活跃 V2 可保留 §5.5 定义的未确认捐赠 LP；
+- 不产生纳入 Vault 会计的 LP 手续费；
 - 不执行外部 LP Position；
 - 仍承担 token 本身、ERC-20、Vault 和角色权限风险；
 - 新 Deposit 关闭，双资产 Redeem 保持开放；
@@ -890,7 +901,7 @@ Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_asse
 5. 退出旧 Position；
 6. 建立目标 Position 或进入 IDLE；
 7. 归还未使用资产；
-8. 验证资产守恒、Idle 和单活 Position；
+8. 验证资产守恒、Idle 和单活 Position；激活 V2 时使用包含新确认捐赠的完整会计快照，成功事件使用同一完整会计快照；
 9. 将 `planVersion` 更新为执行计划的 `version`；
 10. 将 `lastExecutedPlan` 更新为执行计划，并更新 `lastPositionChangeAt`；
 11. 发出 `PositionPlanCommitted` 和 `RebalanceExecuted` 事件并按条件发出 `V3RangeChanged`。
@@ -928,10 +939,10 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 5. 记录 Vault 的输入/输出 Token 余额和 Executor 的 token0/token1 余额，将精确的 `amountIn` 从 Vault 转入 Executor，再调用 `ControlledSwapExecutor.executeSwap()` 执行固定 exact-input Swap；
 6. 在调用目标 Adapter 前重新读取余额，以 Vault 的输出 Token 实际余额增量作为 `actualAmountOut`，并验证 Vault 的输入 Token 减少量等于 `amountIn`、`actualAmountOut` 等于 Executor 返回值且不低于 `minAmountOut`、Executor 的 token0/token1 余额恢复到转入前基线、Executor 对 Router 的 allowance 为零；该局部校验不使用 `dustTolerance0/1` 放宽；
 7. 使用 Swap 后的实际余额，在目标 Adapter 建立当前计划指定的 Position；
-8. 重新读取最终 Vault 余额和实际 `PositionSnapshot`，复用迁移开始时捕获的同一个 `twapTick` 计算 `finalDeployBps`、`finalIdleBps` 和迁移后 NAV，完成最终迁移校验；全部校验通过后，将 `lastExecutedPlan` 更新为执行计划，并提交 `planVersion` 和 `lastPositionChangeAt`；
+8. 重新读取最终 Vault 余额和实际 `PositionSnapshot`，复用迁移开始时捕获的同一个 `twapTick` 计算 `finalDeployBps`、`finalIdleBps` 和迁移后 NAV，完成最终迁移校验；激活 V2 时使用包含新确认捐赠的完整会计快照。全部校验通过后，将 `lastExecutedPlan` 更新为执行计划，并提交 `planVersion` 和 `lastPositionChangeAt`；
 9. 发出 `PositionPlanCommitted`、`RebalanceExecuted`、`SwapExecuted`和按条件发出 `V3RangeChanged`事件，其中 `SwapExecuted.amountOut = actualAmountOut`。
 
-目标 Adapter 建仓完成后，Vault 必须重新读取实际状态并验证：
+目标 Adapter 建仓完成后，Vault 必须重新读取实际状态并验证（激活 V2 时使用包含新确认捐赠的完整会计快照）：
 
 - `finalDeployBps >= minDeployBps`，其中 `minDeployBps = BPS - maxHealthyIdleBps`；
 - `finalIdleBps <= maxHealthyIdleBps`；
@@ -947,7 +958,7 @@ Guardian/Manager 可在不依赖价格估值的情况下触发幂等紧急退出
 当调用前 `activeVenue != IDLE` 时：
 
 1. 调用当前 Active Adapter 的 `syncFees()`，领取全部可领取手续费并按条件发出 `FeesSynchronized`；
-2. 移除全部 LP liquidity，并验证资产守恒和旧 Position liquidity 为零；
+2. 移除当前 Active Adapter 的全部 LP liquidity，并验证资产守恒和旧 Position liquidity 为零；不处理非活跃 V2 的未确认捐赠 LP；
 3. 设置 `activeVenue = IDLE`；
 4. 将 `planVersion` 递增 1，并保持 `lastExecutedPlan` 和 `lastPositionChangeAt` 不变；该时间戳继续约束后续计划性 Rebalance，历史计划的 `marketRegime` 继续作为 Hysteresis 历史。
 
@@ -957,7 +968,7 @@ Guardian/Manager 可在不依赖价格估值的情况下触发幂等紧急退出
 - 不修改 `activeVenue`、`planVersion`、`lastExecutedPlan` 或 `lastPositionChangeAt`；
 - 不发出 `EmergencyExit`。
 
-两个分支最后都必须把 `depositPaused`、`plainRebalancePaused` 和 `swapRebalancePaused` 设为 true。只有暂停 storage 实际变化时才发出 `PauseStateChanged`；只有调用前 `activeVenue != IDLE` 且全部 Position 成功清空时才发出 `EmergencyExit`。如果调用前已经 IDLE 且三个暂停位均为 true，调用成功但不修改状态，也不发出事件。
+两个分支最后都必须把 `depositPaused`、`plainRebalancePaused` 和 `swapRebalancePaused` 设为 true。只有暂停 storage 实际变化时才发出 `PauseStateChanged`；只有调用前 `activeVenue != IDLE` 且 Active Position 成功清空时才发出 `EmergencyExit`。如果调用前已经 IDLE 且三个暂停位均为 true，调用成功但不修改状态，也不发出事件。
 
 ## 10. 暂停与权限控制
 
@@ -1047,7 +1058,7 @@ Bootstrap 成功后不可替换：
 - Bootstrap 使用初始 TWAP NAV 按一份完整 token1 对应一份完整 share 的名义价格铸造 `grossInitialShares`，锁定份额包含在总铸造量内。
 - Deposit 使用存款前 NAV 和总供应量。
 - Shares 铸造向下舍入，零 shares 回滚。
-- 已有持有人在 Deposit 前产生的收益不被新用户分享。
+- 已有持有人在 Deposit 前已纳入会计的收益不被新用户分享；非活跃 V2 LP 的延迟确认及收益归属遵循 §5.5。
 - Redeem 使用销毁前供应量，分别按同一 `x/S` 比例分配退出前 Idle 和退出 Adapter 原生 Position 单位，并以 Adapter 实际返回 Vault 的资产增量形成最终输出；shares 必须从显式 `owner` 销毁，非 owner 调用者必须消费 `allowance(owner, msg.sender)`。
 
 
@@ -1077,7 +1088,7 @@ Bootstrap 成功后不可替换：
 
 ### 11.5 单活和迁移安全
 
-- 非 IDLE 时最多一个有效 Position。
+- 非 IDLE 时最多一个纳入会计的策略主动 Position；非活跃 V2 未确认 LP 遵循 §5.5。
 - 普通 Rebalance 不执行 Swap。
 - 带 Swap Rebalance 必须受角色、Token、Router、数量、`keeperMinAmountOut` 和 NAV 后置条件共同限制。
 - 禁用 Adapter 的现有 Position 仍参与资产计价并可完整或按比例退出，但不得继续增加 liquidity。
@@ -1111,7 +1122,7 @@ Bootstrap 成功后不可替换：
 - Redeem 在暂停和 Oracle 异常时仍能按 §5.4 分别计算退出前 Idle 份额与 Adapter 原生 Position 单位份额，以 Adapter 实际返回 Vault 的资产增量形成最终双资产输出，并仅以该最终实际输出校验 `minAmount0Out/minAmount1Out`；持有人自赎不消费 allowance，授权 spender 代赎从显式 `owner` 销毁 shares、消费足额 allowance，并可将双资产发送给指定 `receiver`；余额或 allowance 不足及任一最终最小输出不满足时整笔回滚；
 - V2 费用只通过 LP Token 储备权益计价；V2 `PositionSnapshot` 和 IDLE/Bootstrap 的策略 `currentPosition` 分别按 §7.2、§7.4 规范化，并覆盖有效与空 Position 测试；
 - V3 principal 与 claimable fees 不重复计价；
-- Donation 自动进入总资产，且不存在支持资产 rescue/sweep 权限。
+- Donation 按 §5.5 的确认时点进入总资产，且不存在支持资产 rescue/sweep 权限；覆盖非活跃 V2 不阻断操作、激活时收益分配及新确认捐赠参与最终部署率、资产守恒和迁移净值检查。
 
 Oracle 与策略：
 

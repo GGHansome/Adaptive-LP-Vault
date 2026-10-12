@@ -128,3 +128,7 @@ SPEC §10.3 说 deposit、redeem、rebalance、rebalanceWithSwap 都是「仅初
 - 问题 12 标记为已解决；`SWAP_REBALANE_MATH.md` 与角色生命周期无关，无需修改。
 
 处理完这些低风险问题之后你就可以开始开发了。
+
+## 额外修改
+
+关于捐赠考虑到一个新问题，捐赠不仅会出现在vault持有的 token0 和 token1 还会出现在关联的adapter上，例如有人将v2 lp转给 vault adapter 持有的仓位上。原有的 单活仓位 规则: 如果非激活仓位存在lp，即视为没有清理干净而回滚。这就会导致恶意捐赠lp瘫痪vault无法正常使用，所以调整了单活规则，以及校验规则。即对于v2 adapter不去校验lp一定为0。当激活v2仓位的时候，原v2受捐赠持有的lp视为总资产的一份，参与到部署率，最大损失率等健康校验中。

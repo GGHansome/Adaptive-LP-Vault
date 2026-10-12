@@ -177,7 +177,7 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
 
         _validateConfiguredAdapters();
         _validateRangeWidths();
-        _validateAllPositionsEmpty();
+        _validateManagedV3PositionsEmpty();
 
         OracleSnapshot memory oracle = _healthyOracleSnapshot();
         PositionPlan memory plan = VaultStrategyMath.getPlan(_planInputs(oracle, _emptyPosition()));
@@ -201,7 +201,7 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         activeVenue = plan.targetVenue;
 
         AssetSnapshot memory afterAssets = _assetSnapshot();
-        _validatePositionTopology(plan.targetVenue, plan);
+        _validatePositionState(plan.targetVenue, plan);
         if (plan.targetVenue != VenueType.IDLE) {
             _validateHealthyDeployment(afterAssets, oracle.twapTick);
         }
@@ -257,7 +257,7 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         _approveAdapterAndDeposit(adapter, _lastExecutedPlan, amount0Used, amount1Used);
 
         AssetSnapshot memory afterAssets = _assetSnapshot();
-        _validatePositionTopology(activeVenue, _lastExecutedPlan);
+        _validatePositionState(activeVenue, _lastExecutedPlan);
         _validateHealthyDeployment(afterAssets, oracle.twapTick);
         _requireConservation(
             beforeAssets.total0 + amount0Used, beforeAssets.total1 + amount1Used, afterAssets.total0, afterAssets.total1
@@ -334,7 +334,7 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         activeVenue = plan.targetVenue;
 
         AssetSnapshot memory afterAssets = _assetSnapshot();
-        _validatePositionTopology(plan.targetVenue, plan);
+        _validatePositionState(plan.targetVenue, plan);
         if (plan.targetVenue != VenueType.IDLE) _validateHealthyDeployment(afterAssets, oracle.twapTick);
         _requireConservation(
             migration.beforeAssets.total0, migration.beforeAssets.total1, afterAssets.total0, afterAssets.total1
@@ -391,7 +391,7 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         activeVenue = plan.targetVenue;
 
         AssetSnapshot memory afterAssets = _assetSnapshot();
-        _validatePositionTopology(plan.targetVenue, plan);
+        _validatePositionState(plan.targetVenue, plan);
         _validateHealthyDeployment(afterAssets, oracle.twapTick);
 
         uint256 navAfter = _nav(afterAssets.total0, afterAssets.total1, oracle.twapTick);
@@ -424,7 +424,7 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
             activeVenue = VenueType.IDLE;
 
             AssetSnapshot memory afterAssets = _assetSnapshot();
-            _validatePositionTopology(VenueType.IDLE, _lastExecutedPlan);
+            _validatePositionState(VenueType.IDLE, _lastExecutedPlan);
             _requireConservation(beforeAssets.total0, beforeAssets.total1, afterAssets.total0, afterAssets.total1);
             if (planVersion == type(uint64).max) revert InvalidConfiguration();
             unchecked {
@@ -724,7 +724,20 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
     }
 
     function _deployToAdapter(PositionPlan memory plan, uint256 amount0Max, uint256 amount1Max) private {
-        _approveAdapterAndDeposit(_requireEnterEnabled(plan.targetVenue), plan, amount0Max, amount1Max);
+        address adapter = _requireEnterEnabled(plan.targetVenue);
+        IERC20 lpToken;
+        uint256 lpBefore;
+        if (plan.targetVenue == VenueType.UNISWAP_V2) {
+            lpToken = IERC20(IPositionAdapter(adapter).pool());
+            lpBefore = lpToken.balanceOf(adapter);
+        }
+        (,, uint256 liquidity) = _approveAdapterAndDeposit(adapter, plan, amount0Max, amount1Max);
+        if (plan.targetVenue == VenueType.UNISWAP_V2) {
+            uint256 lpAfter = lpToken.balanceOf(adapter);
+            if (lpAfter < lpBefore || lpAfter - lpBefore != liquidity) {
+                revert IAdaptiveLPVault.AdapterBalanceMismatch();
+            }
+        }
     }
 
     function _approveAdapterAndDeposit(
@@ -732,13 +745,13 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         PositionPlan memory plan,
         uint256 amount0Max,
         uint256 amount1Max
-    ) private returns (uint256 used0, uint256 used1) {
+    ) private returns (uint256 used0, uint256 used1, uint256 liquidity) {
         uint256 before0 = IERC20(token0).balanceOf(address(this));
         uint256 before1 = IERC20(token1).balanceOf(address(this));
         if (amount0Max > before0 || amount1Max > before1) revert IAdaptiveLPVault.AdapterBalanceMismatch();
         if (amount0Max != 0) IERC20(token0).forceApprove(adapter, amount0Max);
         if (amount1Max != 0) IERC20(token1).forceApprove(adapter, amount1Max);
-        (used0, used1,) = IPositionAdapter(adapter).deposit(amount0Max, amount1Max, plan);
+        (used0, used1, liquidity) = IPositionAdapter(adapter).deposit(amount0Max, amount1Max, plan);
         if (amount0Max != 0) IERC20(token0).forceApprove(adapter, 0);
         if (amount1Max != 0) IERC20(token1).forceApprove(adapter, 0);
         uint256 after0 = IERC20(token0).balanceOf(address(this));
@@ -866,10 +879,11 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         adapters[2] = _getAdapterOrRevert(VenueType.UNISWAP_V3_HIGH_FEE);
     }
 
-    function _validatePositionTopology(VenueType expectedVenue, PositionPlan memory plan) private view {
+    function _validatePositionState(VenueType expectedVenue, PositionPlan memory plan) private view {
         address[3] memory adapters = _adapterAddresses();
         VenueType[3] memory venues = [VenueType.UNISWAP_V2, VenueType.UNISWAP_V3_LOW_FEE, VenueType.UNISWAP_V3_HIGH_FEE];
-        for (uint256 i; i < 3; ++i) {
+        // Non-active V2 LP is an unrecognized donation, not a second strategy position.
+        for (uint256 i = expectedVenue == VenueType.UNISWAP_V2 ? 0 : 1; i < 3; ++i) {
             PositionSnapshot memory position = IPositionAdapter(adapters[i]).snapshot();
             bool effective = position.liquidity != 0 || position.amount0 != 0 || position.amount1 != 0;
             if (venues[i] == expectedVenue) {
@@ -890,9 +904,10 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         }
     }
 
-    function _validateAllPositionsEmpty() private view {
+    function _validateManagedV3PositionsEmpty() private view {
         address[3] memory adapters = _adapterAddresses();
-        for (uint256 i; i < 3; ++i) {
+        // V2 can receive LP before bootstrap; only V3 managed positions must start empty.
+        for (uint256 i = 1; i < 3; ++i) {
             PositionSnapshot memory position = IPositionAdapter(adapters[i]).snapshot();
             if (position.liquidity != 0 || position.amount0 != 0 || position.amount1 != 0) {
                 revert IAdaptiveLPVault.ActivePositionExists();

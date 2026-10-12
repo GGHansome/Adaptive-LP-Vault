@@ -246,7 +246,7 @@ $$
 
 Executor 返回值等于 `actualAmountOut`；Executor 的 token0/token1 余额恢复到 Vault 转入前的基线，且其 Router allowance 为零。
 
-目标 Adapter 建仓后，Vault 必须重新读取最终 Vault 余额与 `PositionSnapshot`。设 `I0Final/I1Final` 为 Vault 最终实际余额，`P0Final/P1Final` 为最终 `PositionSnapshot.amount0/amount1`，并定义：
+目标 Adapter 建仓后，Vault 必须重新读取最终 Vault 余额与 `PositionSnapshot`。设 `I0Final/I1Final` 为 Vault 最终实际余额，`P0Final/P1Final` 为最终 `PositionSnapshot.amount0/amount1`；新确认的 V2 捐赠已经包含在该 Position 快照中。以下部署率、Idle、守恒和迁移损失公式均使用完整会计资产，且复用迁移开始时捕获的同一个 `twapTick`。定义：
 
 $$
 F_0 = I0Final + P0Final, \qquad F_1 = I1Final + P1Final
@@ -280,13 +280,13 @@ finalIdleBps =
 \right\rfloor
 $$
 
-`P0Final/P1Final` 必须来自建仓后重新读取的实际 Position 快照，不能使用 `previewDeposit()` 的预估值或仅使用 `deposit()` 返回的 `used0/used1`。以上最终公式与本次迁移的其他价值校验复用迁移开始时捕获的同一个 `twapTick`，不得重新读取 Oracle。
+`P0Final/P1Final` 必须来自建仓后重新读取的实际 `PositionSnapshot.amount0/amount1`，不能使用 `previewDeposit()` 的预估值或仅使用 `deposit()` 返回的 `used0/used1`。以上最终公式与本次迁移的其他价值校验复用迁移开始时捕获的同一个 `twapTick`，不得重新读取 Oracle。新确认的 V2 捐赠参与最终 NAV，因此可以抵补迁移后的净值减少。
 
 完整迁移校验由 Vault 在目标 Adapter 建仓后负责，包括：
 
 - `finalDeployBps >= minDeployBps`；
 - `finalIdleBps <= maxHealthyIdleBps`；
-- 目标 Position 唯一且有效；
+- 目标策略 Position 唯一且有效，非活跃 V2 的未确认 LP 不构成第二个策略仓位；
 - 无 Swap 路径的逐 Token 资产守恒，允许差异仅在 `dustTolerance0/1` 范围内；
 - 带 Swap 路径按 `amountIn` 和 `actualAmountOut` 调整后的资产位置与余额守恒；
 - NAV 损失不超过 `maxMigrationLossBps`。

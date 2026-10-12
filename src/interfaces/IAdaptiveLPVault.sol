@@ -240,6 +240,7 @@ interface IAdaptiveLPVault {
 
     /// @notice Exits all active-position assets to the vault and sets the active venue to IDLE.
     /// @dev Emergency exit bypasses the rebalance cooldown and does not update plan history.
+    ///      Unrecognized LP donations in the non-active V2 adapter remain untouched.
     function emergencyExitToIdle() external;
 
     /// @notice Returns the strategy plan and deployment assessment produced from current state.
@@ -248,6 +249,7 @@ interface IAdaptiveLPVault {
     function previewRebalance() external view returns (PositionPlan memory plan, DeploymentAssessment memory assessment);
 
     /// @notice Returns total token0 and token1 assets controlled by the vault and active adapter.
+    /// @dev Non-active V2 LP donations enter accounting only when V2 becomes active; no shares are minted for them.
     /// @return total0 Total token0 assets without double-counting principal or fees.
     /// @return total1 Total token1 assets without double-counting principal or fees.
     function totalAssets() external view returns (uint256 total0, uint256 total1);

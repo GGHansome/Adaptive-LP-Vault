@@ -1137,7 +1137,7 @@ sequenceDiagram
     participant Adapter
 
     Manager->>Vault: bootstrap(amount0, amount1, receiver)
-    Vault->>Vault: validate complete configured Adapter bindings, cached tickSpacing, and swapPool == canonicalPool
+    Vault->>Vault: validate complete configured Adapter bindings, cached tickSpacing, swapPool == canonicalPool, and empty managed V3 positions
     Vault->>Oracle: snapshot()
     Oracle-->>Vault: healthy OracleSnapshot
     Vault->>Vault: calculate initial NAV and grossInitialShares
@@ -1275,7 +1275,7 @@ sequenceDiagram
     NewAdapter-->>Vault: unused amounts and liquidity
     Vault->>NewAdapter: snapshot()
     NewAdapter-->>Vault: final PositionSnapshot
-    Vault->>Vault: calculate finalDeployBps/finalIdleBps from actual balances and position with migration twapTick; validate NAV loss, dust tolerance and position
+    Vault->>Vault: calculate finalDeployBps/finalIdleBps and NAV loss from the complete accounting snapshot (including newly confirmed V2 donations) with migration twapTick; validate dust tolerance and strategy position
     Vault->>Vault: commit lastExecutedPlan and incremented planVersion; set lastPositionChangeAt = block.timestamp
     Vault-->>Keeper: PositionPlanCommitted, V3RangeChanged if targetVenue is V3, RebalanceExecuted and SwapExecuted
 ```
@@ -1338,6 +1338,8 @@ sequenceDiagram
 
 V2 Adapter 读取 Pair `getReserves()`、LP Token 总供应量和 Adapter 持有的 LP Token 余额。按比例计算的储备权益同时包含交易费用形成的储备增长，不再产生独立 claimable fee 字段。
 
+非活跃 V2 LP 的确认规则以 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §5.5 为准：Bootstrap 只要求两个 V3 受管理仓位为空；拓扑检查不读取非活跃 V2 的 Position。激活 V2 的建仓路径验证实际 LP 余额增量等于 `deposit()` 返回的铸造量，最终部署率、Idle、逐 Token 守恒及带 Swap 的 NAV 损失统一使用包含新确认捐赠的完整会计快照。Emergency Exit 只退出 Active Adapter，不清理非活跃 V2 LP；非活跃 V3 受管理仓位仍必须为空。
+
 ### 10.4 舍入与全精度
 
 Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals)`，向下舍入；`minimumLockedShares` 包含在该总量内并铸造给 Vault 自身（`address(this)`），其余铸造给 `receiver`。Vault 不提供锁定 shares 的转出或救援机制。
@@ -1369,9 +1371,9 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 
 | 编号     | 不变量                                                                                 | 违反时              |
 | ------ | ----------------------------------------------------------------------------------- | ---------------- |
-| INV-01 | 支持资产所有权始终属于 shares 持有人                                                              | 回滚或暂停相关入口        |
+| INV-01 | 已纳入会计的支持资产所有权始终属于 shares 持有人                                                              | 回滚或暂停相关入口        |
 | INV-02 | 非 IDLE 时最多一个有效 Active Position，且其快照满足 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.2–§7.3 的 Venue 语义 | Rebalance 回滚     |
-| INV-03 | IDLE 时所有 Adapter 有效 liquidity 为零，策略输入使用 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.4 的规范空快照 | Emergency/状态更新回滚 |
+| INV-03 | IDLE 时没有纳入会计的 Active Position，允许 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §5.5 定义的非活跃 V2 未确认 LP；策略输入使用 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.4 的规范空快照 | Emergency/状态更新回滚 |
 | INV-04 | `totalAssets` 不重复计入 principal、fees 或 Donation                                       | 会计测试失败           |
 | INV-05 | Deposit shares 使用存款前 NAV/Supply                                                     | Deposit 回滚       |
 | INV-06 | Redeem 使用销毁前 Supply，分别向下取整退出前 Idle 份额与 Adapter 原生 Position 单位份额，以经 Vault 余额增量验证的 Adapter 实际退出资产形成最终输出；从显式 `owner` 销毁 shares，非 owner 调用者只有在 `allowance(owner, msg.sender)` 足够时才能执行 | Redeem 回滚        |

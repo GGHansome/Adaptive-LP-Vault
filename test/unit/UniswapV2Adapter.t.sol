@@ -365,6 +365,34 @@ contract UniswapV2AdapterTest is Test {
         assertEq(position.liquidity, lpBalance);
     }
 
+    function test_snapshotIncludesDonatedLpAndRoundsReserveEquityDown() external {
+        (,, uint256 minted) = adapter.deposit(100 ether, 200 ether, plan);
+        vm.prank(address(0xBEEF));
+        assertTrue(pair.transfer(address(adapter), 50 ether));
+        assertTrue(token0.transfer(address(pair), 11 ether));
+        assertTrue(token1.transfer(address(pair), 22 ether));
+        pair.sync();
+
+        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
+        uint256 supply = pair.totalSupply();
+        PositionSnapshot memory position = adapter.snapshot();
+        uint256 expectedLiquidity = minted + 50 ether;
+        assertEq(position.liquidity, expectedLiquidity);
+        assertEq(position.principal0, Math.mulDiv(expectedLiquidity, reserve0, supply));
+        assertEq(position.principal1, Math.mulDiv(expectedLiquidity, reserve1, supply));
+        assertEq(position.amount0, position.principal0);
+        assertEq(position.amount1, position.principal1);
+    }
+
+    function test_snapshotWithZeroLpDoesNotReadPairReservesOrSupply() external {
+        vm.mockCallRevert(address(pair), abi.encodeWithSignature("getReserves()"), "unexpected reserves");
+        vm.mockCallRevert(address(pair), abi.encodeWithSignature("totalSupply()"), "unexpected supply");
+        PositionSnapshot memory position = adapter.snapshot();
+        assertEq(position.liquidity, 0);
+        assertEq(position.amount0, 0);
+        assertEq(position.amount1, 0);
+    }
+
     function test_syncFeesReturnsZeroAndDoesNotMoveAssets() external {
         adapter.deposit(100 ether, 200 ether, plan);
         uint256 vault0Before = token0.balanceOf(address(this));
