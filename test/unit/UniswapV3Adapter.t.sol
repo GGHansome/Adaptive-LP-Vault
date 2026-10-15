@@ -10,6 +10,8 @@ import {UniswapV3Adapter} from "../../src/adapters/UniswapV3Adapter.sol";
 import {MarketRegime, PositionPlan, VenueType} from "../../src/core/VaultTypes.sol";
 import {IPositionAdapter} from "../../src/interfaces/IPositionAdapter.sol";
 import {INonfungiblePositionManager} from "../../src/interfaces/IUniswapV3External.sol";
+import {LegacyV3DepositMath} from "../helpers/LegacyV3DepositMath.sol";
+import {PriceMath} from "../../src/libraries/PriceMath.sol";
 
 contract MockV3ERC20 is ERC20 {
     constructor(string memory name_, string memory symbol_) ERC20(name_, symbol_) {}
@@ -342,6 +344,67 @@ contract UniswapV3AdapterTest is Test {
 
         assertEq(adapter.positionId(), 0);
         assertEq(adapter.snapshot().liquidity, 0);
+    }
+
+    function testGas_v3Preview() public {
+        adapter.previewDeposit(100 ether, 100 ether, plan);
+        emit log_named_uint("v3Preview", vm.snapshotGasLastCall("v3Preview"));
+    }
+
+    function testGas_v3Mint() public {
+        adapter.deposit(100 ether, 100 ether, plan);
+        emit log_named_uint("v3Mint", vm.snapshotGasLastCall("v3Mint"));
+    }
+
+    function testFuzz_previewMatchesLegacyAcrossPricesAndRanges(
+        uint96 amount0,
+        uint96 amount1,
+        int24 priceTick,
+        int16 centerSteps,
+        uint8 halfWidthSteps
+    ) public {
+        amount0 = uint96(bound(amount0, 0, 1e24));
+        amount1 = uint96(bound(amount1, 0, 1e24));
+        // Restrict price ratios to avoid uint128 liquidity overflow; include both sides and in-range prices.
+        priceTick = int24(bound(int256(priceTick), -60000, 60000));
+        int24 center = int24(bound(int256(centerSteps), -1000, 1000)) * TICK_SPACING;
+        int24 halfWidth = int24(uint24(bound(halfWidthSteps, 1, 100))) * TICK_SPACING;
+        plan.tickLower = center - halfWidth;
+        plan.tickUpper = center + halfWidth;
+        uint160 price = PriceMath.sqrtRatioAtTick(priceTick);
+        _assertLegacyPreview(amount0, amount1, price, priceTick);
+    }
+
+    function test_previewMatchesLegacyAtBothRangeBoundariesAndZeroInputs() public {
+        _assertLegacyPreview(100 ether, 100 ether, PriceMath.sqrtRatioAtTick(plan.tickLower), plan.tickLower);
+        _assertLegacyPreview(100 ether, 100 ether, PriceMath.sqrtRatioAtTick(plan.tickUpper), plan.tickUpper);
+        _assertLegacyPreview(0, 0, 1 << 96, 0);
+        _assertLegacyPreview(0, 100 ether, 1 << 96, 0);
+        _assertLegacyPreview(100 ether, 0, 1 << 96, 0);
+    }
+
+    function test_previewMatchesLegacyAtExtremeValidRanges() public {
+        plan.tickLower = -887220;
+        plan.tickUpper = -887160;
+        _assertLegacyPreview(1, 1, PriceMath.sqrtRatioAtTick(-887190), -887190);
+        plan.tickLower = 887160;
+        plan.tickUpper = 887220;
+        _assertLegacyPreview(1, 1, PriceMath.sqrtRatioAtTick(887190), 887190);
+    }
+
+    function _assertLegacyPreview(uint256 amount0, uint256 amount1, uint160 price, int24 tick) private {
+        vm.mockCall(
+            address(pool),
+            abi.encodeWithSignature("slot0()"),
+            abi.encode(price, tick, uint16(0), uint16(0), uint16(0), uint8(0), true)
+        );
+        (uint256 expected0, uint256 expected1) =
+            LegacyV3DepositMath.preview(price, plan.tickLower, plan.tickUpper, amount0, amount1);
+        (uint256 used0, uint256 used1) = adapter.previewDeposit(amount0, amount1, plan);
+        assertEq(used0, expected0);
+        assertEq(used1, expected1);
+        assertLe(used0, amount0);
+        assertLe(used1, amount1);
     }
 
     function _depositPosition() internal {

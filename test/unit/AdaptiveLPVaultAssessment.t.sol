@@ -22,6 +22,7 @@ import {IAdapterRegistry} from "../../src/interfaces/IAdapterRegistry.sol";
 import {IAdaptiveLPVault} from "../../src/interfaces/IAdaptiveLPVault.sol";
 import {ICanonicalV3Oracle} from "../../src/interfaces/ICanonicalV3Oracle.sol";
 import {IControlledSwapExecutor} from "../../src/interfaces/IControlledSwapExecutor.sol";
+import {IVaultComponentFactory} from "../../src/interfaces/IVaultComponentFactory.sol";
 import {IPositionAdapter} from "../../src/interfaces/IPositionAdapter.sol";
 import {OracleSnapshot} from "../../src/oracle/OracleTypes.sol";
 import {SwapDirection} from "../../src/swap/SwapTypes.sol";
@@ -78,6 +79,8 @@ contract AdaptiveLPVaultAssessmentTest is Test {
     address private v2Adapter;
     address private lowAdapter;
     address private highAdapter;
+    VaultConfig private vaultConfig;
+    StrategyConfig private strategyConfig;
 
     function setUp() public {
         AssessmentToken a = new AssessmentToken();
@@ -120,6 +123,8 @@ contract AdaptiveLPVaultAssessmentTest is Test {
             maxSwapSlippageBps: 100,
             maxMigrationLossBps: 100
         });
+        vaultConfig = config;
+        strategyConfig = strategy;
         vault = new AdaptiveLPVault("Assessment Vault", "AV", config, AccessControlConfig(0, address(this)), strategy);
         VaultControl control = VaultControl(address(vault.vaultControl()));
         control.grantRole(control.MANAGER_ROLE(), address(this));
@@ -145,6 +150,84 @@ contract AdaptiveLPVaultAssessmentTest is Test {
         vault.bootstrap(1000, 1000, address(this));
         // EXTREME history transitions to HIGH, selecting V2 while the assets remain in IDLE.
         oracle.setDeviation(0);
+    }
+
+    function test_constructorReportsInvalidControlBinding() public {
+        vm.mockCall(
+            vaultConfig.componentFactory,
+            abi.encodeWithSelector(IVaultComponentFactory.deployComponents.selector),
+            abi.encode(address(0), address(0))
+        );
+        vm.expectRevert(IAdaptiveLPVault.InvalidControlBinding.selector);
+        new AdaptiveLPVault("Invalid Vault", "IV", vaultConfig, AccessControlConfig(0, address(this)), strategyConfig);
+    }
+
+    function test_constructorReportsInvalidExecutorBinding() public {
+        address control = _endpoint("invalid executor control");
+        address nextVault = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        _mockAddress(control, "vault()", nextVault);
+        _mockAddress(control, "token0()", address(token0));
+        _mockAddress(control, "token1()", address(token1));
+        _mockAddress(control, "uniswapV2Factory()", vaultConfig.uniswapV2Factory);
+        _mockAddress(control, "uniswapV3Factory()", vaultConfig.uniswapV3Factory);
+        vm.mockCall(
+            vaultConfig.componentFactory,
+            abi.encodeWithSelector(IVaultComponentFactory.deployComponents.selector),
+            abi.encode(control, address(0))
+        );
+        vm.expectRevert(IAdaptiveLPVault.InvalidSwapExecutorBinding.selector);
+        new AdaptiveLPVault("Invalid Vault", "IV", vaultConfig, AccessControlConfig(0, address(this)), strategyConfig);
+    }
+
+    function test_constructorReportsOracleTokenDecimalsMismatch() public {
+        vm.mockCall(address(oracle), abi.encodeWithSignature("token0Decimals()"), abi.encode(uint8(17)));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAdaptiveLPVault.TokenDecimalsMismatch.selector, address(token0), uint8(17), uint8(18)
+            )
+        );
+        new AdaptiveLPVault("Invalid Vault", "IV", vaultConfig, AccessControlConfig(0, address(this)), strategyConfig);
+    }
+
+    function test_constructorReportsToken1DecimalsMismatch() public {
+        vm.mockCall(address(oracle), abi.encodeWithSignature("token1Decimals()"), abi.encode(uint8(17)));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAdaptiveLPVault.TokenDecimalsMismatch.selector, address(token1), uint8(17), uint8(18)
+            )
+        );
+        new AdaptiveLPVault("Invalid Vault", "IV", vaultConfig, AccessControlConfig(0, address(this)), strategyConfig);
+    }
+
+    function test_minDeployBpsIsDerivedAtConstruction() public view {
+        assertEq(vault.minDeployBps(), 9500);
+        assertEq(vault.minDeployBps() + vault.maxHealthyIdleBps(), 10_000);
+    }
+
+    function test_minDeployBpsAtConfigurationBounds() public {
+        StrategyConfig memory strategy = strategyConfig;
+        strategy.maxHealthyIdleBps = 0;
+        AdaptiveLPVault fullyDeployed = new AdaptiveLPVault(
+            "Full Deployment Vault", "FDV", vaultConfig, AccessControlConfig(0, address(this)), strategy
+        );
+        assertEq(fullyDeployed.minDeployBps(), 10_000);
+
+        strategy.maxHealthyIdleBps = 9999;
+        AdaptiveLPVault minimallyDeployed = new AdaptiveLPVault(
+            "Minimum Deployment Vault", "MDV", vaultConfig, AccessControlConfig(0, address(this)), strategy
+        );
+        assertEq(minimallyDeployed.minDeployBps(), 1);
+    }
+
+    function test_constructorRejectsIdleLimitAtOrAboveBps() public {
+        StrategyConfig memory strategy = strategyConfig;
+        strategy.maxHealthyIdleBps = 10_000;
+        vm.expectRevert(AdaptiveLPVault.InvalidConfiguration.selector);
+        new AdaptiveLPVault("Invalid Vault", "IV", vaultConfig, AccessControlConfig(0, address(this)), strategy);
+
+        strategy.maxHealthyIdleBps = 10_001;
+        vm.expectRevert(AdaptiveLPVault.InvalidConfiguration.selector);
+        new AdaptiveLPVault("Invalid Vault", "IV", vaultConfig, AccessControlConfig(0, address(this)), strategy);
     }
 
     function test_previewAtDeploymentThresholdUsesSingleAdapterPreviewWithoutUnusedValuation() public {
@@ -269,7 +352,7 @@ contract AdaptiveLPVaultAssessmentTest is Test {
 
     function test_bothExcessTokensStillRevert() public {
         _previewUses(998, 998);
-        vm.expectRevert(IAdaptiveLPVault.DeploymentRatioTooLow.selector);
+        vm.expectRevert(IAdaptiveLPVault.InvalidDeploymentPreview.selector);
         vault.previewRebalance();
     }
 

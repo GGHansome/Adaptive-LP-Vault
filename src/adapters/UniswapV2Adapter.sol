@@ -172,9 +172,15 @@ contract UniswapV2Adapter is IPositionAdapter, ReentrancyGuard {
         (used0, used1) = _previewDeposit(amount0Max, amount1Max);
         if (used0 == 0 || used1 == 0) return (0, 0, 0);
 
+        uint256 lpBefore = _PAIR.balanceOf(address(this));
         IERC20(_TOKEN0).safeTransferFrom(_VAULT, _POOL, used0);
         IERC20(_TOKEN1).safeTransferFrom(_VAULT, _POOL, used1);
         liquidity = _PAIR.mint(address(this));
+        uint256 lpAfter = _PAIR.balanceOf(address(this));
+        // Existing positions and LP donations are not part of this call's minted liquidity.
+        if (lpAfter < lpBefore || lpAfter - lpBefore != liquidity) {
+            revert AdapterBalanceMismatch(_POOL, lpBefore + liquidity, lpAfter);
+        }
     }
 
     /// @inheritdoc IPositionAdapter

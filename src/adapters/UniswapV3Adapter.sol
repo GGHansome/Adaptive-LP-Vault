@@ -394,14 +394,13 @@ contract UniswapV3Adapter is IPositionAdapter, ReentrancyGuard {
         _validatePlan(plan);
         if (amount0Max == 0 && amount1Max == 0) return (0, 0);
 
-        int24 tickLower = plan.tickLower;
-        int24 tickUpper = plan.tickUpper;
-
         (uint160 sqrtPriceX96,,,,,,) = _POOL.slot0();
-        uint128 liquidity = _liquidityForAmounts(sqrtPriceX96, tickLower, tickUpper, amount0Max, amount1Max);
+        uint160 sqrtLowerX96 = PriceMath.sqrtRatioAtTick(plan.tickLower);
+        uint160 sqrtUpperX96 = PriceMath.sqrtRatioAtTick(plan.tickUpper);
+        uint128 liquidity = _liquidityForAmounts(sqrtPriceX96, sqrtLowerX96, sqrtUpperX96, amount0Max, amount1Max);
         if (liquidity == 0) return (0, 0);
 
-        (used0, used1) = _amountsForLiquidity(sqrtPriceX96, tickLower, tickUpper, liquidity, true);
+        (used0, used1) = _amountsForLiquidityAtPrices(sqrtPriceX96, sqrtLowerX96, sqrtUpperX96, liquidity, true);
     }
 
     /// @notice Collects all owed tokens after optionally removing nonzero liquidity.
@@ -525,13 +524,11 @@ contract UniswapV3Adapter is IPositionAdapter, ReentrancyGuard {
     /// @notice Computes liquidity obtainable from bounded token amounts at the current price.
     function _liquidityForAmounts(
         uint160 sqrtPriceX96,
-        int24 tickLower,
-        int24 tickUpper,
+        uint160 sqrtLowerX96,
+        uint160 sqrtUpperX96,
         uint256 amount0,
         uint256 amount1
     ) internal pure returns (uint128 liquidity) {
-        uint160 sqrtLowerX96 = PriceMath.sqrtRatioAtTick(tickLower);
-        uint160 sqrtUpperX96 = PriceMath.sqrtRatioAtTick(tickUpper);
         uint256 liquidity256;
 
         if (sqrtPriceX96 <= sqrtLowerX96) {
@@ -558,9 +555,19 @@ contract UniswapV3Adapter is IPositionAdapter, ReentrancyGuard {
         uint128 liquidity,
         bool roundUp
     ) internal pure returns (uint256 amount0, uint256 amount1) {
-        uint160 sqrtLowerX96 = PriceMath.sqrtRatioAtTick(tickLower);
-        uint160 sqrtUpperX96 = PriceMath.sqrtRatioAtTick(tickUpper);
+        return _amountsForLiquidityAtPrices(
+            sqrtPriceX96, PriceMath.sqrtRatioAtTick(tickLower), PriceMath.sqrtRatioAtTick(tickUpper), liquidity, roundUp
+        );
+    }
 
+    /// @dev Reuses validated range prices; preserves input-up/principal-down rounding.
+    function _amountsForLiquidityAtPrices(
+        uint160 sqrtPriceX96,
+        uint160 sqrtLowerX96,
+        uint160 sqrtUpperX96,
+        uint128 liquidity,
+        bool roundUp
+    ) internal pure returns (uint256 amount0, uint256 amount1) {
         if (sqrtPriceX96 <= sqrtLowerX96) {
             amount0 = _amount0ForLiquidity(sqrtLowerX96, sqrtUpperX96, liquidity, roundUp);
         } else if (sqrtPriceX96 < sqrtUpperX96) {

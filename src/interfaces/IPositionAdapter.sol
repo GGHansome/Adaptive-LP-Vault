@@ -53,9 +53,9 @@ interface IPositionAdapter {
     /// @param used Amount reported as consumed by the position manager.
     error UsedAmountExceedsDesired(address token, uint256 desired, uint256 used);
 
-    /// @notice Indicates that an adapter's loose token balance did not return to its pre-operation baseline.
+    /// @notice Indicates that an adapter's loose asset or LP-token balance differs from the expected value.
     /// @param token Token whose adapter balance did not return to the expected value.
-    /// @param expected Adapter balance recorded before the operation.
+    /// @param expected Expected adapter balance after the operation.
     /// @param actual Adapter balance observed after the operation.
     error AdapterBalanceMismatch(address token, uint256 expected, uint256 actual);
 
@@ -113,7 +113,8 @@ interface IPositionAdapter {
         returns (uint256 used0, uint256 used1);
 
     /// @notice Deploys assets into the adapter's bound venue.
-    /// @dev Only the bound vault may call this function.
+    /// @dev Only the bound vault may call this function. Implementations validate protocol-specific execution results;
+    ///      the V2 adapter checks that its actual LP-token balance increase equals the pair's reported minted liquidity.
     /// @param amount0Max Maximum token0 amount available for deployment.
     /// @param amount1Max Maximum token1 amount available for deployment.
     /// @param plan Normalized position plan controlling the target position.

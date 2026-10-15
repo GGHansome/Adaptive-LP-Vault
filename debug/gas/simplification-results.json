@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-12",
+  "baseline": "First-round working-tree implementation remeasured before simplification; before values match round1-results.json after values",
+  "goal": "Reduce cross-function balance coupling and conditional return semantics, accepting explicitly measured gas and size costs",
+  "solidity": "0.8.24",
+  "foundry": "1.5.1-stable",
+  "optimizer_runs": 200,
+  "via_ir": true,
+  "evm_version": "cancun",
+  "measurement": "vm.snapshotGasLastCall with --isolate; last contract call only, not whole-test gas or mainnet transaction fee",
+  "command": "forge test --match-test testGas_ --isolate --gas-snapshot-emit false -vv",
+  "measurements": [
+    { "scenario": "bootstrapV3", "before": 624607, "after": 627593 },
+    { "scenario": "bootstrapV2", "before": 481152, "after": 483834 },
+    { "scenario": "bootstrapIdle", "before": 414473, "after": 414246 },
+    { "scenario": "depositV3NoFees", "before": 261924, "after": 264092 },
+    { "scenario": "depositV3WithFees", "before": 289993, "after": 295935 },
+    { "scenario": "depositV2", "before": 284744, "after": 286656 },
+    { "scenario": "redeemV3NoFees", "before": 152019, "after": 151795 },
+    { "scenario": "redeemV3WithFees", "before": 193767, "after": 195358 },
+    { "scenario": "redeemIdle", "before": 76649, "after": 76687 },
+    { "scenario": "rebalanceV3ToV3", "before": 452576, "after": 458523 },
+    { "scenario": "rebalanceV3WithFees", "before": 464408, "after": 472945 },
+    { "scenario": "rebalanceToIdle", "before": 292484, "after": 294800 },
+    { "scenario": "swapZeroForOne", "before": 440698, "after": 449067 },
+    { "scenario": "swapOneForZero", "before": 440308, "after": 448656 },
+    { "scenario": "emergencyV3WithFees", "before": 205806, "after": 211971 },
+    { "scenario": "v3Preview", "before": 9778, "after": 9778 },
+    { "scenario": "v3Mint", "before": 242762, "after": 242762 }
+  ],
+  "sizes": {
+    "AdaptiveLPVault": { "runtime_before": 26860, "runtime_after": 27109, "initcode_before": 34532, "initcode_after": 34802 },
+    "UniswapV3Adapter": { "runtime_before": 12668, "runtime_after": 12668, "initcode_before": 15050, "initcode_after": 15050 }
+  },
+  "deployment_blocker": "AdaptiveLPVault runtime remains 2533 bytes above EIP-170, 249 bytes worse than the first-round implementation",
+  "tests": { "total": 219, "passed": 219, "failed": 0, "isolated_execution": "passed" },
+  "limitations": [
+    "Local deterministic fixtures; vault V3/oracle/router and external AMMs use test stand-ins, not a fixed-block mainnet fork.",
+    "Simplification changes were measured together; do not assign the entire delta to individual balanceOf calls.",
+    "Production size uses independent forge build src outputs, not full-test artifacts; initcode excludes concrete constructor arguments.",
+    "The first-round working-tree baseline is not a separate git commit; historical results are retained rather than overwritten."
+  ]
+}

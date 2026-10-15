@@ -70,7 +70,7 @@ library VaultStrategyMath {
                 }
             }
         }
-        if (input.planVersion == type(uint64).max) revert IAdaptiveLPVault.InvalidTickRange();
+        if (input.planVersion == type(uint64).max) revert IAdaptiveLPVault.PlanVersionOverflow();
         plan = PositionPlan({
             planHash: bytes32(0),
             targetVenue: targetVenue,

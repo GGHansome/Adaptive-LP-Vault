@@ -50,6 +50,9 @@ contract MockV2Pair is ERC20 {
     uint112 private _reserve1;
     uint32 private _blockTimestampLast;
 
+    bool private _overrideMintLiquidity;
+    uint256 private _reportedMintLiquidity;
+
     address private _reentryTarget;
     bytes private _reentryData;
     bool public lastReentrySucceeded;
@@ -95,6 +98,12 @@ contract MockV2Pair is ERC20 {
 
         _mint(to, liquidity);
         _updateReserves(balance0, balance1);
+        if (_overrideMintLiquidity) liquidity = _reportedMintLiquidity;
+    }
+
+    function setReportedMintLiquidity(uint256 liquidity) external {
+        _overrideMintLiquidity = true;
+        _reportedMintLiquidity = liquidity;
     }
 
     function burn(address to) external returns (uint256 amount0, uint256 amount1) {
@@ -316,6 +325,84 @@ contract UniswapV2AdapterTest is Test {
         assertEq(vault0Before - token0.balanceOf(address(this)), 100 ether);
         assertEq(vault1Before - token1.balanceOf(address(this)), 200 ether);
         assertGt(pair.balanceOf(address(adapter)), 0);
+    }
+
+    function test_depositMeasuresLpIncreaseWithExistingPositionAndDonation() external {
+        adapter.deposit(100 ether, 200 ether, plan);
+        vm.prank(address(0xBEEF));
+        assertTrue(pair.transfer(address(adapter), 50 ether));
+        uint256 lpBefore = pair.balanceOf(address(adapter));
+
+        (uint256 used0, uint256 used1, uint256 liquidity) = adapter.deposit(25 ether, 50 ether, plan);
+
+        assertEq(used0, 25 ether);
+        assertEq(used1, 50 ether);
+        assertGt(liquidity, 0);
+        assertEq(pair.balanceOf(address(adapter)), lpBefore + liquidity);
+    }
+
+    function testFuzz_depositRejectsIncorrectMintReturnAndRollsBack(bool overreported) external {
+        adapter.deposit(100 ether, 200 ether, plan);
+        vm.prank(address(0xBEEF));
+        assertTrue(pair.transfer(address(adapter), 50 ether));
+        uint256 lpBefore = pair.balanceOf(address(adapter));
+        uint256 supplyBefore = pair.totalSupply();
+        (uint112 reserve0, uint112 reserve1,) = pair.getReserves();
+        uint256 minted =
+            Math.min(Math.mulDiv(100 ether, supplyBefore, reserve0), Math.mulDiv(200 ether, supplyBefore, reserve1));
+        uint256 reported = overreported ? minted + 1 : minted - 1;
+        pair.setReportedMintLiquidity(reported);
+        uint256 vault0Before = token0.balanceOf(address(this));
+        uint256 vault1Before = token1.balanceOf(address(this));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPositionAdapter.AdapterBalanceMismatch.selector, address(pair), lpBefore + reported, lpBefore + minted
+            )
+        );
+        adapter.deposit(100 ether, 200 ether, plan);
+
+        assertEq(pair.balanceOf(address(adapter)), lpBefore);
+        assertEq(pair.totalSupply(), supplyBefore);
+        assertEq(token0.balanceOf(address(this)), vault0Before);
+        assertEq(token1.balanceOf(address(this)), vault1Before);
+        (uint112 reserve0After, uint112 reserve1After,) = pair.getReserves();
+        assertEq(reserve0After, reserve0);
+        assertEq(reserve1After, reserve1);
+        assertEq(token0.balanceOf(address(pair)), reserve0);
+        assertEq(token1.balanceOf(address(pair)), reserve1);
+    }
+
+    function test_depositRejectsMintReturnWithoutActualLpIncrease() external {
+        vm.prank(address(0xBEEF));
+        assertTrue(pair.transfer(address(adapter), 50 ether));
+        vm.mockCall(address(pair), abi.encodeWithSignature("mint(address)", address(adapter)), abi.encode(1));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPositionAdapter.AdapterBalanceMismatch.selector, address(pair), 50 ether + 1, 50 ether
+            )
+        );
+        adapter.deposit(100 ether, 200 ether, plan);
+
+        assertEq(pair.balanceOf(address(adapter)), 50 ether);
+        assertEq(token0.balanceOf(address(pair)), INITIAL_RESERVE0);
+        assertEq(token1.balanceOf(address(pair)), INITIAL_RESERVE1);
+    }
+
+    function test_depositRejectsLpBalanceDecreaseWithAdapterError() external {
+        bytes[] memory balances = new bytes[](2);
+        balances[0] = abi.encode(50 ether);
+        balances[1] = abi.encode(49 ether);
+        vm.mockCalls(address(pair), abi.encodeCall(IERC20.balanceOf, (address(adapter))), balances);
+        vm.mockCall(address(pair), abi.encodeWithSignature("mint(address)", address(adapter)), abi.encode(1));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPositionAdapter.AdapterBalanceMismatch.selector, address(pair), 50 ether + 1, 49 ether
+            )
+        );
+        adapter.deposit(100 ether, 200 ether, plan);
     }
 
     function test_depositBlocksCrossFunctionReentrancy() external {

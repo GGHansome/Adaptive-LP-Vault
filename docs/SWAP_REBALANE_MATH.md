@@ -72,7 +72,7 @@ $$
 
 按以下规则生成 `DeploymentAssessment`：
 
-- `minDeployBps` 是派生值，定义为 `BPS - maxHealthyIdleBps`，不作为独立配置或独立事实来源；
+- `minDeployBps` 是派生值，定义为 `BPS - maxHealthyIdleBps`；Vault 在构造函数中计算一次并保存为公开的 `immutable`，首次评估、Swap 模拟评估和实际部署校验统一使用该值，不作为独立配置或独立事实来源；
 - `initialDeployBps < minDeployBps` 时，`requiresSwap = true`；否则为 `false`；
 - `unused0 > dustTolerance0` 且 `unused1 <= dustTolerance1` 时，`direction = ZERO_FOR_ONE`；
 - `unused1 > dustTolerance1` 且 `unused0 <= dustTolerance0` 时，`direction = ONE_FOR_ZERO`；
@@ -234,7 +234,7 @@ Keeper/Manager 提交交易级的 `expectedPlanHash`、`expectedDirection`、`am
 - 将输出接收方固定为 Vault；
 - 以 Vault 的输出 Token 实际余额增量计算并返回 `actualAmountOut`，不能只信任 Router 返回值。
 
-设 `VInBefore/VOutBefore` 为 Vault 向 Executor 转入 `amountIn` 前的输入和输出 Token 余额，`VInAfterSwap/VOutAfterSwap` 为 `executeSwap()` 返回后、目标 Adapter 建仓前的余额。Vault 必须立即验证：
+Vault 记录向 Executor 转入 `amountIn` 前的输入余额 `VInBefore`，并在 `executeSwap()` 返回后、目标 Adapter 建仓前读取 `VInAfterSwap`。Executor 在收到输入后、调用 Router 前后测量 Vault 输出余额 `VOutBefore/VOutAfterSwap`，以该增量返回 `actualAmountOut`；Vault 直接使用返回金额验证输入减少量与返回输出的最低值：
 
 $$
 VInBefore - VInAfterSwap = amountIn
@@ -244,7 +244,7 @@ $$
 actualAmountOut = VOutAfterSwap - VOutBefore \ge minAmountOut
 $$
 
-Executor 返回值等于 `actualAmountOut`；Executor 的 token0/token1 余额恢复到 Vault 转入前的基线，且其 Router allowance 为零。
+输出余额增量由经过确认的不可升级 Executor 实现测量并返回；Vault 检查返回金额的最低值。Executor 的 token0/token1 余额必须恢复到 Vault 转入前的基线，且其 Router allowance 为零。
 
 目标 Adapter 建仓后，Vault 必须重新读取最终 Vault 余额与 `PositionSnapshot`。设 `I0Final/I1Final` 为 Vault 最终实际余额，`P0Final/P1Final` 为最终 `PositionSnapshot.amount0/amount1`；新确认的 V2 捐赠已经包含在该 Position 快照中。以下部署率、Idle、守恒和迁移损失公式均使用完整会计资产，且复用迁移开始时捕获的同一个 `twapTick`。定义：
 
@@ -338,7 +338,7 @@ unused1 = 1.5 WETH
 - `deadline` 已过期；
 - `simulatedDeployBps(x)`、`simulatedIdleBps(x)`、`finalDeployBps`、`finalIdleBps` 或 NAV 损失校验失败；
 - 无 Swap 路径的逐 Token 资产守恒失败；
-- Vault 的实际输出 Token 余额增量低于 `minAmountOut`，或与 Executor 返回值不一致；
+- Vault 的实际输出 Token 余额增量低于 `minAmountOut`；
 - Executor 的 token0/token1 余额未恢复调用前基线，或 Router allowance 未清零；
 - Router、Token 对、Pool、Fee Tier 或输出接收方不符合封存配置；`swapPool != canonicalPool`；任一 Executor、Vault、Adapter 或绑定 Pool 的有序 `token0/token1` 不一致；或 Router/Pool 回调发送方校验失败；
 - Oracle 不健康或 Swap 安全边界不满足。

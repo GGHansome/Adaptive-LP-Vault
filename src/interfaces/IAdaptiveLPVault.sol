@@ -13,7 +13,7 @@ interface IAdaptiveLPVault {
     /// @notice Indicates that pool tokens are zero, equal, or not ordered by address.
     error InvalidTokenOrder();
 
-    /// @notice Indicates that a token's `decimals()` metadata could not be read.
+    /// @notice Indicates that the token's or oracle's `decimals` metadata could not be read.
     /// @param token Address of the token whose metadata read failed.
     error InvalidTokenMetadata(address token);
 
@@ -25,11 +25,40 @@ interface IAdaptiveLPVault {
     /// @notice Indicates that bootstrap net asset value is below `minimumInitialNav`.
     error MinimumNavNotMet();
 
-    /// @notice Indicates that a required actual token amount rounded to zero.
+    /// @notice Indicates that bootstrap shares do not exceed the permanently locked portion.
+    /// @param actual Total initial shares calculated from the seed NAV.
+    /// @param locked Permanently locked shares that must leave a positive receiver allocation.
+    error InitialSharesTooLow(uint256 actual, uint256 locked);
+
+    /// @notice Indicates that a required input or calculated token amount is zero.
     error ZeroAmount();
 
-    /// @notice Indicates that an active V3 position has single-sided principal and cannot accept a deposit.
+    /// @notice Indicates that a nonzero deposit would mint zero shares after rounding.
+    error ZeroShares();
+
+    /// @notice Indicates that the plan version cannot be incremented within uint64.
+    error PlanVersionOverflow();
+
+    /// @notice Indicates that the current timestamp cannot be represented as uint32.
+    error TimestampOverflow();
+
+    /// @notice Indicates that the deployed control component is missing or incorrectly bound.
+    error InvalidControlBinding();
+
+    /// @notice Indicates that the deployed swap executor is missing or incorrectly bound.
+    error InvalidSwapExecutorBinding();
+
+    /// @notice Indicates that oracle decimal metadata differs from the token's own metadata.
+    /// @param token Token whose decimal metadata is inconsistent.
+    /// @param expected Decimals reported by the canonical oracle.
+    /// @param actual Decimals read directly from the token.
+    error TokenDecimalsMismatch(address token, uint8 expected, uint8 actual);
+
+    /// @notice Indicates that an active V3 position has principal on exactly one side and cannot accept a deposit.
     error ActivePositionSingleSided();
+
+    /// @notice Indicates that both active-position principals are zero, or that V2 principal is zero on either side.
+    error InvalidPositionPrincipal();
 
     /// @notice Indicates that minted shares are below the caller's minimum.
     /// @param actual Actual number of shares calculated for the deposit.
@@ -41,8 +70,27 @@ interface IAdaptiveLPVault {
     /// @param amount1 Actual token1 redemption output.
     error AssetSlippage(uint256 amount0, uint256 amount1);
 
-    /// @notice Indicates that adapter withdrawal returns differ from vault balance increases.
+    /// @notice Indicates inconsistent adapter preview, deposit amounts, or vault balance changes during adapter deposit.
     error AdapterBalanceMismatch();
+
+    /// @notice Indicates that a transfer into the vault did not increase its balance by the exact requested amount.
+    /// @param token Token transferred into the vault.
+    /// @param expectedAmount Exact amount the vault requested.
+    /// @param balanceBefore Vault balance before transferFrom.
+    /// @param balanceAfter Vault balance after transferFrom, which may be lower than balanceBefore.
+    error TokenTransferMismatch(address token, uint256 expectedAmount, uint256 balanceBefore, uint256 balanceAfter);
+
+    /// @notice Indicates inconsistent vault input consumption or executor token balances during a swap.
+    error SwapBalanceMismatch();
+
+    /// @notice Indicates that the executor retained a router allowance after the swap.
+    error SwapAllowanceNotCleared();
+
+    /// @notice Indicates that the oracle-derived minimum swap output rounded to zero.
+    error ZeroSwapOutput();
+
+    /// @notice Indicates that an adapter preview leaves both tokens unused beyond their dust tolerances.
+    error InvalidDeploymentPreview();
 
     /// @notice Indicates that the current plan hash differs from the caller's expected hash.
     error InvalidPlanHash();
@@ -72,7 +120,7 @@ interface IAdaptiveLPVault {
     /// @notice Indicates that migration net asset value loss exceeds the configured limit.
     error MigrationLossExceeded();
 
-    /// @notice Indicates that the post-operation idle-asset ratio exceeds the configured limit.
+    /// @notice Indicates that the pre-deposit idle-asset ratio exceeds the configured limit.
     error IdleLimitExceeded();
 
     /// @notice Indicates that simulated or actual deployment is below the required ratio.
@@ -83,6 +131,18 @@ interface IAdaptiveLPVault {
 
     /// @notice Indicates that an exited position still contains liquidity or assets.
     error PositionNotCleared();
+
+    /// @notice Indicates that fee synchronization left claimable fees in the position.
+    error FeesNotCleared();
+
+    /// @notice Indicates that an expected active position is empty or has no remaining liquidity after partial exit.
+    error ActivePositionMissing();
+
+    /// @notice Indicates that an active V3 position has no valid NFT identifier.
+    error InvalidPositionId();
+
+    /// @notice Indicates that the active V3 range differs from the committed target range.
+    error PositionRangeMismatch();
 
     /// @notice Emitted after bootstrap commits initial assets, shares, position, and lifecycle state.
     /// @param manager Manager account that executed bootstrap.
@@ -187,7 +247,7 @@ interface IAdaptiveLPVault {
     function vaultControl() external view returns (address);
 
     /// @notice Initializes the vault once with seed assets and a first strategy position.
-    /// @dev The function validates all component bindings before transferring assets or committing state.
+    /// @dev Rejects zero seed amounts and a zero receiver before validating component bindings or transferring assets.
     /// @param amount0 Maximum token0 amount supplied by the manager.
     /// @param amount1 Maximum token1 amount supplied by the manager.
     /// @param receiver Account that receives the unlocked portion of initial shares.
@@ -195,6 +255,7 @@ interface IAdaptiveLPVault {
 
     /// @notice Deposits the active position's required asset ratio and mints vault shares.
     /// @dev Shares are priced against net asset value and supply observed before the deposit.
+    ///      After initialization is checked, rejects zero maxima or a zero receiver before deposit gating and accounting.
     /// @param amount0Max Maximum token0 amount the caller permits the vault to transfer.
     /// @param amount1Max Maximum token1 amount the caller permits the vault to transfer.
     /// @param minSharesOut Minimum acceptable number of minted shares.
@@ -208,6 +269,7 @@ interface IAdaptiveLPVault {
 
     /// @notice Burns shares from an owner and pays the pro rata token0 and token1 assets to a receiver.
     /// @dev A caller other than `owner` must have sufficient share allowance from `owner`.
+    ///      After initialization is checked, rejects zero shares, a zero receiver or a zero owner before accounting.
     /// @param shares Number of shares to redeem.
     /// @param minAmount0Out Minimum acceptable token0 output.
     /// @param minAmount1Out Minimum acceptable token1 output.
@@ -225,6 +287,7 @@ interface IAdaptiveLPVault {
     function rebalance(bytes32 expectedPlanHash, uint32 deadline) external;
 
     /// @notice Executes the current strategy plan with one controlled inventory-balancing swap.
+    /// @dev Rejects zero `amountIn` before reading the oracle; `keeperMinAmountOut` may be zero.
     /// @param expectedPlanHash Hash the caller expects from current on-chain inputs.
     /// @param expectedDirection Swap direction the caller expects from deployment assessment.
     /// @param amountIn Exact input amount proposed for the controlled swap.

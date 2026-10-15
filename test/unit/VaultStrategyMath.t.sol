@@ -207,10 +207,12 @@ contract VaultStrategyMathTest is Test {
         input.planVersion = type(uint64).max - 1;
         assertEq(harness.getPlan(input).version, type(uint64).max);
         input.planVersion = type(uint64).max;
-        _expectInvalidRange(input);
+        vm.expectRevert(IAdaptiveLPVault.PlanVersionOverflow.selector);
+        harness.getPlan(input);
         input.lastExecutedRegime = MarketRegime.EXTREME_DEVIATION;
         input.oracle.deviationBps = 501;
-        _expectInvalidRange(input);
+        vm.expectRevert(IAdaptiveLPVault.PlanVersionOverflow.selector);
+        harness.getPlan(input);
     }
 
     function test_positionAmountsAndOracleMetadataDoNotAffectPlan() public view {
@@ -266,7 +268,15 @@ contract VaultStrategyMathTest is Test {
         (bool expectedSuccess, bytes memory expected) =
             address(legacy).staticcall(abi.encodeCall(legacy.getPlan, (input)));
         assertEq(actualSuccess, expectedSuccess);
-        assertEq(actual, expected);
+        // The frozen reference uses InvalidTickRange for version exhaustion; only that selector intentionally changed.
+        if (
+            !actualSuccess && input.planVersion == type(uint64).max
+                && keccak256(actual) == keccak256(abi.encodeWithSelector(IAdaptiveLPVault.PlanVersionOverflow.selector))
+        ) {
+            assertEq(expected, abi.encodeWithSelector(IAdaptiveLPVault.InvalidTickRange.selector));
+        } else {
+            assertEq(actual, expected);
+        }
     }
 
     function testFuzz_bootstrapRangesAreAlignedCoverTwapAndHaveStableHash(int24 tick, bool medium) public view {

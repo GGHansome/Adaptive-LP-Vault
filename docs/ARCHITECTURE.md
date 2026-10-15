@@ -18,6 +18,7 @@
 5. Registry 的遍历不是资产会计路径。Vault 只读取 `activeVenue` 对应 Adapter，保证 Gas 有界。
 6. 所有资产迁移入口采用 Checks-Effects-Interactions、非重入保护和外部调用后的状态重读。
 7. `VaultStrategyMath.getPlan()` 是外部链接库的 `external pure` 入口，完整输入显式传入，不读取 Vault storage、不执行资产操作、不调用外部合约。库地址在 Vault 字节码链接时固定，部署后无角色可替换；该选择及其调用成本见 [ADR-0001](adr/0001-linked-position-planner.md)。
+8. 仓位快照和估值只在同一资产状态阶段内复用；手续费收取、退出仓位、Swap、存款和赎回转账后，必须读取受影响的新状态。代币余额由会计入口和资产操作校验各自在使用处读取，不沿退出、Swap、部署链传递缓存余额。主动仓位检查独立验证 Registry 身份、金额和区间，非主动 V3 检查及建仓前的 `enabled` 检查仍保留。区间事件在实际仓位与 Plan 校验一致后使用 Plan 的区间。历史测量见 [第一轮 Gas 优化记录](../debug/GAS_OPTIMIZATION_ROUND1.md)，当前实现与取舍见 [Gas 优化后的简化记录](../debug/GAS_SIMPLIFICATION.md)。
 
 ## 2. 系统边界
 
@@ -433,7 +434,7 @@ struct AdapterConfig {
 | `enterHighBps/exitHighBps`                      | `uint24`       | `immutable` | 构造                                 | 满足完整 Hysteresis 阈值关系；部署后不可修改                       |
 | `enterExtremeBps/exitExtremeBps`                | `uint24`       | `immutable` | 构造                                 | 满足完整 Hysteresis 阈值关系；部署后不可修改                       |
 | `narrowRangeHalfWidthSteps/wideRangeHalfWidthSteps` | `uint24`        | `immutable` | 构造                                 | spacing 步数；部署后不可修改                           |
-| `minRecenterBps/maxHealthyIdleBps`                | `uint16`       | `immutable` | 构造                                 | `maxHealthyIdleBps <= BPS`；`minDeployBps` 由 `BPS - maxHealthyIdleBps` 派生储                                |
+| `minRecenterBps/maxHealthyIdleBps`                | `uint16`       | `immutable` | 构造                                 | `maxHealthyIdleBps < BPS`；`minDeployBps` 在构造时由 `BPS - maxHealthyIdleBps` 派生并固定                                |
 | `maxSwapSlippageBps/maxMigrationLossBps`        | `uint16`       | `immutable` | 构造                                 | 不超过协议硬上限；部署后不可修改                                   |
 | `initialized`                                   | `bool`         | `storage`   | Bootstrap 成功                       | 只能从 false 到 true                                   |
 | `activeVenue`                                   | `VenueType`    | `storage`   | Bootstrap/Rebalance/Emergency Exit | 与有效 Position 一致                                    |
@@ -441,6 +442,8 @@ struct AdapterConfig {
 | `planVersion`                                   | `uint64`       | `storage`   | 成功 Position 结构变化                   | 初始为 0；每次成功变化递增 1，失败交易不更新                           |
 | `lastExecutedPlan`                              | `PositionPlan` | `storage`   | Bootstrap/成功策略计划执行                 | 保存最近一次成功执行的策略计划；其 `marketRegime` 是 Hysteresis 历史，非策略 Position 变化后可与当前资产位置不同 |
 
+
+Vault 另以 `uint256 public immutable minDeployBps` 保存构造期派生的最低部署率：构造函数在校验 `maxHealthyIdleBps < BPS` 后计算 `BPS - maxHealthyIdleBps`。该值不进入 `StrategyConfig`，不占普通 storage 槽位，部署后不可修改，并可通过 `minDeployBps()` 读取。首次评估和 Swap 模拟评估通过 `AssessmentInputs.minDeployBps` 复用该值，实际部署校验直接读取同一个 immutable。
 
 Vault 不单独保存 `activeAdapter`；当前 Adapter 是由 `activeVenue` 和 Bootstrap 后冻结的 Registry 绑定派生的唯一结果。`activeVenue != IDLE` 时使用 `getAdapter(activeVenue)`，`activeVenue == IDLE` 时 `getAdapter(IDLE)` 返回 `address(0)`，且不得调用任何 Adapter。
 
@@ -757,7 +760,7 @@ Adapter 架构边界：
 - Vault 仅可在非 IDLE 目标满足 `isEnterEnabled(targetVenue) == true` 后调用 `previewDeposit()` 或 `deposit()`；用户 Deposit 使用当前 `activeVenue` 作为目标；
 - `snapshot()` 返回完整的 Position 资产快照，费用和本金不得在同一会计路径中重复计价；
 - `withdraw(shares, totalShares)` 的 `totalShares` 必须是本次销毁前 Vault 总供应量。V2 Adapter 以 `floor(LPBalanceBefore × shares / totalShares)` 计算并销毁 LP Token；V3 Adapter 以 `floor(liquidityBefore × shares / totalShares)` 计算并移除 liquidity。原生 Position 单位取整结果为零时必须返回 `0/0`，不得向上取整或改为完整退出；
-- `withdraw()` 返回的 `amount0/amount1` 必须是底层 AMM 退出并转入 Vault 的实际 token0/token1 数量；Vault 必须以调用前后余额增量验证两个返回值。Redeem 的 Idle 分配以调用 `withdraw()` 前的 Vault 余额为基准，禁止把本次 Position 退出所得再次计入 Idle 份额；
+- `withdraw()` 和 `withdrawAll()` 返回的 `amount0/amount1` 必须是底层 AMM 退出并转入 Vault 的实际 token0/token1 数量。
 - `snapshot()`、`syncFees()`、`withdraw()` 和 `withdrawAll()` 不受 Adapter `enabled` 限制，并必须继续支持已禁用 Active Adapter 的计价和退出；`withdraw()` 和 `withdrawAll()` 必须将资产返回 Vault 控制的地址；
 
 ### 6.7 Swap Executor 接口
@@ -781,6 +784,7 @@ ControlledSwapExecutor 架构边界：
 
 - `vault`、Router、`swapPool`、Fee Tier 和固定 Swap 方法由组件工厂创建 Executor 时固定，Bootstrap 后不能由 Keeper/Manager 替换；Executor 构造函数以 `SwapExecutorConfig.factory` 作为预期 V3 Factory 验证 Pool 登记和 Router Factory 绑定；`swapPool` 必须与 `canonicalOracle.canonicalPool()` 为同一地址，Executor 的 `token0/token1` 从该 Pool 读取并按地址升序，且与 Vault/canonical Pool 的有序资产完全一致；
 - Executor 只接受 Vault 调用，只执行 `SwapPlan` 指定的交易级参数和局部 Swap 安全检查；
+- Executor 以其调用期间 Vault 输出 Token 的实际余额增量返回 `amountOut`；
 - Executor 不调用 Vault 策略逻辑，不退出或建立 Position，也不负责完整迁移损失、部署率、Idle 或单活 Position 的后置校验；这些检查由 Vault 负责；
 
 
@@ -846,11 +850,35 @@ error InvalidTokenDecimals(address token, uint8 actual);
 /// @notice Bootstrap 的初始 NAV 低于 minimumInitialNav。
 error MinimumNavNotMet();
 
-/// @notice 双边 Active Position 下计算出的实际存款 d0 或 d1 为零。
+/// @notice Bootstrap 的总 shares 不足以覆盖永久锁定份额并向 receiver 分配正数 shares。
+error InitialSharesTooLow(uint256 actual, uint256 locked);
+
+/// @notice 必须非零的输入或计算出的实际 Token 数量为零。
 error ZeroAmount();
 
-/// @notice V3 Active Position 的 principal0 或 principal1 为零，不能接受 Deposit。
+/// @notice 非零存款计算出的 sharesMinted 取整为零。
+error ZeroShares();
+
+/// @notice V3 Active Position 恰好一侧 principal 为零，不能接受 Deposit。
 error ActivePositionSingleSided();
+
+/// @notice Active Position 双侧 principal 均为零，或 V2 任一侧 principal 为零。
+error InvalidPositionPrincipal();
+
+/// @notice 计划版本不能继续递增；计划库与 Emergency Exit 使用同一错误。
+error PlanVersionOverflow();
+
+/// @notice 当前时间无法表示为 uint32。
+error TimestampOverflow();
+
+/// @notice 组件工厂返回的控制合约缺失或绑定不匹配。
+error InvalidControlBinding();
+
+/// @notice 组件工厂返回的 Swap Executor 缺失或绑定不匹配。
+error InvalidSwapExecutorBinding();
+
+/// @notice Oracle 报告的 Token 精度与 Token 实际精度不一致。
+error TokenDecimalsMismatch(address token, uint8 expected, uint8 actual);
 
 /// @notice 执行时计算出的 sharesMinted 低于调用者指定的 minSharesOut。
 /// @param actual 实际计算出的 sharesMinted。
@@ -862,8 +890,23 @@ error SharesSlippage(uint256 actual, uint256 minimum);
 /// @param amount1 实际 token1 输出。
 error AssetSlippage(uint256 amount0, uint256 amount1);
 
-/// @notice Adapter 的 withdraw 返回值与 Vault 在调用期间收到的 token0/token1 实际余额增量不一致。
+/// @notice Adapter 的预览或存款返回量与输入上限、实际 Vault 余额变化不一致。
 error AdapterBalanceMismatch();
+
+/// @notice 向 Vault 转入资产的实际余额变化不等于请求数量，包括余额反而下降。
+error TokenTransferMismatch(address token, uint256 expectedAmount, uint256 balanceBefore, uint256 balanceAfter);
+
+/// @notice Swap 的 Vault 输入消耗或 Executor 余额基线不符合约束。
+error SwapBalanceMismatch();
+
+/// @notice Swap 后 Executor 对 Router 的 allowance 未归零。
+error SwapAllowanceNotCleared();
+
+/// @notice Oracle 推导的 Swap 最低输出为零。
+error ZeroSwapOutput();
+
+/// @notice Adapter 部署预览同时剩余超过 dustTolerance 的双边资产，无法按单边过量库存解释。
+error InvalidDeploymentPreview();
 
 /// @notice 当前重新生成的 PositionPlan 哈希与 expectedPlanHash 不一致。
 error InvalidPlanHash();
@@ -904,13 +947,13 @@ error TokenNotAllowed();
 /// @notice amountIn 超过本次过量资产修复允许使用的最大数量。
 error SwapAmountExceeded();
 
-/// @notice Swap 的实际输出低于本次 SwapPlan 的 minAmountOut。
-error SwapSlippage();
+/// @notice Swap 的实际输出低于本次 SwapPlan 的 minAmountOut；Vault 与 Executor 使用同一签名。
+error SwapSlippage(uint256 minimumAmountOut, uint256 actualAmountOut);
 
 /// @notice 完整迁移后的 NAV 损失超过 maxMigrationLossBps。
 error MigrationLossExceeded();
 
-/// @notice Deposit 或 Rebalance 后的 Idle 比例超过 maxHealthyIdleBps。
+/// @notice 存款前的 Idle 比例超过 maxHealthyIdleBps；部署后的比例使用 DeploymentRatioTooLow 校验。
 error IdleLimitExceeded();
 
 /// @notice 目标 Position 的最差结果模拟部署率或最终实际部署率低于派生的 minDeployBps。
@@ -921,6 +964,18 @@ error ActivePositionExists();
 
 /// @notice 完整退出后旧 Position 的 liquidity 或资产状态未完全清空。
 error PositionNotCleared();
+
+/// @notice Vault 在 syncFees 后仍观察到可领取费用。
+error FeesNotCleared();
+
+/// @notice 应存在的 Active Position 为空，或部分退出后的 liquidity 为零。
+error ActivePositionMissing();
+
+/// @notice Active V3 Position 的 NFT 标识为零。
+error InvalidPositionId();
+
+/// @notice Active V3 Position 的实际区间与计划区间不一致。
+error PositionRangeMismatch();
 
 /// @notice V3 手续费归集后仍存在可领取费用。
 error FeeCollectionIncomplete();
@@ -1338,7 +1393,7 @@ sequenceDiagram
 
 V2 Adapter 读取 Pair `getReserves()`、LP Token 总供应量和 Adapter 持有的 LP Token 余额。按比例计算的储备权益同时包含交易费用形成的储备增长，不再产生独立 claimable fee 字段。
 
-非活跃 V2 LP 的确认规则以 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §5.5 为准：Bootstrap 只要求两个 V3 受管理仓位为空；拓扑检查不读取非活跃 V2 的 Position。激活 V2 的建仓路径验证实际 LP 余额增量等于 `deposit()` 返回的铸造量，最终部署率、Idle、逐 Token 守恒及带 Swap 的 NAV 损失统一使用包含新确认捐赠的完整会计快照。Emergency Exit 只退出 Active Adapter，不清理非活跃 V2 LP；非活跃 V3 受管理仓位仍必须为空。
+非活跃 V2 LP 的确认规则以 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §5.5 为准：Bootstrap 只要求两个 V3 受管理仓位为空；拓扑检查不读取非活跃 V2 的 Position。V2 Adapter 在每次 `deposit()` 内校验实际 LP 余额增量与 Pair `mint()` 返回量一致，覆盖激活和追加资金路径；已有 LP 不计入本次铸造量。不一致时以 `IPositionAdapter.AdapterBalanceMismatch(pair, expectedBalance, actualBalance)` 回滚，其中 `expectedBalance` 为调用前 LP 余额加本次报告铸造量。最终部署率、Idle、逐 Token 守恒及带 Swap 的 NAV 损失统一使用包含新确认捐赠的完整会计快照。Emergency Exit 只退出 Active Adapter，不清理非活跃 V2 LP；非活跃 V3 受管理仓位仍必须为空。
 
 ### 10.4 舍入与全精度
 
@@ -1376,7 +1431,7 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | INV-03 | IDLE 时没有纳入会计的 Active Position，允许 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §5.5 定义的非活跃 V2 未确认 LP；策略输入使用 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.4 的规范空快照 | Emergency/状态更新回滚 |
 | INV-04 | `totalAssets` 不重复计入 principal、fees 或 Donation                                       | 会计测试失败           |
 | INV-05 | Deposit shares 使用存款前 NAV/Supply                                                     | Deposit 回滚       |
-| INV-06 | Redeem 使用销毁前 Supply，分别向下取整退出前 Idle 份额与 Adapter 原生 Position 单位份额，以经 Vault 余额增量验证的 Adapter 实际退出资产形成最终输出；从显式 `owner` 销毁 shares，非 owner 调用者只有在 `allowance(owner, msg.sender)` 足够时才能执行 | Redeem 回滚        |
+| INV-06 | Redeem 使用销毁前 Supply，分别向下取整退出前 Idle 份额与 Adapter 原生 Position 单位份额，以可信 Adapter 返回的实际退出金额形成最终输出；从显式 `owner` 销毁 shares，非 owner 调用者只有在 `allowance(owner, msg.sender)` 足够时才能执行 | Redeem 回滚        |
 | INV-07 | Oracle 不健康时不执行价值相关操作                                                                | 入口回滚             |
 | INV-08 | Permissionless Caller 不能改变计划内容                                                      | 计划哈希校验失败         |
 | INV-09 | Swap 只允许固定 token0/token1、部署时封存的 Router/方法和目标过量资产修复范围                                | Swap 回滚          |
@@ -1402,11 +1457,11 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | `AdaptiveLPVault` 单元测试 | Vault 会计、原始资产快照、Oracle 快照编排、计划输入的可信来源及 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.4 的 IDLE/Bootstrap 规范空快照、部署评估、`requiresSwap`、`direction`、八个仅初始化后入口的 `NotInitialized()` 覆盖及无角色入口先检查生命周期、角色门控入口先授权再检查生命周期的错误优先级、角色、暂停、Registry 和核心状态边界 |
 | `VaultStrategyMath` 单元测试 | 外部链接的 `external pure` 入口独立输入测试、Bootstrap 完整阈值分类、历史 Regime 迟滞与当前 Venue 独立、按 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9.1.3 生成规范化 Tick 和 Range、负 Tick 最近倍数与平局向下、Recenter 的宽度/Spot/中心位移边界、版本溢出、`PositionPlanHash` 精确 ABI 编码与链下复算、相同输入确定性及无资产余额依赖 |
 | Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足和必要 Pool 读取失败时 `snapshot()` 不回滚并按 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §8.4 返回规范不健康快照、早期与晚期失败均不泄露部分结果或复用上一次健康结果、`isHealthy()` 与 `snapshot().healthy` 判定一致、故障恢复后返回完整健康快照、Pool 当前零流动性、Pool 绑定、Pool 有序 Token 与地址升序、Token metadata 读取和 decimals 上限、`Q1/Q0` 双向报价、向上/向下取整、三个规范化价格字段、`observedAt`、Short TWAP/TWAP 偏离 |
-| V2 Adapter 测试       | [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.2 的 `PositionSnapshot` 规范化、储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、按销毁前 Supply 向下取整 LP Token 的部分退出、零 LP 单位返回 `0/0`、返回值与 Vault 实际余额增量一致、有序 Token 绑定 |
+| V2 Adapter 测试       | [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.2 的 `PositionSnapshot` 规范化、储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、按销毁前 Supply 向下取整 LP Token 的部分退出、零 LP 单位返回 `0/0`、V2 Adapter 以 LP Token 余额核对 `mint()` 返回量，覆盖首次建仓、已有仓位追加、预存 LP 捐赠以及报告量过大/过小、LP 未增加或减少时的原子回滚；返回值与 Vault 实际余额增量一致、有序 Token 绑定 |
 | V3 Adapter 测试       | principal、tokens owed、fee growth 增量、领取后重读、principal 比例与手续费隔离、`amount0Max/amount1Max` 与实际 `used0/used1`、immutable binding getters、Pool 有序 Token、`tickSpacing`、Range、按销毁前 Supply 向下取整 liquidity 的部分退出、零 liquidity 单位返回 `0/0`、返回值与 Vault 实际余额增量一致、旧 NFT 清理 |
 | Adapter Registry 测试 | `configureAdapter(venue, adapter)` 的 Vault/Adapter/Pool 有序 Token 一致性、按 Venue 使用 Vault 预期 Factory 验证 Pool 登记并拒绝自报恶意 Factory、错误资产对与反向顺序回滚、其他 immutable 绑定校验、`tickSpacing` 缓存、初始化前重复配置、Bootstrap 后绑定和缓存冻结、仅 `enabled` 可变、Pool/Fee Tier 不重复存储 |
-| Swap 测试             | 组件工厂在 Vault 构造时创建专属 Executor、Executor `vault() == address(vault)`、Router 绑定来自 `VaultConfig.router`、`swapPool == canonicalPool`、swapPool/Executor/Vault 有序 Token 一致性与反向顺序回滚、固定 Router/Token 方法、方向、过量资产修复范围、方向报价与 BPS 滑点折算的两段向上取整、派生部署阈值、minOut、deadline、Vault 向 Executor 精确交付输入、Vault 输出余额增量与返回值一致、Executor 余额恢复基线、回调验证和授权清理 |
-| Deposit/Redeem 集成测试 | 只转实际数量、V3 单边 Active Position 的 `ActivePositionSingleSided()`、双边 Position 零实际存款的 `ZeroAmount()`、按 principal 比例的限制侧与非整除舍入、手续费不影响 Deposit 比例、暂停赎回、Oracle 异常赎回、Redeem 最小双资产输出、退出前 Idle 分配与原生 Position 单位分别向下取整、Adapter 嵌套取整导致最终实际输出不同于 `floor(x × T / S)`、Adapter 返回值与 Vault 余额增量一致且不一致时以 `AdapterBalanceMismatch()` 回滚、IDLE Redeem 不调用 Adapter、零 Position 单位退出、持有人自赎不消费 allowance、授权 spender 从显式 `owner` 销毁 shares 并消费有限 allowance、最大 allowance 不递减、任意 `receiver` 收款、owner 余额或 allowance 不足时原子回滚、捐赠、单边/高 Idle、比例公平性、当前 Active Adapter 禁用时 Deposit 在 Adapter 调用和 Token 转入前回滚、禁用后资产仍计价且 Redeem 成功 |
+| Swap 测试             | 组件工厂在 Vault 构造时创建专属 Executor、Executor `vault() == address(vault)`、Router 绑定来自 `VaultConfig.router`、`swapPool == canonicalPool`、swapPool/Executor/Vault 有序 Token 一致性与反向顺序回滚、固定 Router/Token 方法、方向、过量资产修复范围、方向报价与 BPS 滑点折算的两段向上取整、派生部署阈值、minOut、deadline、Vault 向 Executor 精确交付输入、Vault 直接使用可信 Executor 的输出金额返回值、不重复读取 Vault Swap 输出余额、Executor 余额恢复基线、回调验证和授权清理 |
+| Deposit/Redeem 集成测试 | 只转实际数量、V3 单边 Active Position 的 `ActivePositionSingleSided()`、V2 任一侧或双侧本金为零的 `InvalidPositionPrincipal()`、双边 Position 零实际存款的 `ZeroAmount()`、按 principal 比例的限制侧与非整除舍入、手续费不影响 Deposit 比例、暂停赎回、Oracle 异常赎回、Redeem 最小双资产输出、退出前 Idle 分配与原生 Position 单位分别向下取整、Adapter 嵌套取整导致最终实际输出不同于 `floor(x × T / S)`、直接使用可信 Adapter 的退出金额返回值、不重复读取退出后 Vault 余额、最低输出检查及退出前 Idle 独立分配、IDLE Redeem 不调用 Adapter、零 Position 单位退出、持有人自赎不消费 allowance、授权 spender 从显式 `owner` 销毁 shares 并消费有限 allowance、最大 allowance 不递减、任意 `receiver` 收款、owner 余额或 allowance 不足时原子回滚、捐赠、单边/高 Idle、比例公平性、当前 Active Adapter 禁用时 Deposit 在 Adapter 调用和 Token 转入前回滚、禁用后资产仍计价且 Redeem 成功 |
 | Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Bootstrap 初始化 `lastPositionChangeAt`、两类 Rebalance 共用 Cooldown 与 `CooldownActive(availableAt)`、Emergency Exit 绕过检查且不重置计时、IDLE 幂等分支不更新时间戳、全部流通 shares 赎回保留锁定份额对应资产、`activeVenue`/`planVersion`/`lastExecutedPlan` 不因 Redeem 改变、`expectedPlanHash`、`expectedDirection`、`simulatedDeployBps(x)`/`simulatedIdleBps(x)` 最差结果模拟、基于最终实际 Vault 余额与 `PositionSnapshot` 且复用迁移 `twapTick` 的 `finalDeployBps`/`finalIdleBps`、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
 | 事件契约测试            | `VaultBootstrapped.initialVenue` 初始化链下位置，`RebalanceExecuted.targetVenue` 更新位置且同 Venue Recenter 保持相同值，`EmergencyExit` 将位置更新为 `IDLE`；`FeesSynchronized` 仅在 V3 实际归集至少一种非零费用时恰好发出一次，V2、IDLE、V3 双零及最终回滚均不发出，事件费用等于 Vault 余额增量且 `total0/total1` 使用同步完成瞬间快照；Bootstrap 建立 V3、V2/IDLE 迁入 V3、同 Venue Recenter 和 V3 跨 Venue 迁移均发出 `V3RangeChanged`，无旧 V3 时 old Tick 为 0/0，跨 V3 Venue 且 Tick 相同仍发出；Deposit、Redeem、费用同步、目标为 V2/IDLE 的 Rebalance、Emergency Exit 和失败交易不发出 `V3RangeChanged`；已在 IDLE 的幂等 Emergency Exit 不发出 `EmergencyExit`；自定义事件 ABI 不包含额外的通用资产位置或 Idle 状态变化事件 |
 | Invariant/Fuzz      | 资产守恒、shares 公平性、单活 Position、费用不重复、任意调用者不能越权                                                                                                                                                                               |

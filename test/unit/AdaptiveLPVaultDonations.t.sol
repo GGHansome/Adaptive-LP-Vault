@@ -35,7 +35,7 @@ contract DonationV3Adapter {
     VenueType public immutable venue;
     uint24 public immutable feeTier;
     int24 public immutable tickSpacing;
-    PositionSnapshot private _position;
+    PositionSnapshot internal _position;
 
     constructor(address vault_, address pool_, address token0_, address token1_, VenueType venue_) {
         vault = vault_;
@@ -51,7 +51,7 @@ contract DonationV3Adapter {
         return _position;
     }
 
-    function syncFees() external pure returns (uint256, uint256) {
+    function syncFees() external virtual returns (uint256, uint256) {
         return (0, 0);
     }
 
@@ -96,7 +96,7 @@ contract DonationV3Adapter {
         require(IERC20(token1).transfer(vault, amount1));
     }
 
-    function withdrawAll() external returns (uint256 amount0, uint256 amount1) {
+    function withdrawAll() external virtual returns (uint256 amount0, uint256 amount1) {
         require(msg.sender == vault);
         amount0 = _position.amount0;
         amount1 = _position.amount1;
@@ -129,20 +129,20 @@ contract DonationRouter {
 }
 
 contract AdaptiveLPVaultDonationsTest is Test {
-    uint256 private constant SEED = 1000 ether;
-    uint256 private constant LOCKED = 1 ether;
-    AdaptiveLPVault private vault;
-    VaultControl private control;
-    AssessmentOracle private oracle;
-    MockV2ERC20 private token0;
-    MockV2ERC20 private token1;
-    MockV2Pair private pair;
-    UniswapV2Adapter private v2;
-    DonationV3Adapter private low;
-    DonationV3Adapter private high;
-    DonationRouter private router;
+    uint256 internal constant SEED = 1000 ether;
+    uint256 internal constant LOCKED = 1 ether;
+    AdaptiveLPVault internal vault;
+    VaultControl internal control;
+    AssessmentOracle internal oracle;
+    MockV2ERC20 internal token0;
+    MockV2ERC20 internal token1;
+    MockV2Pair internal pair;
+    UniswapV2Adapter internal v2;
+    DonationV3Adapter internal low;
+    DonationV3Adapter internal high;
+    DonationRouter internal router;
 
-    function setUp() public {
+    function setUp() public virtual {
         MockV2ERC20 a = new MockV2ERC20("Donation A", "DA");
         MockV2ERC20 b = new MockV2ERC20("Donation B", "DB");
         (token0, token1) = address(a) < address(b) ? (a, b) : (b, a);
@@ -519,10 +519,87 @@ contract AdaptiveLPVaultDonationsTest is Test {
     function test_reportedLiquidityMustMatchActualLpIncrease() public {
         _donate(100 ether);
         oracle.setDeviation(350);
-        vm.mockCall(address(v2), abi.encodeWithSelector(IPositionAdapter.deposit.selector), abi.encode(0, 0, 1));
-        vm.expectRevert(IAdaptiveLPVault.AdapterBalanceMismatch.selector);
+        vm.mockCall(address(pair), abi.encodeWithSignature("mint(address)", address(v2)), abi.encode(1));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPositionAdapter.AdapterBalanceMismatch.selector, address(pair), 100 ether + 1, 100 ether
+            )
+        );
         vault.bootstrap(SEED, SEED, address(this));
         assertEq(pair.balanceOf(address(v2)), 100 ether);
+        assertEq(vault.totalSupply(), 0);
+        assertFalse(vault.initialized());
+        assertEq(token0.allowance(address(vault), address(v2)), 0);
+        assertEq(token1.allowance(address(vault), address(v2)), 0);
+    }
+
+    function test_v2DepositRejectsMintMismatchAndRollsBack() public {
+        _donate(100 ether);
+        _bootstrap(350, SEED, SEED);
+        uint256 lpBefore = pair.balanceOf(address(v2));
+        uint256 supplyBefore = vault.totalSupply();
+        uint256 user0Before = token0.balanceOf(address(this));
+        uint256 user1Before = token1.balanceOf(address(this));
+        vm.mockCall(address(pair), abi.encodeWithSignature("mint(address)", address(v2)), abi.encode(1));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPositionAdapter.AdapterBalanceMismatch.selector, address(pair), lpBefore + 1, lpBefore
+            )
+        );
+        vault.deposit(100 ether, 100 ether, 0, address(this));
+
+        assertEq(pair.balanceOf(address(v2)), lpBefore);
+        assertEq(vault.totalSupply(), supplyBefore);
+        assertEq(token0.balanceOf(address(this)), user0Before);
+        assertEq(token1.balanceOf(address(this)), user1Before);
+        assertEq(token0.allowance(address(vault), address(v2)), 0);
+        assertEq(token1.allowance(address(vault), address(v2)), 0);
+        _assertAssets(1100 ether, 1100 ether);
+    }
+
+    function test_v2PlainMigrationRejectsMintMismatchAndRestoresOldPosition() public {
+        _bootstrap(150, SEED, SEED);
+        _donate(100 ether);
+        PositionPlan memory plan = _plan(350);
+        vm.mockCall(address(pair), abi.encodeWithSignature("mint(address)", address(v2)), abi.encode(1));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPositionAdapter.AdapterBalanceMismatch.selector, address(pair), 100 ether + 1, 100 ether
+            )
+        );
+        vault.rebalance(plan.planHash, uint32(block.timestamp));
+
+        assertEq(uint8(vault.activeVenue()), uint8(VenueType.UNISWAP_V3_HIGH_FEE));
+        assertEq(high.snapshot().principal0, SEED);
+        assertEq(high.snapshot().principal1, SEED);
+        assertEq(pair.balanceOf(address(v2)), 100 ether);
+        _assertAssets(SEED, SEED);
+    }
+
+    function test_v2SwapMigrationRejectsMintMismatchAndRestoresOldPosition() public {
+        _bootstrap(150, 1500 ether, 500 ether);
+        _donate(100 ether);
+        PositionPlan memory plan = _plan(350);
+        uint256 router0Before = token0.balanceOf(address(router));
+        uint256 router1Before = token1.balanceOf(address(router));
+        vm.mockCall(address(pair), abi.encodeWithSignature("mint(address)", address(v2)), abi.encode(1));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IPositionAdapter.AdapterBalanceMismatch.selector, address(pair), 100 ether + 1, 100 ether
+            )
+        );
+        vault.rebalanceWithSwap(plan.planHash, SwapDirection.ZERO_FOR_ONE, 500 ether, 0, uint32(block.timestamp));
+
+        assertEq(uint8(vault.activeVenue()), uint8(VenueType.UNISWAP_V3_HIGH_FEE));
+        assertEq(high.snapshot().principal0, 1500 ether);
+        assertEq(high.snapshot().principal1, 500 ether);
+        assertEq(pair.balanceOf(address(v2)), 100 ether);
+        assertEq(token0.balanceOf(address(router)), router0Before);
+        assertEq(token1.balanceOf(address(router)), router1Before);
+        _assertAssets(1500 ether, 500 ether);
     }
 
     function test_nonActiveV2IsNotQueriedForTopologyEvenWhenSnapshotFails() public {
@@ -634,7 +711,7 @@ contract AdaptiveLPVaultDonationsTest is Test {
         assertEq(pair.balanceOf(address(v2)), donated);
     }
 
-    function _bootstrap(uint256 deviation, uint256 amount0, uint256 amount1) private {
+    function _bootstrap(uint256 deviation, uint256 amount0, uint256 amount1) internal {
         oracle.setDeviation(deviation);
         vault.bootstrap(amount0, amount1, address(this));
     }
@@ -643,7 +720,7 @@ contract AdaptiveLPVaultDonationsTest is Test {
         assertTrue(pair.transfer(address(v2), liquidity));
     }
 
-    function _plan(uint256 deviation) private returns (PositionPlan memory plan) {
+    function _plan(uint256 deviation) internal returns (PositionPlan memory plan) {
         oracle.setDeviation(deviation);
         (plan,) = vault.previewRebalance();
     }

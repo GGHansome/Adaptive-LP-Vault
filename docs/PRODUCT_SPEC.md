@@ -179,7 +179,8 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 - `bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓前，重新校验由 canonical Pool 派生并由 canonical Oracle 固化的 token0/token1、Token decimals、canonical Oracle、Swap Executor 和所有 v1 Adapter 的完整 immutable 绑定及 `tickSpacing` 缓存；
 - 验证 `swapExecutor.swapPool() == canonicalOracle.canonicalPool()`；
 - Oracle Healthy；
-- 初始 token0 和 token1 均大于零；
+- 初始 token0 和 token1 均大于零；任一为零时以 `ZeroAmount()` 回滚；
+- `receiver != address(0)`；否则以 `ERC20InvalidReceiver(address(0))` 回滚。金额与接收者校验在 Manager 权限和未初始化检查之后、组件绑定校验及资产转入之前执行；
 - 初始 `NAV1` 不低于 `minimumInitialNav`。
 
 执行规则：
@@ -207,6 +208,8 @@ Bootstrap 完成后的遵从规则如下：
 
 用户提交 `amount0Max`、`amount1Max`、`minSharesOut` 和 `receiver`。Vault 只转入按当前唯一 Active Position 本金比例计算的实际数量，不先转入全部最大值。
 
+检查初始化后，先拒绝任一为零的 `amount0Max/amount1Max`（`ZeroAmount()`）和零地址 `receiver`（`ERC20InvalidReceiver(address(0))`），再检查存款权限、读取 Oracle 和同步费用。`minSharesOut` 可以为零；两个最大值均非零时，仍须保留实际入金因取整为零的检查。
+
 前置条件：
 
 - `initialized == true`；
@@ -214,8 +217,7 @@ Bootstrap 完成后的遵从规则如下：
 - Oracle Healthy；
 - `activeVenue != IDLE` 且 Active Position 结构有效；
 - `isEnterEnabled(activeVenue) == true`；Adapter 已禁用时以 `AdapterDisabled()` 回滚；
-- 存款前 `T0 > 0`、`T1 > 0`；
-- V3 Active Position 的 `principal0 > 0` 且 `principal1 > 0`；任一侧为零时以 `ActivePositionSingleSided()` 回滚；
+- V3 Active Position 的 `principal0 > 0` 且 `principal1 > 0`；恰好一侧为零时以 `ActivePositionSingleSided()` 回滚，双侧均为零时以 `InvalidPositionPrincipal()` 回滚；V2 任一侧本金为零（包括 LP 份额对应的 Token 数量向下取整为零）时以 `InvalidPositionPrincipal()` 回滚；
 - 存款前 `idleBps <= maxHealthyIdleBps`；
 
 设当前 Active Position Snapshot 的本金为 `p0 = principal0`、`p1 = principal1`。`d0` 和 `d1` 是实际从用户转入的数量，按以下最大共同存款公式计算：
@@ -240,7 +242,7 @@ $$
 
 1. 读取存款前 Oracle、资产和 Active Position Snapshot；费用同步按 §6.8 的统一会计路径执行并按条件发出 `FeesSynchronized`，且不改变 Deposit 比例来源。
 2. 按上述公式计算实际 `d0`、`d1`；若 `d0 == 0` 或 `d1 == 0`，以 `ZeroAmount()` 回滚。
-3. 使用存款前 `NAV1`、`S` 和实际 `d0`、`d1` 计算 `sharesMinted`。
+3. 使用存款前 `NAV1`、`S` 和实际 `d0`、`d1` 计算 `sharesMinted`；取整为零时以 `ZeroShares()` 回滚。
 4. 验证 `sharesMinted >= minSharesOut`；否则以 `SharesSlippage(sharesMinted, minSharesOut)` 回滚。
 5. 从用户转入实际 `d0`、`d1`。
 6. 按当前 Position Plan 尝试增加流动性；不能部署的数量保留为 Idle。
@@ -269,11 +271,13 @@ $$
 
 执行规则：
 
-- 首先检查 `initialized == true`；未初始化时以 `NotInitialized()` 回滚
+- 首先检查 `initialized == true`；未初始化时以 `NotInitialized()` 回滚；
+- 在余额、授权和费用同步之前，按顺序拒绝零 `shares`（`ZeroAmount()`）、零地址 `receiver`（`ERC20InvalidReceiver(address(0))`）及零地址 `owner`（`ERC20InvalidSender(address(0))`）；
+- `minAmount0Out/minAmount1Out` 可以为零；实际输出任一侧因单边资产或取整为零不单独构成拒绝条件，仍按调用者的最低输出要求校验；
 - 校验 `owner` 的 shares 余额；`msg.sender != owner` 时按 ERC-20 规则消费 `allowance(owner, msg.sender)`；
 - 非 IDLE 时调取 `syncFees()` 同步 Active Adapter 的费用并按条件发出 `FeesSynchronized`；IDLE 时不得调用 Adapter。随后读取销毁前总供应量和资产快照；
 - 在 Adapter 退出前固定 `I0/I1`，按上述公式计算 `idleOut0/idleOut1`；不得把 Adapter 退出后转入 Vault 的资产再次计入 Idle 分配；
-- 非 IDLE 时调用 Active Adapter `withdraw(x, S)` 按规则向下取整，并将底层 AMM 实际退出资产返回 Vault。Vault 必须验证 Adapter 返回值分别等于本次调用造成的 token0/token1 实际余额增量，不一致时以 `AdapterBalanceMismatch()` 回滚；IDLE 时不得调用 Adapter，`positionOut0/positionOut1` 固定为零；
+- 非 IDLE 时调用 Active Adapter `withdraw(x, S)` 按规则向下取整，并将底层 AMM 实际退出资产返回 Vault。Adapter 以调用期间 Vault 的 token0/token1 实际余额增量返回金额，使用这两个返回值作为 `positionOut0/positionOut1`。IDLE 时不得调用 Adapter，二者固定为零；
 - 将 `positionOut0/positionOut1` 与 `idleOut0/idleOut1` 合并为最终实际 `amount0Out/amount1Out`；
 - 在 Vault 层验证最终实际 `amount0Out >= minAmount0Out` 且 `amount1Out >= minAmount1Out`；
 - 从 `owner` 销毁 shares 后，将最终 token0/token1 转账给 `receiver`。
@@ -301,7 +305,7 @@ V2 LP 捐赠采用激活时确认规则：
 - V2 非活跃时，其实际 LP 余额暂不纳入 `totalAssets`、NAV、Deposit 定价或 Redeem；这些 LP 不构成第二个策略主动仓位，也不要求主动清理。
 - Bootstrap 或 Rebalance 激活 V2 后，已有 LP 与本次铸造 LP 一并纳入会计，不增发 shares、不提供捐赠者退款或提取权；收益由激活时全部 shares 持有人（包括锁定份额）按比例分享。协议接受激活前新存款者分享收益，激活前已赎回者不分享。
 - V2 活跃时收到 LP 捐赠立即纳入会计；迁出或紧急退出 V2 时，退出全部实际 LP。Active 为 V3 或 IDLE 时，Emergency Exit 不处理非活跃 V2 的未确认 LP。
-- 激活 V2 的建仓路径必须验证实际 LP 余额增量等于 Adapter 返回的本次铸造量。最终部署率、Idle、逐 Token 守恒和（带 Swap 时）迁移净值损失统一使用包含新确认捐赠的完整会计快照；因此捐赠可以抵补最终资产净值减少，但可能被迁移成本消耗。成功事件、查询、后续定价和赎回使用同一完整会计快照。
+- V2 Adapter 在每次 `deposit()` 内验证自身实际 LP 余额增量等于 Pair `mint()` 返回的本次铸造量，覆盖 Bootstrap、用户 Deposit 和两类 Rebalance；已有仓位和 LP 捐赠不计入本次铸造量，不一致时由 Adapter 回滚。最终部署率、Idle、逐 Token 守恒和（带 Swap 时）迁移净值损失统一使用包含新确认捐赠的完整会计快照；因此捐赠可以抵补最终资产净值减少，但可能被迁移成本消耗。成功事件、查询、后续定价和赎回使用同一完整会计快照。
 - V3 仅管理内部记录的 `_positionId`；外来 NFT 不自动接管、不计价，也没有取回入口。对活跃受管理 NFT 追加 liquidity 的捐赠随该 Position 纳入会计。
 
 该规则保留单活会计与赎回路径，避免因第三方强制转入 LP 阻断操作；非活跃 V2 捐赠的收益归属取决于激活时点，而非捐赠时点。
@@ -859,7 +863,7 @@ Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_asse
 
 生成部署评估规则如下:
 
-- `minDeployBps` 由唯一配置的 `maxHealthyIdleBps` 派生：`minDeployBps = BPS - maxHealthyIdleBps`；
+- `minDeployBps` 由唯一配置的 `maxHealthyIdleBps` 派生：`minDeployBps = BPS - maxHealthyIdleBps`；Vault 在构造函数中计算一次并保存为公开的 `immutable`，部署后不可修改；首次评估、Swap 模拟评估和实际部署校验统一读取该派生阈值，不增加独立配置；
 - 对 MarketRegime 为 LOW、MEDIUM 或 HIGH 的非 IDLE 计划，如果 `initialDeployBps < minDeployBps`，标记 `requiresSwap = true`；
 - `initialDeployBps >= minDeployBps` 时，标记 `requiresSwap = false`；
 - `EXTREME_DEVIATION` 以 IDLE 为目标，返回 `requiresSwap = false` 和 `direction = NONE`，不受部署率边界约束；
@@ -928,7 +932,9 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 - 当前计划的目标 Adapter 满足 `isEnterEnabled(targetVenue) == true`；
 - 当前部署评估的 `requiresSwap == true`；
 - `expectedDirection` 非 `NONE`，并与当前部署评估的 `direction` 一致；
-- `amountIn > 0`
+- `amountIn > 0`。
+
+零 `amountIn` 在角色、初始化、暂停、截止时间和冷却检查之后、Oracle 读取与计划生成之前，以 `SwapNotAllowed()` 回滚。`keeperMinAmountOut` 可以为零，协议最低输出保护仍然生效。
 
 带 Swap Rebalance 必须在一笔交易内原子完成：
 
@@ -936,8 +942,8 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 2. 检查目标 Adapter 已启用，再对当前 `T0/T1` 执行首次部署评估，使用派生值 `minDeployBps = BPS - maxHealthyIdleBps` 校验 `initialDeployBps < minDeployBps`、`requiresSwap == true` 以及 `direction == expectedDirection`；
 3. 同步费用并按条件发出 `FeesSynchronized`，捕获迁移前 TWAP 和 NAV；退出旧 Position 后重新读取实际余额；
 4. 检查 `amountIn`，根据最差 `protocolMinOut` 模拟 Swap 后余额并计算 `simulatedDeployBps(x)` 与 `simulatedIdleBps(x)`，验证不会换过头且满足部署率和 Idle 限制，再构造临时 `SwapPlan`；
-5. 记录 Vault 的输入/输出 Token 余额和 Executor 的 token0/token1 余额，将精确的 `amountIn` 从 Vault 转入 Executor，再调用 `ControlledSwapExecutor.executeSwap()` 执行固定 exact-input Swap；
-6. 在调用目标 Adapter 前重新读取余额，以 Vault 的输出 Token 实际余额增量作为 `actualAmountOut`，并验证 Vault 的输入 Token 减少量等于 `amountIn`、`actualAmountOut` 等于 Executor 返回值且不低于 `minAmountOut`、Executor 的 token0/token1 余额恢复到转入前基线、Executor 对 Router 的 allowance 为零；该局部校验不使用 `dustTolerance0/1` 放宽；
+5. 记录 Vault 的输入 Token 余额和 Executor 的 token0/token1 余额，将精确的 `amountIn` 从 Vault 转入 Executor，再调用 `ControlledSwapExecutor.executeSwap()` 执行固定 exact-input Swap；
+6. 在调用目标 Adapter 前重新读取 Vault 输入余额及 Executor 余额，验证 Vault 的输入 Token 减少量等于 `amountIn`、Executor 返回的 `actualAmountOut` 不低于 `minAmountOut`、Executor 的 token0/token1 余额恢复到转入前基线、Executor 对 Router 的 allowance 为零；该局部校验不使用 `dustTolerance0/1` 放宽。输出测量依赖经过确认的不可升级 Executor 实现，支持资产的输入转账不得额外改变 Vault 输出 Token 余额；
 7. 使用 Swap 后的实际余额，在目标 Adapter 建立当前计划指定的 Position；
 8. 重新读取最终 Vault 余额和实际 `PositionSnapshot`，复用迁移开始时捕获的同一个 `twapTick` 计算 `finalDeployBps`、`finalIdleBps` 和迁移后 NAV，完成最终迁移校验；激活 V2 时使用包含新确认捐赠的完整会计快照。全部校验通过后，将 `lastExecutedPlan` 更新为执行计划，并提交 `planVersion` 和 `lastPositionChangeAt`；
 9. 发出 `PositionPlanCommitted`、`RebalanceExecuted`、`SwapExecuted`和按条件发出 `V3RangeChanged`事件，其中 `SwapExecuted.amountOut = actualAmountOut`。
