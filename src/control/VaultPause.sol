@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import {IAdapterRegistry} from "../interfaces/IAdapterRegistry.sol";
 import {IVaultPause} from "../interfaces/IVaultPause.sol";
-import {PauseFlag, PauseState} from "./VaultTypes.sol";
+import {PauseFlag, PauseState} from "../core/VaultTypes.sol";
 import {VaultRoles} from "./VaultRoles.sol";
 
 /// @title Vault Pause Controls

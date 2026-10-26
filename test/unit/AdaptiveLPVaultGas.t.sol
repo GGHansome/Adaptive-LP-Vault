@@ -12,7 +12,7 @@ import {IPositionAdapter} from "../../src/interfaces/IPositionAdapter.sol";
 import {IVaultControl} from "../../src/interfaces/IVaultControl.sol";
 import {ICanonicalV3Oracle} from "../../src/interfaces/ICanonicalV3Oracle.sol";
 import {OracleSnapshot} from "../../src/oracle/OracleTypes.sol";
-import {VaultControl} from "../../src/core/VaultControl.sol";
+import {VaultControl} from "../../src/control/VaultControl.sol";
 import {IAdapterRegistry} from "../../src/interfaces/IAdapterRegistry.sol";
 import {Vm} from "forge-std/Vm.sol";
 

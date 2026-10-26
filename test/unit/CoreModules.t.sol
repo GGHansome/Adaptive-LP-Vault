@@ -5,10 +5,10 @@ import {Test} from "forge-std/Test.sol";
 
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
-import {AdapterRegistry} from "../../src/core/AdapterRegistry.sol";
-import {VaultControl} from "../../src/core/VaultControl.sol";
-import {VaultPause} from "../../src/core/VaultPause.sol";
-import {VaultRoles} from "../../src/core/VaultRoles.sol";
+import {AdapterRegistry} from "../../src/control/AdapterRegistry.sol";
+import {VaultControl} from "../../src/control/VaultControl.sol";
+import {VaultPause} from "../../src/control/VaultPause.sol";
+import {VaultRoles} from "../../src/control/VaultRoles.sol";
 import {AccessControlConfig, AdapterConfig, PauseFlag, PauseState, VenueType} from "../../src/core/VaultTypes.sol";
 import {IAdapterRegistry} from "../../src/interfaces/IAdapterRegistry.sol";
 import {IPositionAdapter} from "../../src/interfaces/IPositionAdapter.sol";

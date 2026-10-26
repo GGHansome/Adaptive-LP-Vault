@@ -4,12 +4,13 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {VaultStrategyMath} from "../../src/libraries/VaultStrategyMath.sol";
 import {PriceMath} from "../../src/libraries/PriceMath.sol";
 
 import {PositionSnapshot} from "../../src/adapters/AdapterTypes.sol";
 import {AdaptiveLPVault} from "../../src/core/AdaptiveLPVault.sol";
 import {VaultComponentFactory} from "../../src/core/VaultComponentFactory.sol";
-import {VaultControl} from "../../src/core/VaultControl.sol";
+import {VaultControl} from "../../src/control/VaultControl.sol";
 import {
     AccessControlConfig,
     DeploymentAssessment,
@@ -199,6 +200,36 @@ contract AdaptiveLPVaultAssessmentTest is Test {
         new AdaptiveLPVault("Invalid Vault", "IV", vaultConfig, AccessControlConfig(0, address(this)), strategyConfig);
     }
 
+    function test_planUsesConstructorPackedStrategyAndPreservesPublicConfig() public {
+        uint256 packed = uint256(strategyConfig.enterMediumBps) | (uint256(strategyConfig.exitMediumBps) << 24)
+            | (uint256(strategyConfig.enterHighBps) << 48) | (uint256(strategyConfig.exitHighBps) << 72)
+            | (uint256(strategyConfig.enterExtremeBps) << 96) | (uint256(strategyConfig.exitExtremeBps) << 120)
+            | (uint256(strategyConfig.narrowRangeHalfWidthSteps) << 144)
+            | (uint256(strategyConfig.wideRangeHalfWidthSteps) << 168) | (uint256(strategyConfig.minRecenterBps) << 192);
+        VaultStrategyMath.PlanInputs memory input;
+        input.oracle = VaultStrategyMath.PlanOracleInputs({deviationBps: 0, twapTick: 17, spotTick: 0});
+        input.strategy = packed;
+        input.lastExecutedRegime = vault.lastExecutedPlan().marketRegime;
+        input.activeVenue = vault.activeVenue();
+        input.lowSpacing = 10;
+        input.highSpacing = 60;
+        input.planVersion = vault.planVersion();
+        _previewUses(1000, 1000);
+        vm.expectCall(
+            address(VaultStrategyMath), abi.encodeWithSelector(VaultStrategyMath.getPlan.selector, input), uint64(1)
+        );
+        vault.previewRebalance();
+        assertEq(vault.enterMediumBps(), strategyConfig.enterMediumBps);
+        assertEq(vault.exitMediumBps(), strategyConfig.exitMediumBps);
+        assertEq(vault.enterHighBps(), strategyConfig.enterHighBps);
+        assertEq(vault.exitHighBps(), strategyConfig.exitHighBps);
+        assertEq(vault.enterExtremeBps(), strategyConfig.enterExtremeBps);
+        assertEq(vault.exitExtremeBps(), strategyConfig.exitExtremeBps);
+        assertEq(vault.narrowRangeHalfWidthSteps(), strategyConfig.narrowRangeHalfWidthSteps);
+        assertEq(vault.wideRangeHalfWidthSteps(), strategyConfig.wideRangeHalfWidthSteps);
+        assertEq(vault.minRecenterBps(), strategyConfig.minRecenterBps);
+    }
+
     function test_minDeployBpsIsDerivedAtConstruction() public view {
         assertEq(vault.minDeployBps(), 9500);
         assertEq(vault.minDeployBps() + vault.maxHealthyIdleBps(), 10_000);
@@ -347,6 +378,20 @@ contract AdaptiveLPVaultAssessmentTest is Test {
     function test_adapterOveruseStillReverts() public {
         _previewUses(1001, 1000);
         vm.expectRevert(IAdaptiveLPVault.AdapterBalanceMismatch.selector);
+        vault.previewRebalance();
+    }
+
+    function test_invalidPreviewRevertsBeforeOracleValuation() public {
+        vm.mockCallRevert(
+            address(oracle),
+            abi.encodeWithSelector(ICanonicalV3Oracle.quoteToken0InToken1.selector),
+            "valuation must not run for invalid preview"
+        );
+        _previewUses(1001, 1000);
+        vm.expectRevert(IAdaptiveLPVault.AdapterBalanceMismatch.selector);
+        vault.previewRebalance();
+        _previewUses(998, 998);
+        vm.expectRevert(IAdaptiveLPVault.InvalidDeploymentPreview.selector);
         vault.previewRebalance();
     }
 

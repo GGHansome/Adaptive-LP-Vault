@@ -11,7 +11,12 @@ out/
 /broadcast/**/dry-run/
 
 # Docs
-docs/
+/docs/*
+!/docs/
+!/docs/DEPLOYMENT_RUNBOOK.md
+
+# Deployment manifests are environment-specific
+/deployments/
 
 # Dotenv file
 .env

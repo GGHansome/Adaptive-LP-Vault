@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {VaultControl} from "./VaultControl.sol";
+import {VaultControl} from "../control/VaultControl.sol";
 import {AccessControlConfig} from "./VaultTypes.sol";
 import {IControlledSwapExecutor} from "../interfaces/IControlledSwapExecutor.sol";
 import {IVaultComponentFactory} from "../interfaces/IVaultComponentFactory.sol";

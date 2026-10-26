@@ -11,7 +11,7 @@ import {UniswapV2Adapter} from "../../src/adapters/UniswapV2Adapter.sol";
 import {PositionAdapterConfig, PositionSnapshot} from "../../src/adapters/AdapterTypes.sol";
 import {AdaptiveLPVault} from "../../src/core/AdaptiveLPVault.sol";
 import {VaultComponentFactory} from "../../src/core/VaultComponentFactory.sol";
-import {VaultControl} from "../../src/core/VaultControl.sol";
+import {VaultControl} from "../../src/control/VaultControl.sol";
 import {
     AccessControlConfig,
     AssetSnapshot,

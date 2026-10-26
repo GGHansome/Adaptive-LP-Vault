@@ -5,19 +5,19 @@
 - 实现基线：Foundry + Solidity
 - 对应产品文档：[PRODUCT_SPEC.md](PRODUCT_SPEC.md)
 - 对应部署文档：[DEPLOYMENT.md](DEPLOYMENT.md)
-- 代码状态：本文档中的目录、接口和类型为待实现设计，不表示仓库已有合约代码
+- 代码状态：本文档描述当前仓库的实现结构和模块边界；接口、类型和行为以代码与测试为准
 
 本文档定义合约边界、依赖方向、存储模型、接口、错误、事件、调用时序和测试要求。产品规则以 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) 为准；部署顺序、链下发布门禁、流动性预检和部署证据以 [DEPLOYMENT.md](DEPLOYMENT.md) 为准；文档中的名称必须保持一致。
 
 ## 1. 架构原则
 
-1. `AdaptiveLPVault` 负责资产会计、计划输入编排、部署评估、状态机、资产转移和跨模块原子性；计划计算由固定链接的 `VaultStrategyMath` 纯函数库承担。专属 `VaultControl` 继承 `VaultRoles`、`VaultPause` 和 `AdapterRegistry`，管理角色、暂停和 Adapter 绑定。
+1. `AdaptiveLPVault` 负责资产会计、可信输入与部署评估编排、状态机、资产转移和跨模块原子性；固定链接的 `VaultStrategyMath` 承担纯计划计算及只读部署评估。专属 `VaultControl` 继承 `VaultRoles`、`VaultPause` 和 `AdapterRegistry`，管理角色、暂停和 Adapter 绑定。
 2. `CanonicalV3Oracle` 独立部署并由 Vault 固定绑定；`deviationBps` 在 Oracle 内部产生，不从调用者输入。
 3. `IPositionAdapter` 隔离 Uniswap V2/V3 细节，Adapter 不能铸造或销毁 shares。
 4. Vault 构造函数调用 `VaultComponentFactory` 创建并固定绑定专属 `VaultControl` 和 `ControlledSwapExecutor`；Executor 只按 Vault 验证过的 `SwapPlan` 执行 token0/token1 交换。
 5. Registry 的遍历不是资产会计路径。Vault 只读取 `activeVenue` 对应 Adapter，保证 Gas 有界。
 6. 所有资产迁移入口采用 Checks-Effects-Interactions、非重入保护和外部调用后的状态重读。
-7. `VaultStrategyMath.getPlan()` 是外部链接库的 `external pure` 入口，完整输入显式传入，不读取 Vault storage、不执行资产操作、不调用外部合约。库地址在 Vault 字节码链接时固定，部署后无角色可替换；该选择及其调用成本见 [ADR-0001](adr/0001-linked-position-planner.md)。
+7. `VaultStrategyMath.getPlan()` 是外部链接库的 `external pure` 入口，完整输入显式传入，不读取 Vault storage、不执行资产操作、不调用外部合约。`assessDeployment()` 是同一库的 `external view` 入口，只查询 Vault 显式传入的目标 Adapter 与固定 Oracle；准入和 Oracle 健康检查仍在 Vault。库地址在 Vault 字节码链接时固定，部署后无角色可替换；历史决策和评估边界调整见 [ADR-0001](adr/0001-linked-position-planner.md)。
 8. 仓位快照和估值只在同一资产状态阶段内复用；手续费收取、退出仓位、Swap、存款和赎回转账后，必须读取受影响的新状态。代币余额由会计入口和资产操作校验各自在使用处读取，不沿退出、Swap、部署链传递缓存余额。主动仓位检查独立验证 Registry 身份、金额和区间，非主动 V3 检查及建仓前的 `enabled` 检查仍保留。区间事件在实际仓位与 Plan 校验一致后使用 Plan 的区间。历史测量见 [第一轮 Gas 优化记录](../debug/GAS_OPTIMIZATION_ROUND1.md)，当前实现与取舍见 [Gas 优化后的简化记录](../debug/GAS_SIMPLIFICATION.md)。
 
 ## 2. 系统边界
@@ -65,7 +65,10 @@ flowchart TB
     Vault -->|仅构造时调用| ComponentFactory
     ComponentFactory -->|创建并绑定 Vault| Control
     ComponentFactory -->|创建并绑定 Vault| Swap
-    Vault -->|固定链接的纯计算调用| Planner
+    Vault -->|固定链接的计划计算与只读评估| Planner
+    Planner -->|仅部署评估报价| Oracle
+    Planner -->|仅 previewDeposit| V2Adapter
+    Planner -->|仅 previewDeposit| V3Adapter
     Vault --> Oracle
     Vault --> Swap
     Vault --> V2Adapter
@@ -79,17 +82,20 @@ flowchart TB
     Vault --> ERC20
 ```
 
-### 2.1 依赖方向
+### 2.1 模块依赖方向
 
-允许的依赖方向如下：
+当前实现的模块依赖如下。`control` 对 `core/VaultTypes.sol` 的依赖仅用于共享结构体和枚举；它不依赖 `AdaptiveLPVault` 的实现，而是通过 `IAdaptiveLPVault` 查询 Vault 生命周期状态。
 
 ```mermaid
 flowchart LR
-    Core[core] --> Interfaces[interfaces]
+    Core[core] --> Control[control]
+    Core --> Interfaces[interfaces]
     Core --> Oracle[oracle]
     Core --> Libraries[libraries]
     Core --> Adapters[adapters]
     Core --> Swap[swap]
+    Control --> Interfaces
+    Control --> CoreTypes[core / VaultTypes]
     Oracle --> Libraries
     Adapters --> Interfaces
     Adapters --> Libraries
@@ -111,13 +117,13 @@ flowchart LR
 ```text
 AdaptiveLPVault/
 ├── foundry.toml
-├── remappings.txt
 ├── src/
 │   ├── core/
 │   │   ├── AdaptiveLPVault.sol
-│   │   ├── VaultControl.sol
 │   │   ├── VaultComponentFactory.sol
-│   │   ├── VaultTypes.sol
+│   │   └── VaultTypes.sol
+│   ├── control/
+│   │   ├── VaultControl.sol
 │   │   ├── VaultRoles.sol
 │   │   ├── VaultPause.sol
 │   │   └── AdapterRegistry.sol
@@ -145,28 +151,24 @@ AdaptiveLPVault/
 │   │   └── IUniswapV3External.sol
 │   └── libraries/
 │       ├── PriceMath.sol
-│       ├── VaultStrategyMath.sol
-│       ├── PositionPlanHash.sol
-│       └── SafeTransferLib.sol
+│       └── VaultStrategyMath.sol
 ├── test/
 │   ├── unit/
-│   │   ├── AdaptiveLPVault.t.sol
-│   │   ├── VaultStrategyMath.t.sol
+│   │   ├── AdaptiveLPVaultAssessment.t.sol
+│   │   ├── AdaptiveLPVaultDonations.t.sol
+│   │   ├── AdaptiveLPVaultErrors.t.sol
+│   │   ├── AdaptiveLPVaultGas.t.sol
+│   │   ├── AdaptiveLPVaultReturnValues.t.sol
 │   │   ├── CanonicalV3Oracle.t.sol
+│   │   ├── ControlledSwapExecutor.t.sol
+│   │   ├── CoreModules.t.sol
 │   │   ├── UniswapV2Adapter.t.sol
 │   │   ├── UniswapV3Adapter.t.sol
-│   │   └── ControlledSwapExecutor.t.sol
-│   ├── integration/
-│   │   ├── DepositRedeem.t.sol
-│   │   └── Rebalance.t.sol
-│   ├── invariant/
-│   │   ├── VaultInvariants.t.sol
-│   │   └── AccountingInvariants.t.sol
-│   ├── fork/
-│   │   ├── MainnetOracle.t.sol
-│   │   └── MainnetUniswapFlows.t.sol
-│   ├── mocks/
+│   │   ├── VaultDeploymentAssessment.t.sol
+│   │   └── VaultStrategyMath.t.sol
 │   └── helpers/
+│       ├── LegacyPositionPlannerReference.sol
+│       └── LegacyV3DepositMath.sol
 ├── script/
 │   ├── Deploy.s.sol
 │   ├── Configure.s.sol
@@ -185,9 +187,10 @@ AdaptiveLPVault/
 
 | 目录                 | 职责                                  | 约束                                                                                            |
 | ------------------ | ----------------------------------- | --------------------------------------------------------------------------------------------- |
-| `src/core`         | Vault 入口、角色、暂停、Adapter Registry、会计、计划输入编排和状态机 | 计划计算调用固定链接的 `VaultStrategyMath`；角色、暂停和 Registry 的源码级模块边界见 §1 |
+| `src/core`         | Vault 资产与份额会计、计划输入编排、状态机及组件工厂；`VaultTypes` 定义跨模块共享类型 | Vault 通过固定绑定的 `VaultControl` 执行角色、暂停及 Adapter 注册检查；策略计算调用固定链接的 `VaultStrategyMath` |
+| `src/control`      | 专属 `VaultControl` 合约及其角色、暂停和 Adapter Registry 实现 | `VaultRoles`、`VaultPause`、`AdapterRegistry` 是源码级抽象模块，由 `VaultControl` 继承组合；不是分别部署的合约 |
 | `src/oracle`       | 独立 Oracle、Uniswap V3 `observe`、报价和健康检查 | 由 Vault 固定绑定；不接受外部价格输入 |
-| `src/libraries`    | 计划纯计算、Tick/价格换算、计划哈希和安全转账 | `VaultStrategyMath` 独立部署并外部链接，无状态、无外部合约调用；其他库保持通用工具职责 |
+| `src/libraries`    | 计划纯计算、只读部署评估及 Tick/价格换算 | `VaultStrategyMath` 独立部署并外部链接，无状态；仅评估入口可查询显式传入的 Adapter/Oracle，禁止资产操作 |
 | `src/adapters`     | V2/V3 Venue 适配与 Position 操作 | 只能由 Vault 调用资产方法 |
 | `src/swap`         | 白名单 Router 和受限 Swap | 不得成为通用聚合器 |
 | `src/interfaces`   | Vault、源码级模块和独立部署合约的逻辑接口契约 | 不包含实现状态；不以是否独立部署作为接口存在的前提 |
@@ -612,10 +615,34 @@ interface IAdaptiveLPVault {
 ```solidity
 // src/libraries/VaultStrategyMath.sol
 library VaultStrategyMath {
+    struct PlanOracleInputs {
+        uint256 deviationBps;
+        int24 twapTick;
+        int24 spotTick;
+    }
+
+    struct PlanPositionInputs {
+        uint256 liquidity;
+        int24 tickLower;
+        int24 tickUpper;
+    }
+
+    struct PlanStrategyConfig {
+        uint24 enterMediumBps;
+        uint24 exitMediumBps;
+        uint24 enterHighBps;
+        uint24 exitHighBps;
+        uint24 enterExtremeBps;
+        uint24 exitExtremeBps;
+        uint24 narrowRangeHalfWidthSteps;
+        uint24 wideRangeHalfWidthSteps;
+        uint16 minRecenterBps;
+    }
+
     struct PlanInputs {
-        OracleSnapshot oracle;
-        PositionSnapshot currentPosition;
-        StrategyConfig strategy;
+        PlanOracleInputs oracle;
+        PlanPositionInputs currentPosition;
+        uint256 strategy; // Nine validated fields packed into bits 0..207.
         MarketRegime lastExecutedRegime;
         VenueType activeVenue;
         int24 lowSpacing;
@@ -627,7 +654,7 @@ library VaultStrategyMath {
         external pure returns (PositionPlan memory plan);
 }
 
-// AdaptiveLPVault 部署评估
+// VaultStrategyMath 部署评估（同一库内的类型和入口）
 struct AssessmentInputs {
     address adapter;
     address oracle;
@@ -636,19 +663,19 @@ struct AssessmentInputs {
     uint256 amount1;
     uint256 dust0;
     uint256 dust1;
-    uint16 maxIdleBps;
+    uint256 minDeployBps;
     int24 twapTick;
 }
 
-function _assessDeployment(
+function assessDeployment(
     AssessmentInputs memory input
-) private view returns (DeploymentAssessment memory assessment);
+) external view returns (DeploymentAssessment memory assessment);
 ```
 
-- Vault 从可信链上状态和 Oracle/Position 快照获取计划输入；Bootstrap、Preview 和两类 Rebalance 使用相同的输入来源规则。
+- Vault 从可信链上状态和完整 Oracle/Position 快照获取计划输入；Bootstrap、Preview 和两类 Rebalance 使用相同的输入来源规则。`_planInputs()` 只投影规划实际使用的字段，并直接传入 `_packedPlanStrategyConfig`。九个计划配置字段由 Vault 私有纯函数 `_packPlanStrategyConfig(StrategyConfig)` 在构造期打包一次，库只保留 `unpackPlanStrategyConfig()`，不再定义打包函数。八个 `uint24` 字段按声明顺序从位 0、24、48、72、96、120、144、168 开始，`minRecenterBps` 使用位 192..207；打包时高 48 位为零。完整快照、部署配置类型、公开配置 getter 和存储布局保持不变。计划参数编码负载为 12 个 ABI 字（384 字节，不含 selector）。
 - `VaultStrategyMath.getPlan()` 通过固定链接的外部纯函数生成候选计划；执行门控和状态提交由 Vault 负责。库部署与链接验证见 [DEPLOYMENT.md](DEPLOYMENT.md)。
-- `VaultStrategyMath` 的职责范围是 Vault 策略和部署评估的纯计算，目前仅实现计划生成。后续可迁入部署率、Idle 比例、Swap 方向等纯计算，但 Oracle/Adapter 查询、资产操作和状态提交必须保留在 Vault；迁移前须显式定义计算输入，不把 `view` 编排整体放进库。
-- Vault 保证评估输入可信，并在评估非 IDLE 目标前检查 Adapter 的准入；`_assessDeployment()` 属于 Vault 的内部 `view` 编排职责，仅调用一次目标 Adapter 的 `previewDeposit()`，根据 `used0/used1` 计算 `requiresSwap` 和 `direction`。模拟校验使用同一评估结果检查部署率和预期方向；当前估值规则下，部署率达标已保证模拟闲置比例不超限，见 [SWAP_REBALANE_MATH.md](SWAP_REBALANE_MATH.md) §3。最终实际部署仍独立校验。
+- `VaultStrategyMath.getPlan()` 保持纯计算；`assessDeployment(AssessmentInputs)` 负责完整只读部署评估，包括一次 `previewDeposit()`、预览校验、两次独立向下取整的 Oracle 报价、最低部署率及方向计算。`AssessmentInputs` 定义在库内，其阈值字段为 `uint256 minDeployBps`，由 Vault 的 immutable 提供。
+- Vault 保证评估输入可信，在非 IDLE 评估前检查目标 Adapter 准入，并从健康 Oracle 快照取得 TWAP Tick；库不查询 Registry、不读写 Vault storage、不执行资产操作。IDLE 不查询 Adapter 或 Oracle；无效预览先于报价回滚。模拟校验继续在 Vault 使用相同评估结果检查部署率和预期方向；最终实际部署仍独立校验。固定链接库经 `DELEGATECALL` 执行，Adapter/Oracle 看到的调用地址仍是 Vault。
 - `PriceMath`、`PositionPlanHash` 和 `SafeTransferLib` 提供跨模块通用的无状态工具。
 
 ### 6.2 Vault Roles 接口

@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import {AdapterRegistry} from "./AdapterRegistry.sol";
 import {VaultPause} from "./VaultPause.sol";
 import {VaultRoles} from "./VaultRoles.sol";
-import {AccessControlConfig, PauseFlag, VenueType} from "./VaultTypes.sol";
+import {AccessControlConfig, PauseFlag, VenueType} from "../core/VaultTypes.sol";
 import {IAdapterRegistry} from "../interfaces/IAdapterRegistry.sol";
 import {IAdaptiveLPVault} from "../interfaces/IAdaptiveLPVault.sol";
 import {IVaultControl} from "../interfaces/IVaultControl.sol";

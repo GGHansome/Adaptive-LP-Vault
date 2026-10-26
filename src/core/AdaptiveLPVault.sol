@@ -81,6 +81,8 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
     uint16 public immutable maxSwapSlippageBps;
     uint16 public immutable maxMigrationLossBps;
 
+    uint256 private immutable _packedPlanStrategyConfig;
+
     bool public initialized;
     VenueType public activeVenue;
     uint32 public lastPositionChangeAt;
@@ -94,18 +96,6 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         int24 oldTickUpper;
         AssetSnapshot beforeAssets;
         uint256 navBefore;
-    }
-
-    struct AssessmentInputs {
-        address adapter;
-        address oracle;
-        PositionPlan plan;
-        uint256 amount0;
-        uint256 amount1;
-        uint256 dust0;
-        uint256 dust1;
-        uint256 minDeployBps;
-        int24 twapTick;
     }
 
     struct OracleBinding {
@@ -152,6 +142,7 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         narrowRangeHalfWidthSteps = strategyConfig.narrowRangeHalfWidthSteps;
         wideRangeHalfWidthSteps = strategyConfig.wideRangeHalfWidthSteps;
         minRecenterBps = strategyConfig.minRecenterBps;
+        _packedPlanStrategyConfig = _packPlanStrategyConfig(strategyConfig);
         maxHealthyIdleBps = strategyConfig.maxHealthyIdleBps;
         minDeployBps = BPS - maxHealthyIdleBps;
         maxSwapSlippageBps = strategyConfig.maxSwapSlippageBps;
@@ -529,6 +520,17 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         vaultControl.pauseAll(caller);
     }
 
+    /// @notice Packs validated planning parameters once during construction.
+    /// @dev Eight uint24 fields occupy bits 0..191 in declaration order; minRecenterBps uses bits 192..207.
+    ///      Bits 208..255 are zero. Keep this layout aligned with VaultStrategyMath.unpackPlanStrategyConfig.
+    function _packPlanStrategyConfig(StrategyConfig memory config) private pure returns (uint256) {
+        return uint256(config.enterMediumBps) | (uint256(config.exitMediumBps) << 24)
+            | (uint256(config.enterHighBps) << 48) | (uint256(config.exitHighBps) << 72)
+            | (uint256(config.enterExtremeBps) << 96) | (uint256(config.exitExtremeBps) << 120)
+            | (uint256(config.narrowRangeHalfWidthSteps) << 144) | (uint256(config.wideRangeHalfWidthSteps) << 168)
+            | (uint256(config.minRecenterBps) << 192);
+    }
+
     function _validateConstructorConfig(VaultConfig memory vaultConfig, StrategyConfig memory strategyConfig)
         private
         view
@@ -663,9 +665,15 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
     {
         (int24 lowSpacing, int24 highSpacing) = vaultControl.adapterTickSpacings();
         input = VaultStrategyMath.PlanInputs({
-            oracle: oracle,
-            currentPosition: currentPosition,
-            strategy: _strategyConfig(),
+            oracle: VaultStrategyMath.PlanOracleInputs({
+                deviationBps: oracle.deviationBps, twapTick: oracle.twapTick, spotTick: oracle.spotTick
+            }),
+            currentPosition: VaultStrategyMath.PlanPositionInputs({
+                liquidity: currentPosition.liquidity,
+                tickLower: currentPosition.tickLower,
+                tickUpper: currentPosition.tickUpper
+            }),
+            strategy: _packedPlanStrategyConfig,
             lastExecutedRegime: _lastExecutedPlan.marketRegime,
             activeVenue: activeVenue,
             lowSpacing: lowSpacing,
@@ -674,31 +682,13 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         });
     }
 
-    function _strategyConfig() private view returns (StrategyConfig memory config) {
-        config = StrategyConfig({
-            minRebalanceCooldown: minRebalanceCooldown,
-            enterMediumBps: enterMediumBps,
-            exitMediumBps: exitMediumBps,
-            enterHighBps: enterHighBps,
-            exitHighBps: exitHighBps,
-            enterExtremeBps: enterExtremeBps,
-            exitExtremeBps: exitExtremeBps,
-            narrowRangeHalfWidthSteps: narrowRangeHalfWidthSteps,
-            wideRangeHalfWidthSteps: wideRangeHalfWidthSteps,
-            minRecenterBps: minRecenterBps,
-            maxHealthyIdleBps: maxHealthyIdleBps,
-            maxSwapSlippageBps: maxSwapSlippageBps,
-            maxMigrationLossBps: maxMigrationLossBps
-        });
-    }
-
     function _assessmentInputs(PositionPlan memory plan, uint256 amount0, uint256 amount1, int24 twapTick)
         private
         view
-        returns (AssessmentInputs memory input)
+        returns (VaultStrategyMath.AssessmentInputs memory input)
     {
         address adapter = plan.targetVenue == VenueType.IDLE ? address(0) : _requireEnterEnabled(plan.targetVenue);
-        input = AssessmentInputs({
+        input = VaultStrategyMath.AssessmentInputs({
             adapter: adapter,
             oracle: address(canonicalOracle),
             plan: plan,
@@ -1009,7 +999,10 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         }
     }
 
-    function _validateSimulatedDeployment(AssessmentInputs memory input, SwapDirection expectedDirection) private view {
+    function _validateSimulatedDeployment(
+        VaultStrategyMath.AssessmentInputs memory input,
+        SwapDirection expectedDirection
+    ) private view {
         DeploymentAssessment memory simulatedAssessment = _assessDeployment(input);
         // A healthy simulatedDeployBps also guarantees simulatedIdleBps <= maxHealthyIdleBps.
         if (simulatedAssessment.requiresSwap) revert IAdaptiveLPVault.DeploymentRatioTooLow();
@@ -1019,29 +1012,12 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
     }
 
     /// @notice Assesses the target deployment using one adapter preview and the supplied TWAP tick.
-    function _assessDeployment(AssessmentInputs memory input)
+    function _assessDeployment(VaultStrategyMath.AssessmentInputs memory input)
         private
         view
         returns (DeploymentAssessment memory assessment)
     {
-        if (input.plan.targetVenue == VenueType.IDLE) {
-            return DeploymentAssessment(false, SwapDirection.NONE);
-        }
-        (uint256 used0, uint256 used1) =
-            IPositionAdapter(input.adapter).previewDeposit(input.amount0, input.amount1, input.plan);
-        if (used0 > input.amount0 || used1 > input.amount1) revert IAdaptiveLPVault.AdapterBalanceMismatch();
-        uint256 unused0 = input.amount0 - used0;
-        uint256 unused1 = input.amount1 - used1;
-        bool excess0 = unused0 > input.dust0;
-        bool excess1 = unused1 > input.dust1;
-        if (excess0 && excess1) revert IAdaptiveLPVault.InvalidDeploymentPreview();
-        uint256 assessmentNav = _nav(input.amount0, input.amount1, input.twapTick);
-        uint256 deployableNav = _nav(used0, used1, input.twapTick);
-        // deployableBps is initialDeployBps for the initial assessment and simulatedDeployBps for swap simulation.
-        uint256 deployableBps = assessmentNav == 0 ? 0 : Math.mulDiv(deployableNav, BPS, assessmentNav);
-        assessment.requiresSwap = assessmentNav == 0 || deployableBps < input.minDeployBps;
-        assessment.direction =
-            excess0 ? SwapDirection.ZERO_FOR_ONE : excess1 ? SwapDirection.ONE_FOR_ZERO : SwapDirection.NONE;
+        return VaultStrategyMath.assessDeployment(input);
     }
 
     function _readAndValidateOracleBinding(address oracleAddress, address expectedFactory)

@@ -5,7 +5,7 @@ import {IAdapterRegistry} from "../interfaces/IAdapterRegistry.sol";
 import {IPositionAdapter} from "../interfaces/IPositionAdapter.sol";
 import {IUniswapV2Factory, IUniswapV2Pair} from "../interfaces/IUniswapV2External.sol";
 import {IUniswapV3Factory, IUniswapV3Pool} from "../interfaces/IUniswapV3External.sol";
-import {AdapterConfig, VenueType} from "./VaultTypes.sol";
+import {AdapterConfig, VenueType} from "../core/VaultTypes.sol";
 import {VaultRoles} from "./VaultRoles.sol";
 
 /// @title Vault Adapter Registry

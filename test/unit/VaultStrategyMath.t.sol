@@ -3,8 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 
-import {PositionSnapshot} from "../../src/adapters/AdapterTypes.sol";
-import {MarketRegime, PositionPlan, StrategyConfig, VenueType} from "../../src/core/VaultTypes.sol";
+import {MarketRegime, PositionPlan, VenueType} from "../../src/core/VaultTypes.sol";
 import {IAdaptiveLPVault} from "../../src/interfaces/IAdaptiveLPVault.sol";
 import {VaultStrategyMath} from "../../src/libraries/VaultStrategyMath.sol";
 import {LegacyPositionPlannerReference} from "../helpers/LegacyPositionPlannerReference.sol";
@@ -174,13 +173,13 @@ contract VaultStrategyMathTest is Test {
         input.lowSpacing = -10;
         _expectInvalidRange(input);
         input.lowSpacing = 10;
-        input.strategy.narrowRangeHalfWidthSteps = 0;
+        input.strategy = _withStrategyField(input.strategy, 144, 24, 0);
         _expectInvalidRange(input);
         input.oracle.deviationBps = 100;
         input.highSpacing = 0;
         _expectInvalidRange(input);
         input.highSpacing = 60;
-        input.strategy.wideRangeHalfWidthSteps = 0;
+        input.strategy = _withStrategyField(input.strategy, 168, 24, 0);
         _expectInvalidRange(input);
     }
 
@@ -195,7 +194,7 @@ contract VaultStrategyMathTest is Test {
     function test_acceptsExactV3TickBounds() public view {
         VaultStrategyMath.PlanInputs memory input = _inputs();
         input.lowSpacing = 1;
-        input.strategy.narrowRangeHalfWidthSteps = 1;
+        input.strategy = _withStrategyField(input.strategy, 144, 24, 1);
         input.oracle.twapTick = -887271;
         assertEq(harness.getPlan(input).tickLower, -887272);
         input.oracle.twapTick = 887271;
@@ -215,25 +214,68 @@ contract VaultStrategyMathTest is Test {
         harness.getPlan(input);
     }
 
-    function test_positionAmountsAndOracleMetadataDoNotAffectPlan() public view {
+    function test_planInputsEncodeOnlyTwelveWords() public pure {
+        VaultStrategyMath.PlanInputs memory input = _inputs();
+        assertEq(abi.encode(input).length, 12 * 32);
+        assertEq(abi.encode(_legacyInputs(input)).length, 41 * 32);
+    }
+
+    function test_strategyUnpackingHasExactFieldBoundaries() public pure {
+        for (uint256 i; i < 9; ++i) {
+            uint256 offset = i * 24;
+            uint256 width = i == 8 ? 16 : 24;
+            uint256 mask = (uint256(1) << width) - 1;
+            uint256 packed = mask << offset;
+            VaultStrategyMath.PlanStrategyConfig memory config = VaultStrategyMath.unpackPlanStrategyConfig(packed);
+            bytes memory encoded = abi.encode(config);
+            uint256[9] memory fields = abi.decode(encoded, (uint256[9]));
+            for (uint256 j; j < 9; ++j) {
+                assertEq(fields[j], i == j ? mask : 0);
+            }
+        }
+        VaultStrategyMath.PlanStrategyConfig memory zeros = VaultStrategyMath.unpackPlanStrategyConfig(0);
+        assertEq(abi.encode(zeros), new bytes(9 * 32));
+    }
+
+    function testFuzz_strategyUnpackingPreservesAllFieldBits(uint256 packed) public pure {
+        VaultStrategyMath.PlanStrategyConfig memory config = VaultStrategyMath.unpackPlanStrategyConfig(packed);
+        uint256[9] memory fields = abi.decode(abi.encode(config), (uint256[9]));
+        uint256 reconstructed;
+        for (uint256 i; i < 9; ++i) {
+            uint256 mask = i == 8 ? type(uint16).max : type(uint24).max;
+            assertEq(fields[i], (packed >> (24 * i)) & mask);
+            reconstructed |= fields[i] << (24 * i);
+        }
+        assertEq(reconstructed, packed & ((uint256(1) << 208) - 1));
+    }
+
+    function testFuzz_packedStrategyMatchesLegacyForArbitraryFields(
+        uint256 packed,
+        uint256 deviation,
+        uint8 previous,
+        uint64 version,
+        int24 tick
+    ) public view {
         VaultStrategyMath.PlanInputs memory input = _activeInputs();
-        bytes32 expected = keccak256(abi.encode(harness.getPlan(input)));
-        input.currentPosition.adapter = address(123);
-        input.currentPosition.principal0 = 1 ether;
-        input.currentPosition.principal1 = 2 ether;
-        input.currentPosition.claimableFee0 = 3;
-        input.currentPosition.claimableFee1 = 4;
-        input.currentPosition.amount0 = 1 ether + 3;
-        input.currentPosition.amount1 = 2 ether + 4;
-        input.currentPosition.positionId = 999;
-        input.oracle.shortTwapTick = 999;
-        input.oracle.spotPriceToken1 = 1 ether;
-        input.oracle.twapPriceToken1 = 2 ether;
-        input.oracle.shortTwapPriceToken1 = 3 ether;
-        input.oracle.observedAt = 123;
-        input.oracle.twapWindowSeconds = 1800;
-        input.oracle.shortTwapWindowSeconds = 300;
-        assertEq(keccak256(abi.encode(harness.getPlan(input))), expected);
+        input.strategy = packed;
+        input.oracle.deviationBps = deviation;
+        input.lastExecutedRegime = MarketRegime(previous % 4);
+        input.planVersion = version;
+        input.oracle.twapTick = tick;
+        input.oracle.spotTick = 100;
+        (bool actualSuccess, bytes memory actual) =
+            address(harness).staticcall(abi.encodeCall(harness.getPlan, (input)));
+        (bool expectedSuccess, bytes memory expected) =
+            address(legacy).staticcall(abi.encodeCall(legacy.getPlan, (_legacyInputs(input))));
+        assertEq(actualSuccess, expectedSuccess);
+        if (
+            !actualSuccess
+                && keccak256(actual) == keccak256(abi.encodeWithSelector(IAdaptiveLPVault.PlanVersionOverflow.selector))
+        ) {
+            assertEq(expected, abi.encodeWithSelector(IAdaptiveLPVault.InvalidTickRange.selector));
+        } else {
+            assertEq(actual, expected);
+        }
     }
 
     function testFuzz_planMatchesPreExtractionAlgorithm(
@@ -257,16 +299,15 @@ contract VaultStrategyMathTest is Test {
         input.planVersion = version;
         int24 center = int24(bound(int256(oldCenter), -800000, 800000));
         int24 width = int24(int256(bound(uint256(halfWidth), 1, 80000)));
-        input.currentPosition.venue = input.activeVenue;
         input.currentPosition.tickLower = center - width;
         input.currentPosition.tickUpper = center + width;
         input.currentPosition.liquidity = hasLiquidity ? 1 : 0;
-        input.strategy.minRecenterBps = uint16(bound(uint256(recenterBps), 0, 10_000));
+        input.strategy = _withStrategyField(input.strategy, 192, 16, bound(uint256(recenterBps), 0, 10_000));
 
         (bool actualSuccess, bytes memory actual) =
             address(harness).staticcall(abi.encodeCall(harness.getPlan, (input)));
         (bool expectedSuccess, bytes memory expected) =
-            address(legacy).staticcall(abi.encodeCall(legacy.getPlan, (input)));
+            address(legacy).staticcall(abi.encodeCall(legacy.getPlan, (_legacyInputs(input))));
         assertEq(actualSuccess, expectedSuccess);
         // The frozen reference uses InvalidTickRange for version exhaustion; only that selector intentionally changed.
         if (
@@ -295,47 +336,58 @@ contract VaultStrategyMathTest is Test {
         assertEq(keccak256(abi.encode(harness.getPlan(input))), keccak256(abi.encode(plan)));
     }
 
+    function _legacyInputs(VaultStrategyMath.PlanInputs memory input)
+        private
+        pure
+        returns (LegacyPositionPlannerReference.PlanInputs memory full)
+    {
+        full.oracle.deviationBps = input.oracle.deviationBps;
+        full.oracle.twapTick = input.oracle.twapTick;
+        full.oracle.spotTick = input.oracle.spotTick;
+        full.oracle.healthy = true;
+        full.currentPosition.liquidity = input.currentPosition.liquidity;
+        full.currentPosition.tickLower = input.currentPosition.tickLower;
+        full.currentPosition.tickUpper = input.currentPosition.tickUpper;
+        // Independently decode the wire layout instead of calling the production unpacker.
+        full.strategy.enterMediumBps = uint24(input.strategy);
+        full.strategy.exitMediumBps = uint24(input.strategy >> 24);
+        full.strategy.enterHighBps = uint24(input.strategy >> 48);
+        full.strategy.exitHighBps = uint24(input.strategy >> 72);
+        full.strategy.enterExtremeBps = uint24(input.strategy >> 96);
+        full.strategy.exitExtremeBps = uint24(input.strategy >> 120);
+        full.strategy.narrowRangeHalfWidthSteps = uint24(input.strategy >> 144);
+        full.strategy.wideRangeHalfWidthSteps = uint24(input.strategy >> 168);
+        full.strategy.minRecenterBps = uint16(input.strategy >> 192);
+        full.lastExecutedRegime = input.lastExecutedRegime;
+        full.activeVenue = input.activeVenue;
+        full.lowSpacing = input.lowSpacing;
+        full.highSpacing = input.highSpacing;
+        full.planVersion = input.planVersion;
+    }
+
     function _inputs() private pure returns (VaultStrategyMath.PlanInputs memory input) {
-        input.oracle.healthy = true;
-        input.currentPosition.venue = VenueType.IDLE;
         input.activeVenue = VenueType.IDLE;
         input.lowSpacing = 10;
         input.highSpacing = 60;
-        input.strategy = StrategyConfig({
-            minRebalanceCooldown: 300,
-            enterMediumBps: 100,
-            exitMediumBps: 50,
-            enterHighBps: 300,
-            exitHighBps: 200,
-            enterExtremeBps: 500,
-            exitExtremeBps: 400,
-            narrowRangeHalfWidthSteps: 10,
-            wideRangeHalfWidthSteps: 10,
-            minRecenterBps: 5000,
-            maxHealthyIdleBps: 100,
-            maxSwapSlippageBps: 100,
-            maxMigrationLossBps: 100
-        });
+        input.strategy = uint256(100) | (uint256(50) << 24) | (uint256(300) << 48) | (uint256(200) << 72)
+            | (uint256(500) << 96) | (uint256(400) << 120) | (uint256(10) << 144) | (uint256(10) << 168)
+            | (uint256(5000) << 192);
+    }
+
+    function _withStrategyField(uint256 packed, uint256 offset, uint256 width, uint256 value)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 mask = (uint256(1) << width) - 1;
+        return (packed & ~(mask << offset)) | ((value & mask) << offset);
     }
 
     function _activeInputs() private pure returns (VaultStrategyMath.PlanInputs memory input) {
         input = _inputs();
         input.planVersion = 7;
         input.activeVenue = VenueType.UNISWAP_V3_LOW_FEE;
-        input.currentPosition = PositionSnapshot({
-            venue: input.activeVenue,
-            adapter: address(0),
-            principal0: 0,
-            principal1: 0,
-            claimableFee0: 0,
-            claimableFee1: 0,
-            amount0: 0,
-            amount1: 0,
-            liquidity: 1,
-            positionId: 1,
-            tickLower: -100,
-            tickUpper: 100
-        });
+        input.currentPosition = VaultStrategyMath.PlanPositionInputs({liquidity: 1, tickLower: -100, tickUpper: 100});
     }
 
     function _assertRegime(MarketRegime previous, uint256 deviation, MarketRegime expected) private view {

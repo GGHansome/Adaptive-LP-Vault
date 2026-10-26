@@ -5,12 +5,25 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {MarketRegime, PositionPlan, StrategyConfig, VenueType} from "../../src/core/VaultTypes.sol";
 import {IAdaptiveLPVault} from "../../src/interfaces/IAdaptiveLPVault.sol";
-import {VaultStrategyMath} from "../../src/libraries/VaultStrategyMath.sol";
+import {PositionSnapshot} from "../../src/adapters/AdapterTypes.sol";
+import {OracleSnapshot} from "../../src/oracle/OracleTypes.sol";
 
 /// @notice Frozen reference for the pre-extraction vault plan algorithm, with chain reads supplied as inputs.
 /// @dev Keep independent from the production library so differential tests detect extraction regressions.
 contract LegacyPositionPlannerReference {
-    function getPlan(VaultStrategyMath.PlanInputs memory input) external pure returns (PositionPlan memory plan) {
+    // Preserve the original full input shape independently of the production library.
+    struct PlanInputs {
+        OracleSnapshot oracle;
+        PositionSnapshot currentPosition;
+        StrategyConfig strategy;
+        MarketRegime lastExecutedRegime;
+        VenueType activeVenue;
+        int24 lowSpacing;
+        int24 highSpacing;
+        uint64 planVersion;
+    }
+
+    function getPlan(PlanInputs memory input) external pure returns (PositionPlan memory plan) {
         MarketRegime regime =
             _nextRegime(input.oracle.deviationBps, input.planVersion, input.lastExecutedRegime, input.strategy);
         VenueType targetVenue = _venueForRegime(regime);

@@ -5,7 +5,7 @@ import {
     AccessControlDefaultAdminRules
 } from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
 
-import {AccessControlConfig} from "./VaultTypes.sol";
+import {AccessControlConfig} from "../core/VaultTypes.sol";
 import {IVaultRoles} from "../interfaces/IVaultRoles.sol";
 
 /// @title Vault Roles

@@ -1,17 +1,17 @@
 {
-  "bootstrapIdle": "386880",
-  "bootstrapV2": "536797",
-  "bootstrapV3": "676361",
-  "depositV2": "187745",
-  "depositV3NoFees": "168380",
-  "depositV3WithFees": "180117",
+  "bootstrapIdle": "386755",
+  "bootstrapV2": "536404",
+  "bootstrapV3": "675924",
+  "depositV2": "187618",
+  "depositV3NoFees": "168253",
+  "depositV3WithFees": "179990",
   "emergencyV3WithFees": "125462",
-  "rebalanceToIdle": "166891",
-  "rebalanceV3ToV3": "412154",
-  "rebalanceV3WithFees": "423900",
+  "rebalanceToIdle": "166744",
+  "rebalanceV3ToV3": "411711",
+  "rebalanceV3WithFees": "423455",
   "redeemIdle": "19330",
   "redeemV3NoFees": "81605",
   "redeemV3WithFees": "93339",
-  "swapOneForZero": "388061",
-  "swapZeroForOne": "388574"
+  "swapOneForZero": "389717",
+  "swapZeroForOne": "390228"
 }
