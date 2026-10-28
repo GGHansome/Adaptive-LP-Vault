@@ -17,7 +17,7 @@
 4. Vault 构造函数调用 `VaultComponentFactory` 创建并固定绑定专属 `VaultControl` 和 `ControlledSwapExecutor`；Executor 只按 Vault 验证过的 `SwapPlan` 执行 token0/token1 交换。
 5. Registry 的遍历不是资产会计路径。Vault 只读取 `activeVenue` 对应 Adapter，保证 Gas 有界。
 6. 所有资产迁移入口采用 Checks-Effects-Interactions、非重入保护和外部调用后的状态重读。
-7. `VaultStrategyMath.getPlan()` 是外部链接库的 `external pure` 入口，完整输入显式传入，不读取 Vault storage、不执行资产操作、不调用外部合约。`assessDeployment()` 是同一库的 `external view` 入口，只查询 Vault 显式传入的目标 Adapter 与固定 Oracle；准入和 Oracle 健康检查仍在 Vault。库地址在 Vault 字节码链接时固定，部署后无角色可替换；历史决策和评估边界调整见 [ADR-0001](adr/0001-linked-position-planner.md)。
+7. `VaultStrategyMath.getPlan()` 是外部链接库的 `external pure` 入口，完整输入显式传入，不读取 Vault storage、不执行资产操作、不调用外部合约。`assessDeployment()` 是同一库的 `external view` 入口，只查询 Vault 显式传入的目标 Adapter 与固定 Oracle；准入和 Oracle 健康检查仍在 Vault。库地址在 Vault 字节码链接时固定，部署后无角色可替换；。
 8. 仓位快照和估值只在同一资产状态阶段内复用；手续费收取、退出仓位、Swap、存款和赎回转账后，必须读取受影响的新状态。代币余额由会计入口和资产操作校验各自在使用处读取，不沿退出、Swap、部署链传递缓存余额。主动仓位检查独立验证 Registry 身份、金额和区间，非主动 V3 检查及建仓前的 `enabled` 检查仍保留。区间事件在实际仓位与 Plan 校验一致后使用 Plan 的区间。历史测量见 [第一轮 Gas 优化记录](../debug/GAS_OPTIMIZATION_ROUND1.md)，当前实现与取舍见 [Gas 优化后的简化记录](../debug/GAS_SIMPLIFICATION.md)。
 
 ## 2. 系统边界
@@ -112,7 +112,7 @@ flowchart LR
 
 ## 3. Foundry 项目目录
 
-以下目录是规划中的实现结构，当前仓库未实现这些 Solidity 文件。
+当前仓库使用以下实现目录结构；各目录中的文件以实际代码为准。
 
 ```text
 AdaptiveLPVault/
@@ -676,7 +676,7 @@ function assessDeployment(
 - `VaultStrategyMath.getPlan()` 通过固定链接的外部纯函数生成候选计划；执行门控和状态提交由 Vault 负责。库部署与链接验证见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 - `VaultStrategyMath.getPlan()` 保持纯计算；`assessDeployment(AssessmentInputs)` 负责完整只读部署评估，包括一次 `previewDeposit()`、预览校验、两次独立向下取整的 Oracle 报价、最低部署率及方向计算。`AssessmentInputs` 定义在库内，其阈值字段为 `uint256 minDeployBps`，由 Vault 的 immutable 提供。
 - Vault 保证评估输入可信，在非 IDLE 评估前检查目标 Adapter 准入，并从健康 Oracle 快照取得 TWAP Tick；库不查询 Registry、不读写 Vault storage、不执行资产操作。IDLE 不查询 Adapter 或 Oracle；无效预览先于报价回滚。模拟校验继续在 Vault 使用相同评估结果检查部署率和预期方向；最终实际部署仍独立校验。固定链接库经 `DELEGATECALL` 执行，Adapter/Oracle 看到的调用地址仍是 Vault。
-- `PriceMath`、`PositionPlanHash` 和 `SafeTransferLib` 提供跨模块通用的无状态工具。
+- `PriceMath` 提供跨模块通用的价格计算；计划哈希计算由 `VaultStrategyMath` 内部完成，资产转账使用 OpenZeppelin `SafeERC20`。
 
 ### 6.2 Vault Roles 接口
 
@@ -1482,7 +1482,7 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 | 测试层                 | 必测场景                                                                                                                                                                                                                      |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `AdaptiveLPVault` 单元测试 | Vault 会计、原始资产快照、Oracle 快照编排、计划输入的可信来源及 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.4 的 IDLE/Bootstrap 规范空快照、部署评估、`requiresSwap`、`direction`、八个仅初始化后入口的 `NotInitialized()` 覆盖及无角色入口先检查生命周期、角色门控入口先授权再检查生命周期的错误优先级、角色、暂停、Registry 和核心状态边界 |
-| `VaultStrategyMath` 单元测试 | 外部链接的 `external pure` 入口独立输入测试、Bootstrap 完整阈值分类、历史 Regime 迟滞与当前 Venue 独立、按 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9.1.3 生成规范化 Tick 和 Range、负 Tick 最近倍数与平局向下、Recenter 的宽度/Spot/中心位移边界、版本溢出、`PositionPlanHash` 精确 ABI 编码与链下复算、相同输入确定性及无资产余额依赖 |
+| `VaultStrategyMath` 单元测试 | 外部链接的 `external pure` 入口独立输入测试、Bootstrap 完整阈值分类、历史 Regime 迟滞与当前 Venue 独立、按 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9.1.3 生成规范化 Tick 和 Range、负 Tick 最近倍数与平局向下、Recenter 的宽度/Spot/中心位移边界、版本溢出、计划哈希的精确 ABI 编码与链下复算、相同输入确定性及无资产余额依赖 |
 | Oracle 单元测试         | 长/短窗口 `observe` 累计 Tick、负数向负无穷取整、观察不足和必要 Pool 读取失败时 `snapshot()` 不回滚并按 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §8.4 返回规范不健康快照、早期与晚期失败均不泄露部分结果或复用上一次健康结果、`isHealthy()` 与 `snapshot().healthy` 判定一致、故障恢复后返回完整健康快照、Pool 当前零流动性、Pool 绑定、Pool 有序 Token 与地址升序、Token metadata 读取和 decimals 上限、`Q1/Q0` 双向报价、向上/向下取整、三个规范化价格字段、`observedAt`、Short TWAP/TWAP 偏离 |
 | V2 Adapter 测试       | [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §7.2 的 `PositionSnapshot` 规范化、储备权益、费用已包含、`amount0Max/amount1Max` 与实际 `used0/used1`、按销毁前 Supply 向下取整 LP Token 的部分退出、零 LP 单位返回 `0/0`、V2 Adapter 以 LP Token 余额核对 `mint()` 返回量，覆盖首次建仓、已有仓位追加、预存 LP 捐赠以及报告量过大/过小、LP 未增加或减少时的原子回滚；返回值与 Vault 实际余额增量一致、有序 Token 绑定 |
 | V3 Adapter 测试       | principal、tokens owed、fee growth 增量、领取后重读、principal 比例与手续费隔离、`amount0Max/amount1Max` 与实际 `used0/used1`、immutable binding getters、Pool 有序 Token、`tickSpacing`、Range、按销毁前 Supply 向下取整 liquidity 的部分退出、零 liquidity 单位返回 `0/0`、返回值与 Vault 实际余额增量一致、旧 NFT 清理 |
@@ -1503,7 +1503,6 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 - `PRODUCT_SPEC.md`、本文档、`SWAP_REBALANE_MATH.md` 与 `DEPLOYMENT.md` 的函数、类型、事件、角色、参数和 Pool 绑定名称一致。
 - 部署顺序、部署前外部依赖检查、流动性预检和部署证据仅由 `DEPLOYMENT.md` 定义，本文档不维护第二套操作流程。
 - `VaultStrategyMath` 已采用外部链接的纯计算入口；发布前必须确认库地址固定、字节码已完成链接、Oracle/执行门控仍在 Vault，并保存同配置的 runtime 尺寸与测试结果。
-- 所有规划目录已明确标记为待实现结构，不能被误读为已存在代码。
 - 所有 Mermaid、表格和 Solidity 代码块位于 Markdown 顶层，且围栏成对闭合。
 - 所有资产变更方法定义调用者、输入、输出、失败条件和原子性。
 - V3 Oracle、V3 费用同步、V2 储备计价和 Donation 语义均有可执行测试用例。

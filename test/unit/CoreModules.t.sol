@@ -5,10 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 
-import {AdapterRegistry} from "../../src/control/AdapterRegistry.sol";
 import {VaultControl} from "../../src/control/VaultControl.sol";
-import {VaultPause} from "../../src/control/VaultPause.sol";
-import {VaultRoles} from "../../src/control/VaultRoles.sol";
 import {AccessControlConfig, AdapterConfig, PauseFlag, PauseState, VenueType} from "../../src/core/VaultTypes.sol";
 import {IAdapterRegistry} from "../../src/interfaces/IAdapterRegistry.sol";
 import {IPositionAdapter} from "../../src/interfaces/IPositionAdapter.sol";
@@ -16,226 +13,20 @@ import {IVaultPause} from "../../src/interfaces/IVaultPause.sol";
 import {IVaultControl} from "../../src/interfaces/IVaultControl.sol";
 import {IVaultRoles} from "../../src/interfaces/IVaultRoles.sol";
 
-contract MockCoreToken {}
-
-contract MockCoreVaultLifecycle {
-    bool public initialized;
-
-    function setInitialized(bool initialized_) external {
-        initialized = initialized_;
-    }
-}
-
-contract MockCoreFactory {
-    mapping(address tokenA => mapping(address tokenB => address pair)) public getPair;
-    mapping(address tokenA => mapping(address tokenB => mapping(uint24 fee => address pool))) public getPool;
-
-    function registerPair(address token0, address token1, address pair) external {
-        getPair[token0][token1] = pair;
-        getPair[token1][token0] = pair;
-    }
-
-    function registerPool(address token0, address token1, uint24 fee, address pool) external {
-        getPool[token0][token1][fee] = pool;
-        getPool[token1][token0][fee] = pool;
-    }
-}
-
-contract MockCoreV2Pool {
-    address public immutable factory;
-    address public immutable token0;
-    address public immutable token1;
-
-    constructor(address factory_, address token0_, address token1_) {
-        factory = factory_;
-        token0 = token0_;
-        token1 = token1_;
-    }
-}
-
-contract MockCoreV3Pool {
-    address public immutable factory;
-    address public immutable token0;
-    address public immutable token1;
-    uint24 public immutable fee;
-    int24 public immutable tickSpacing;
-
-    constructor(address factory_, address token0_, address token1_, uint24 fee_, int24 tickSpacing_) {
-        factory = factory_;
-        token0 = token0_;
-        token1 = token1_;
-        fee = fee_;
-        tickSpacing = tickSpacing_;
-    }
-}
-
-contract MockCoreAdapter {
-    address public immutable vault;
-    VenueType public immutable venue;
-    address public immutable pool;
-    address public immutable token0;
-    address public immutable token1;
-    uint24 public immutable feeTier;
-    int24 public tickSpacing;
-
-    constructor(
-        address vault_,
-        VenueType venue_,
-        address pool_,
-        address token0_,
-        address token1_,
-        uint24 feeTier_,
-        int24 tickSpacing_
-    ) {
-        vault = vault_;
-        venue = venue_;
-        pool = pool_;
-        token0 = token0_;
-        token1 = token1_;
-        feeTier = feeTier_;
-        tickSpacing = tickSpacing_;
-    }
-
-    function setTickSpacing(int24 newTickSpacing) external {
-        tickSpacing = newTickSpacing;
-    }
-}
-
-contract VaultRolesHarness is VaultRoles {
-    constructor(AccessControlConfig memory config) VaultRoles(config) {}
-}
-
-contract VaultPauseHarness is VaultPause {
-    bool private _initialized;
-
-    constructor(AccessControlConfig memory config) VaultRoles(config) {}
-
-    function setInitialized(bool initialized_) external {
-        _initialized = initialized_;
-    }
-
-    function requireNotPaused(PauseFlag flag) external view {
-        _requireNotPaused(flag);
-    }
-
-    function pauseAll(address caller) external returns (bool changed) {
-        return _pauseAll(caller);
-    }
-
-    function _vaultInitialized() internal view override returns (bool) {
-        return _initialized;
-    }
-}
-
-contract AdapterRegistryHarness is AdapterRegistry {
-    bool private _initialized;
-    address private immutable _TOKEN0;
-    address private immutable _TOKEN1;
-    address private immutable _V2_FACTORY;
-    address private immutable _V3_FACTORY;
-
-    constructor(
-        AccessControlConfig memory config,
-        address token0_,
-        address token1_,
-        address v2Factory_,
-        address v3Factory_
-    ) VaultRoles(config) {
-        _TOKEN0 = token0_;
-        _TOKEN1 = token1_;
-        _V2_FACTORY = v2Factory_;
-        _V3_FACTORY = v3Factory_;
-    }
-
-    function setInitialized(bool initialized_) external {
-        _initialized = initialized_;
-    }
-
-    function validateConfiguredAdapters() external view {
-        _validateConfiguredAdapters();
-    }
-
-    function requireEnterEnabled(VenueType venue) external view returns (address) {
-        return _requireEnterEnabled(venue);
-    }
-
-    function adapterTickSpacing(VenueType venue) external view returns (int24) {
-        return _adapterTickSpacing(venue);
-    }
-
-    function _vaultInitialized() internal view override returns (bool) {
-        return _initialized;
-    }
-
-    function _registryVault() internal view override returns (address) {
-        return address(this);
-    }
-
-    function _registryToken0() internal view override returns (address) {
-        return _TOKEN0;
-    }
-
-    function _registryToken1() internal view override returns (address) {
-        return _TOKEN1;
-    }
-
-    function _registryV2Factory() internal view override returns (address) {
-        return _V2_FACTORY;
-    }
-
-    function _registryV3Factory() internal view override returns (address) {
-        return _V3_FACTORY;
-    }
-}
-
-contract CombinedCoreHarness is VaultPause, AdapterRegistry {
-    bool private _initialized;
-    address private immutable _TOKEN0;
-    address private immutable _TOKEN1;
-    address private immutable _V2_FACTORY;
-    address private immutable _V3_FACTORY;
-
-    constructor(
-        AccessControlConfig memory config,
-        address token0_,
-        address token1_,
-        address v2Factory_,
-        address v3Factory_
-    ) VaultRoles(config) {
-        _TOKEN0 = token0_;
-        _TOKEN1 = token1_;
-        _V2_FACTORY = v2Factory_;
-        _V3_FACTORY = v3Factory_;
-    }
-
-    function setInitialized(bool initialized_) external {
-        _initialized = initialized_;
-    }
-
-    function _vaultInitialized() internal view override(VaultPause, AdapterRegistry) returns (bool) {
-        return _initialized;
-    }
-
-    function _registryVault() internal view override returns (address) {
-        return address(this);
-    }
-
-    function _registryToken0() internal view override returns (address) {
-        return _TOKEN0;
-    }
-
-    function _registryToken1() internal view override returns (address) {
-        return _TOKEN1;
-    }
-
-    function _registryV2Factory() internal view override returns (address) {
-        return _V2_FACTORY;
-    }
-
-    function _registryV3Factory() internal view override returns (address) {
-        return _V3_FACTORY;
-    }
-}
+import {
+    MockCoreToken,
+    MockCoreVaultLifecycle,
+    MockCoreFactory,
+    MockCoreV2Pool,
+    MockCoreV3Pool,
+    MockCoreAdapter
+} from "./mocks/CoreMocks.sol";
+import {
+    VaultRolesHarness,
+    VaultPauseHarness,
+    AdapterRegistryHarness,
+    CombinedCoreHarness
+} from "./helpers/CoreHarnesses.sol";
 
 contract CoreModulesTest is Test {
     address private constant MANAGER = address(0xA11CE);

@@ -3,10 +3,10 @@ pragma solidity ^0.8.24;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {MarketRegime, PositionPlan, StrategyConfig, VenueType} from "../../src/core/VaultTypes.sol";
-import {IAdaptiveLPVault} from "../../src/interfaces/IAdaptiveLPVault.sol";
-import {PositionSnapshot} from "../../src/adapters/AdapterTypes.sol";
-import {OracleSnapshot} from "../../src/oracle/OracleTypes.sol";
+import {MarketRegime, PositionPlan, StrategyConfig, VenueType} from "../../../src/core/VaultTypes.sol";
+import {IAdaptiveLPVault} from "../../../src/interfaces/IAdaptiveLPVault.sol";
+import {PositionSnapshot} from "../../../src/adapters/AdapterTypes.sol";
+import {OracleSnapshot} from "../../../src/oracle/OracleTypes.sol";
 
 /// @notice Frozen reference for the pre-extraction vault plan algorithm, with chain reads supplied as inputs.
 /// @dev Keep independent from the production library so differential tests detect extraction regressions.

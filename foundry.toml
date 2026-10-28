@@ -6,5 +6,25 @@ solc_version = "0.8.24"
 optimizer = true
 optimizer_runs = 200
 via_ir = true
+# Default and nightly regression remain offline; fork tests require an explicit profile.
+no_match_path = "test/fork/*.t.sol"
+# Read-only access to pinned official protocol artifacts used by local integration tests.
+fs_permissions = [{ access = "read", path = "./lib/uniswap-test-deps/node_modules" }]
+
+# Stateful campaigns target only checked handlers; unexpected reverts must fail.
+[profile.default.invariant]
+runs = 256
+depth = 128
+fail_on_revert = true
+
+[profile.fork]
+match_path = "test/fork/*.t.sol"
+# Override the inherited exclusion; an empty glob would exclude every test in Forge.
+no_match_path = "test/unit/**"
+
+[profile.nightly.invariant]
+runs = 1000
+depth = 256
+fail_on_revert = true
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

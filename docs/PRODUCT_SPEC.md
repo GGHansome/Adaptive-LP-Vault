@@ -176,8 +176,7 @@ Bootstrap 只能由 Manager 调用且只能成功一次。`minimumLockedShares` 
 
 - Vault 尚未初始化；
 - 两个 V3 Adapter 的受管理仓位必须为空；已有 V2 LP 按 §5.5 处理，不要求其实际余额为零；
-- `bootstrap()` 必须在任何初始资产转入、shares 铸造或 Adapter 建仓前，重新校验由 canonical Pool 派生并由 canonical Oracle 固化的 token0/token1、Token decimals、canonical Oracle、Swap Executor 和所有 v1 Adapter 的完整 immutable 绑定及 `tickSpacing` 缓存；
-- 验证 `swapExecutor.swapPool() == canonicalOracle.canonicalPool()`；
+- `bootstrap()` 必须在初始资产转入、shares 铸造或 Adapter 建仓前，重新验证所有 v1 Adapter 的 immutable 绑定及 `tickSpacing` 缓存；
 - Oracle Healthy；
 - 初始 token0 和 token1 均大于零；任一为零时以 `ZeroAmount()` 回滚；
 - `receiver != address(0)`；否则以 `ERC20InvalidReceiver(address(0))` 回滚。金额与接收者校验在 Manager 权限和未初始化检查之后、组件绑定校验及资产转入之前执行；
@@ -951,7 +950,6 @@ Vault 在退出旧 Position 和执行 Swap 前，必须完成以下检查：
 目标 Adapter 建仓完成后，Vault 必须重新读取实际状态并验证（激活 V2 时使用包含新确认捐赠的完整会计快照）：
 
 - `finalDeployBps >= minDeployBps`，其中 `minDeployBps = BPS - maxHealthyIdleBps`；
-- `finalIdleBps <= maxHealthyIdleBps`；
 - 完整迁移后的 NAV 损失不超过 `maxMigrationLossBps`；
 - 资产位置和余额守恒成立，允许的舍入差异仅限 `dustTolerance0/1`；
 

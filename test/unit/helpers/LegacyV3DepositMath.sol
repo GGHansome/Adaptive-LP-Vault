@@ -2,8 +2,8 @@
 pragma solidity ^0.8.24;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {PriceMath} from "../../src/libraries/PriceMath.sol";
-import {IPositionAdapter} from "../../src/interfaces/IPositionAdapter.sol";
+import {PriceMath} from "../../../src/libraries/PriceMath.sol";
+import {IPositionAdapter} from "../../../src/interfaces/IPositionAdapter.sol";
 
 /// @dev Frozen pre-optimization V3 deposit math. Intentionally recomputes range prices for amounts.
 library LegacyV3DepositMath {

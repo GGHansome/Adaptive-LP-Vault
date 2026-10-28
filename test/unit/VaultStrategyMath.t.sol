@@ -6,14 +6,9 @@ import {Test} from "forge-std/Test.sol";
 import {MarketRegime, PositionPlan, VenueType} from "../../src/core/VaultTypes.sol";
 import {IAdaptiveLPVault} from "../../src/interfaces/IAdaptiveLPVault.sol";
 import {VaultStrategyMath} from "../../src/libraries/VaultStrategyMath.sol";
-import {LegacyPositionPlannerReference} from "../helpers/LegacyPositionPlannerReference.sol";
+import {LegacyPositionPlannerReference} from "./helpers/LegacyPositionPlannerReference.sol";
 
-/// @notice Exercises the same external-library call used by the vault, without its storage or dependencies.
-contract VaultStrategyMathHarness {
-    function getPlan(VaultStrategyMath.PlanInputs memory input) external pure returns (PositionPlan memory) {
-        return VaultStrategyMath.getPlan(input);
-    }
-}
+import {VaultStrategyMathHarness} from "./helpers/VaultStrategyMathHarness.sol";
 
 contract VaultStrategyMathTest is Test {
     VaultStrategyMathHarness private harness;
