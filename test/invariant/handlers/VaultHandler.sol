@@ -78,6 +78,9 @@ contract VaultHandler is Test {
     mapping(bytes4 => uint256) public attempts;
     mapping(bytes4 => uint256) public successes;
     mapping(bytes4 => uint256) public skips;
+    // External component donations are tracked separately, never as Vault income.
+    mapping(address => uint256) public componentDonations0;
+    mapping(address => uint256) public componentDonations1;
     uint256 public checkedFailures;
     address private flashPool;
     uint256 private flash0;
@@ -256,6 +259,24 @@ contract VaultHandler is Test {
         a0 = bound(a0, 0, seed / 10);
         a1 = bound(a1, 0, seed / 10);
         _donate(a0, a1);
+        ++successes[msg.sig];
+    }
+
+    function donateToComponent(uint256 targetSeed, uint256 a0, uint256 a1) external counted stableHistory {
+        address recipient = targetSeed % 2 == 0 ? address(e.vault.swapExecutor()) : address(control);
+        a0 = bound(a0, 0, seed / 10);
+        a1 = bound(a1, 0, seed / 10);
+        (uint256 before0, uint256 before1) = e.vault.totalAssets();
+        uint256 supply = e.vault.totalSupply();
+        _fund(address(this), a0, a1);
+        e.token0.transfer(recipient, a0);
+        e.token1.transfer(recipient, a1);
+        componentDonations0[recipient] += a0;
+        componentDonations1[recipient] += a1;
+        (uint256 after0, uint256 after1) = e.vault.totalAssets();
+        assertEq(after0, before0, "component donation excluded token0");
+        assertEq(after1, before1, "component donation excluded token1");
+        assertEq(e.vault.totalSupply(), supply);
         ++successes[msg.sig];
     }
 
@@ -840,7 +861,7 @@ contract VaultHandler is Test {
                 )
             );
         }
-        address[13] memory accounts = [
+        address[14] memory accounts = [
             address(e.vault),
             v2,
             address(e.low),
@@ -850,6 +871,7 @@ contract VaultHandler is Test {
             e.high.pool(),
             e.vault.swapExecutor().swapPool(),
             address(e.vault.swapExecutor()),
+            address(control),
             e.vault.swapExecutor().router(),
             manager,
             address(this),

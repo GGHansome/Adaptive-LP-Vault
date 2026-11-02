@@ -29,10 +29,10 @@ cast --version
 anvil --version
 ```
 
-在项目根目录执行：
+先进入当前环境中已克隆的仓库目录，再执行以下命令。`git rev-parse --show-toplevel` 会定位项目根目录，无需固定本机路径。本文后续命令均在项目根目录（包含 `foundry.toml` 的目录）执行。
 
 ```bash
-cd /Users/gaoxu/Desktop/Code/AdaptiveLPVault
+cd "$(git rev-parse --show-toplevel)"
 forge install
 forge build
 ```

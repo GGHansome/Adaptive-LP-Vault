@@ -106,7 +106,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | Last Executed Plan / `lastExecutedPlan` | 最近一次成功执行的完整策略计划 | Vault 持久化状态 | 非策略 Position 变化后可与当前资产位置不同；其 `marketRegime` 是 Hysteresis 历史 |
 | Hysteresis                 | 状态进入和退出使用不同阈值形成的滞后区间                                                      | 部署固定的策略参数                             | 不能用 Cooldown 替代                           |
 | Cooldown                   | 两类计划性 Rebalance 距最近一次成功 Bootstrap 或计划性 Rebalance 的最小时间间隔                                        | Vault 存储的 `lastPositionChangeAt`              | Emergency Exit 跳过前置检查且不更新计时；失败交易和 IDLE 幂等调用不更新 |
-| Donation                   | 未铸造 shares 而无请求转入的资产，包含 Vault 支持 Token 和 Adapter LP 捐赠                                              | ERC-20 实际余额增加                           | 永久归确认时的 shares 持有人；确认时点见 §5.5，v1 不提供救援                 |
+| Donation                   | 未铸造 shares 而无请求转入的资产，包含 Vault 支持 Token、Adapter LP 及 Executor/Control 的外部转入                                              | ERC-20 实际余额增加                           | 仅按 §5.5 纳入会计的捐赠归确认时的 shares 持有人；Executor/Control 转入永不入账，v1 均不提供救援                 |
 
 
 
@@ -292,12 +292,19 @@ $$
 
 直接转入 Vault 的 token0/token1 不会触发 shares 铸造，也不会被识别为用户 Deposit。实际余额增加自动进入 `I0/I1`，因此提高总资产和现有 shares 的 share price。
 
-v1 规则如下：
+v1 对直接转入 Vault 的支持 Token 规定如下：
 
 - 支持资产 Donation 永久归属于现有 shares 持有人；
 - Donation 不改变按 Active Position 本金比例计算的 Deposit 数量，但可能提高 `idleBps` 并关闭后续存款；
 - Vault 不提供支持资产 `rescue`、`sweep`、退款或管理员提取接口；
 - 非支持资产不属于 v1 核心流程，不得通过通用转账接口引入资产转移权限。
+
+直接转入 `ControlledSwapExecutor` 或 `VaultControl` 的 token0/token1 按独立的非会计转入处理：
+
+- 不构成 Deposit、不铸造 shares，也不计入 Vault 的 `I0/I1`、`totalAssets`、NAV、share price 或 Redeem 可分配资产；不能用于抵补部署率或迁移损失检查。
+- 两个合约均无 `rescue`、`sweep`、退款、管理员提取或归集至 Vault 的接口；此类资产永久滞留，捐赠者、shares 持有人及任何角色均无协议内取回路径。v1 接受该不可恢复边界，以维持无救援及无通用资产转移权限的设计。
+- 正常协议操作不得消耗或转移这些既有余额。Executor 换币后必须精确恢复到 Vault 转入本次输入之前的两种 Token 余额，Router 临时 allowance 仍须清零；VaultControl 不参与资产流转。
+- 外部直接转账导致的非零余额本身不构成协议故障，也不得阻断正常存赎、Rebalance 或 Emergency Exit；测试和运行检查应区分外部转入余额与本次操作新增残留，不得把两个合约的绝对零余额视为主网不变量。
 
 V2 LP 捐赠采用激活时确认规则：
 
@@ -915,7 +922,7 @@ Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_asse
 
 仅 Keeper/Manager 可以调用：`rebalanceWithSwap(expectedPlanHash, expectedDirection, amountIn, keeperMinAmountOut, deadline)`。
 
-固定的 Swap 基础设施：每个 `AdaptiveLPVault` 在构造时通过组件工厂创建并永久绑定自己的 `ControlledSwapExecutor`。Executor 固定绑定该 Vault、Router 和 canonical Pool，从 `swapPool` 读取并保存 `token0/token1`，且必须与 Vault 和 canonical Pool 完全一致。Vault 在调用 `executeSwap()` 前向该 Executor 转入精确的 `amountIn`；Executor 只在本次调用期间持有输入资产，Router 的输出接收方固定为 Vault，调用者不能覆盖。
+固定的 Swap 基础设施：每个 `AdaptiveLPVault` 在构造时通过组件工厂创建并永久绑定自己的 `ControlledSwapExecutor`。Executor 固定绑定该 Vault、Router 和 canonical Pool，从 `swapPool` 读取并保存 `token0/token1`，且必须与 Vault 和 canonical Pool 完全一致。Vault 在调用 `executeSwap()` 前向该 Executor 转入精确的 `amountIn`；Executor 仅临时持有本次协议转入的输入资产；外部直接转入的既有余额按 §5.5 处理，不要求为零。Router 的输出接收方固定为 Vault，调用者不能覆盖。
 
 `maxSwapSlippageBps` 是部署时固定的协议滑点上限，任何调用者都不能覆盖。Vault 使用本次迁移开始时捕获的 canonical TWAP 计算协议最低输出 `protocolMinOut`；方向报价和滑点折算均向上取整。Vault 将 `minAmountOut = max(protocolMinOut, keeperMinAmountOut)` 写入本次 `SwapPlan`。
 
@@ -1126,7 +1133,7 @@ Bootstrap 成功后不可替换：
 - Redeem 在暂停和 Oracle 异常时仍能按 §5.4 分别计算退出前 Idle 份额与 Adapter 原生 Position 单位份额，以 Adapter 实际返回 Vault 的资产增量形成最终双资产输出，并仅以该最终实际输出校验 `minAmount0Out/minAmount1Out`；持有人自赎不消费 allowance，授权 spender 代赎从显式 `owner` 销毁 shares、消费足额 allowance，并可将双资产发送给指定 `receiver`；余额或 allowance 不足及任一最终最小输出不满足时整笔回滚；
 - V2 费用只通过 LP Token 储备权益计价；V2 `PositionSnapshot` 和 IDLE/Bootstrap 的策略 `currentPosition` 分别按 §7.2、§7.4 规范化，并覆盖有效与空 Position 测试；
 - V3 principal 与 claimable fees 不重复计价；
-- Donation 按 §5.5 的确认时点进入总资产，且不存在支持资产 rescue/sweep 权限；覆盖非活跃 V2 不阻断操作、激活时收益分配及新确认捐赠参与最终部署率、资产守恒和迁移净值检查。
+- Donation 按 §5.5 区分计入会计的捐赠与永久不入账的 Executor/Control 外部转入，且不存在支持资产 rescue/sweep 权限；覆盖非活跃 V2 不阻断操作、激活时收益分配及新确认捐赠参与最终部署率、资产守恒和迁移净值检查；直接转入 Executor/Control 不改变会计、shares 或计划历史，不阻断正常操作，已有转入余额保持不变，临时授权清零。
 
 Oracle 与策略：
 

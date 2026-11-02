@@ -30,7 +30,7 @@ abstract contract VaultInvariantFixture is LocalUniswapFixture {
         );
         // Handler donates existing LP, never fabricates LP balances or pool reserves.
         IERC20(pair).transfer(address(handler), seed * 10);
-        bytes4[] memory selectors = new bytes4[](18);
+        bytes4[] memory selectors = new bytes4[](19);
         selectors[0] = handler.deposit.selector;
         selectors[1] = handler.redeem.selector;
         selectors[2] = handler.transferShares.selector;
@@ -50,6 +50,7 @@ abstract contract VaultInvariantFixture is LocalUniswapFixture {
         // Additional weighting for time advancement keeps cooldown success paths reachable.
         selectors[16] = handler.advanceTime.selector;
         selectors[17] = handler.probeGates.selector;
+        selectors[18] = handler.donateToComponent.selector;
         targetContract(address(handler));
         targetSelector(FuzzSelector(address(handler), selectors));
         // Keep the fixture address out of fuzz senders: it alone may invoke finish().
@@ -65,10 +66,22 @@ abstract contract VaultInvariantFixture is LocalUniswapFixture {
         assertLe(uint256(delta1 < 0 ? -delta1 : delta1), budget, "token1 cumulative cash flow");
     }
 
+    function _assertComponentBalances() internal view {
+        address[2] memory components = [address(vault.swapExecutor()), address(control)];
+        for (uint256 i; i < components.length; ++i) {
+            address component = components[i];
+            assertEq(token0.balanceOf(component), handler.componentDonations0(component), "component token0 baseline");
+            assertEq(token1.balanceOf(component), handler.componentDonations1(component), "component token1 baseline");
+        }
+        assertEq(token0.allowance(address(vault.swapExecutor()), address(router)), 0);
+        assertEq(token1.allowance(address(vault.swapExecutor()), address(router)), 0);
+    }
+
     /// @dev Runs after EVERY generated sequence, not once after the entire campaign.
     function afterInvariant() public {
         handler.finish();
         _assertGhostAccounting();
+        _assertComponentBalances();
         assertEq(uint8(vault.activeVenue()), uint8(VenueType.IDLE));
         assertEq(vault.totalSupply(), vault.balanceOf(address(vault)));
         assertGe(vault.totalSupply(), LOCKED);

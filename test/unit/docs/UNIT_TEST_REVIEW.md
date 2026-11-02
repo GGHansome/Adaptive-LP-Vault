@@ -240,7 +240,7 @@
 - `test_redeemRejectsZeroReceiverWhileIdle`：即使在 IDLE，Vault 也应主动拒绝零地址收款人。
 - `test_redeemRejectsZeroOwnerWithSpecificError`：份额持有人为零地址时，应返回 ERC-20 规定的无效发送者错误。
 - `test_redeemRejectsZeroSharesBeforeFeeSync`：赎回份额为零时，应在领取费用之前拒绝。
-- `test_swapRejectsZeroInputBeforeOracleRead`：换币输入为零时，应在读取预言机前返回 `ZeroAmount` 错误。
+- `test_swapRejectsZeroInputBeforeOracleRead`：换币输入为零时，应在读取预言机前返回 `SwapNotAllowed` 错误。
 - `test_depositRejectsV3SingleSidedPrincipalWithSpecificError`：V3 仓位只有一种 Token 的本金时，存款应返回单边仓位专用错误。
 - `test_depositRejectsV3ZeroPrincipalWithSpecificError`：V3 两种 Token 的本金都为零时，应返回无效本金错误。
 - `test_depositRejectsV2ZeroPrincipalWithSpecificError`：V2 两种 Token 的本金都为零时，应拒绝存款。

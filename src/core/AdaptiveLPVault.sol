@@ -370,7 +370,7 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         _requireNotPaused(PauseFlag.SWAP_REBALANCE);
         _requireDeadline(deadline);
         _requireCooldown();
-        if (amountIn == 0) revert IAdaptiveLPVault.ZeroAmount();
+        if (amountIn == 0) revert IAdaptiveLPVault.SwapNotAllowed();
 
         OracleSnapshot memory oracle = _healthyOracleSnapshot();
         (PositionPlan memory plan, DeploymentAssessment memory assessment, PositionSnapshot memory current) =

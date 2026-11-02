@@ -65,6 +65,48 @@ contract InvariantHandlerReachabilityTest is VaultInvariantFixture {
         _assertGhostAccounting();
     }
 
+    function test_componentDonationsPreserveBalancesAcrossOperations() public {
+        handler.donateToComponent(0, 1, 0); // a single raw unit must not block swaps
+        handler.donateToComponent(1, 0, 1);
+        handler.donateToComponent(0, 13, 17); // repeated donations accumulate, not overwrite
+        handler.donateToComponent(1, 19, 23);
+        assertEq(handler.componentDonations0(address(vault.swapExecutor())), 14);
+        assertEq(handler.componentDonations1(address(vault.swapExecutor())), 17);
+        assertEq(handler.componentDonations0(address(control)), 19);
+        assertEq(handler.componentDonations1(address(control)), 24);
+        _assertGhostAccounting();
+        _assertComponentBalances();
+
+        handler.deposit(1, 1, seed / 10, seed / 10);
+        handler.exerciseFailure(0, 1); // failed redemption must preserve donated balances
+        handler.redeem(1, 3, 1 ether, 0);
+        _assertComponentBalances();
+        handler.advanceTime(60);
+        handler.rebalance(150);
+        assertEq(uint8(vault.activeVenue()), uint8(VenueType.UNISWAP_V3_HIGH_FEE));
+        _assertComponentBalances();
+
+        handler.advanceTime(60);
+        handler.rebalanceWithSwap(true, seed / 5);
+        assertEq(handler.swaps0(), 1);
+        _assertComponentBalances();
+        handler.advanceTime(60);
+        handler.rebalanceWithSwap(false, seed / 5);
+        assertEq(handler.swaps1(), 1);
+        _assertComponentBalances();
+        _assertGhostAccounting();
+
+        handler.emergencyExit(true);
+        _assertComponentBalances();
+        handler.finish();
+        _assertGhostAccounting();
+        _assertComponentBalances();
+        assertEq(handler.successes(VaultHandler.donateToComponent.selector), 4);
+        assertEq(handler.successes(VaultHandler.deposit.selector), 1);
+        assertEq(handler.successes(VaultHandler.redeem.selector), 1);
+        assertEq(handler.checkedFailures(), 1);
+    }
+
     function test_handlerChecksFaultsControlsRevocationAndEmergencyLiveness() public {
         handler.deposit(1, 1, seed / 10, seed / 10);
         for (uint256 bits; bits < 8; ++bits) {

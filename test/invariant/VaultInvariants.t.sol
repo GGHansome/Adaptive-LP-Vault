@@ -65,8 +65,9 @@ contract VaultInvariantsTest is VaultInvariantFixture {
         handler.assertHistory();
     }
 
-    /// @dev INV-09: balances sent directly to these addresses are not part of this campaign;
-    /// all valid calls must restore the zero baselines and clear temporary approvals.
+    /// @dev INV-09/11: executor/control balances equal independently tracked external donations;
+    /// adapters still start at zero (direct underlying-token donations to adapters are not generated).
+    /// Protocol calls must leave no new residual custody and must clear temporary approvals.
     function invariant_noResidualCustodyOrTemporaryAllowances() public view {
         address[3] memory adapters = [address(v2), address(low), address(high)];
         for (uint256 i; i < 3; ++i) {
@@ -77,13 +78,7 @@ contract VaultInvariantsTest is VaultInvariantFixture {
             assertEq(token0.allowance(adapters[i], address(positionManager)), 0);
             assertEq(token1.allowance(adapters[i], address(positionManager)), 0);
         }
-        address executor = address(vault.swapExecutor());
-        assertEq(token0.balanceOf(executor), 0);
-        assertEq(token1.balanceOf(executor), 0);
-        assertEq(token0.allowance(executor, address(router)), 0);
-        assertEq(token1.allowance(executor, address(router)), 0);
-        assertEq(token0.balanceOf(address(control)), 0);
-        assertEq(token1.balanceOf(address(control)), 0);
+        _assertComponentBalances();
     }
 
     /// @dev INV-15/16/19: runtime changes cannot replace fixed bindings or confer business

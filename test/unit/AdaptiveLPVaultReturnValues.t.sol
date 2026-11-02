@@ -116,7 +116,7 @@ contract AdaptiveLPVaultReturnValuesTest is AdaptiveLPVaultDonationsTest {
             abi.encodeCall(ICanonicalV3Oracle.snapshot, ()),
             abi.encodeWithSelector(UnexpectedExternalCall.selector)
         );
-        vm.expectRevert(IAdaptiveLPVault.ZeroAmount.selector);
+        vm.expectRevert(IAdaptiveLPVault.SwapNotAllowed.selector);
         vault.rebalanceWithSwap(plan.planHash, SwapDirection.ZERO_FOR_ONE, 0, 0, uint32(block.timestamp));
         _assertSwapRolledBack();
     }

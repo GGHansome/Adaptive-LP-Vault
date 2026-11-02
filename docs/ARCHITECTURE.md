@@ -818,11 +818,26 @@ ControlledSwapExecutor 架构边界：
 
 ## 7. 错误契约
 
-错误使用 custom error，错误参数只能包含帮助调用者修正请求所需的信息，不得泄露可被用来绕过权限或安全限制的内部假设。Vault 自定义错误名和触发语义固定如下。
+错误使用 custom error，错误参数用于定位失败和修正请求。本节统一列出 Vault、Control、Oracle、Adapter、Executor 及数学库的协议自定义错误；名称、参数或触发语义变更时同步更新，链下解码以对应版本的各组件 ABI 为准。
 
-继承错误沿用 OpenZeppelin 标准语义：角色授权和 `renounceRole` 调用者确认失败分别使用 `IAccessControl` 的 `AccessControlUnauthorizedAccount` 与 `AccessControlBadConfirmation`；非法根管理员、绕过单一根管理员或两阶段规则以及尚未满足延迟的操作，分别使用 `IAccessControlDefaultAdminRules` 的 `AccessControlInvalidDefaultAdmin`、`AccessControlEnforcedDefaultAdminRules` 和 `AccessControlEnforcedDefaultAdminDelay`，Vault 不定义额外的最后管理员错误或自定义根管理员计数错误。`redeem` 在 `owner` shares 余额不足或代赎 allowance 不足时，分别使用 `IERC20Errors` 的 `ERC20InsufficientBalance` 与 `ERC20InsufficientAllowance`；
+继承错误沿用 OpenZeppelin 标准语义：角色授权和 `renounceRole` 调用者确认失败分别使用 `IAccessControl` 的 `AccessControlUnauthorizedAccount` 与 `AccessControlBadConfirmation`；非法根管理员、绕过单一根管理员或两阶段规则以及尚未满足延迟的操作，分别使用 `IAccessControlDefaultAdminRules` 的 `AccessControlInvalidDefaultAdmin`、`AccessControlEnforcedDefaultAdminRules` 和 `AccessControlEnforcedDefaultAdminDelay`，Vault 不定义额外的最后管理员错误或自定义根管理员计数错误。`redeem` 在 `owner` shares 余额不足或代赎 allowance 不足时，分别使用 `IERC20Errors` 的 `ERC20InsufficientBalance` 与 `ERC20InsufficientAllowance`；其他 ERC-20 错误、`SafeERC20FailedOperation(address)` 和 `SafeCastOverflowedUintDowncast(uint8,uint256)` 同样沿用依赖定义。未捕获的下游回滚可直接传播。
 
 ```solidity
+/// @notice Vault 构造期的固定依赖或策略配置非法。
+error InvalidConfiguration();
+
+/// @notice VaultControl 构造期的 Vault、资产或 Factory 配置非法。
+error InvalidControlConfiguration();
+
+/// @notice Executor 构造时绑定的 Vault 为零地址。
+error InvalidVaultBinding();
+
+/// @notice Oracle 构造期的 Factory 或观察窗口配置非法。
+error InvalidOracleConfiguration();
+
+/// @notice Oracle 构造期的 canonical Pool 地址、接口或 Factory 登记等绑定校验失败。
+error InvalidCanonicalPool();
+
 /// @notice 仅允许初始化前调用的入口在 Vault 已初始化后被调用。
 error AlreadyInitialized();
 
@@ -842,7 +857,7 @@ error Paused(PauseFlag flag);
 /// @dev 该错误路径不得生成或返回 PositionPlan。
 error OracleUnhealthy();
 
-/// @notice Adapter 部署配置与实现类型不匹配，包括零 Vault/Pool、错误 Venue、V2 配置了 Position Manager 或 V3 缺少 Position Manager。
+/// @notice Adapter 部署配置与实现类型不匹配，或 Registry 对 Adapter 接口及身份的校验失败。
 error InvalidAdapterConfiguration();
 
 /// @notice PositionPlan 的目标 Venue 与 Adapter 绑定的 Venue 不一致。
@@ -850,29 +865,32 @@ error InvalidAdapterConfiguration();
 /// @param actual PositionPlan 请求的 Venue。
 error InvalidPlanVenue(VenueType expected, VenueType actual);
 
-/// @notice Adapter 的部分退出收到无效的销毁前 Vault shares 总供应量，或 shares 大于该供应量。
+/// @notice Adapter 的非零部分退出收到零总供应量，或 shares 大于销毁前总供应量。
 error InvalidShareSupply();
 
-/// @notice Adapter 或 Pool 暴露的 Token 地址不是预期资产对。
+/// @notice Token 地址没有合约代码，或资产对与预期不一致。
 error InvalidAssetPair();
 
-/// @notice Pool、Pair、Factory 或 Position Manager 的绑定无效或彼此不一致。
+/// @notice Pool、Pair、Factory 或 Position Manager 绑定无效，或 V2 快照的 Pair 总供应量为零。
 error InvalidPoolBinding();
 
-/// @notice ControlledSwapExecutor 绑定的 Swap Pool 不是 Vault 的 canonical Pool。
+/// @notice canonical/Swap Pool 的地址、接口、Factory 登记或 Executor 与 Vault 的 Pool 绑定校验失败。
 error InvalidSwapPool();
 
 /// @notice Pool 的 token0/token1 地址为空、相同或未按地址升序排列。
 error InvalidTokenOrder();
 
-/// @notice 无法读取 Token 的 decimals 元数据。
+/// @notice 无法读取 Token 或 Oracle 报告的 decimals 元数据。
 /// @param token 无法读取元数据的 Token。
 error InvalidTokenMetadata(address token);
 
-/// @notice Token 的链上 decimals 超过 18。
+/// @notice Token 或 Oracle 报告的 decimals 超过 18。
 /// @param token 校验失败的 Token。
-/// @param actual IERC20Metadata.decimals() 返回的 decimals。
+/// @param actual 被校验的 decimals 值。
 error InvalidTokenDecimals(address token, uint8 actual);
+
+/// @notice Oracle 报价或 PriceMath 计算使用的 Tick 超出 [-887272, 887272]。
+error InvalidTick(int24 tick);
 
 /// @notice Bootstrap 的初始 NAV 低于 minimumInitialNav。
 error MinimumNavNotMet();
@@ -920,6 +938,15 @@ error AssetSlippage(uint256 amount0, uint256 amount1);
 /// @notice Adapter 的预览或存款返回量与输入上限、实际 Vault 余额变化不一致。
 error AdapterBalanceMismatch();
 
+/// @notice Adapter 的底层 Token 或 LP Token 实际余额与操作后期望值不一致。
+error AdapterBalanceMismatch(address token, uint256 expected, uint256 actual);
+
+/// @notice V3 Position Manager 报告的 Token 使用量超过本次允许数量。
+error UsedAmountExceedsDesired(address token, uint256 desired, uint256 used);
+
+/// @notice Vault 任一底层 Token 的资产短缺超过对应 dustTolerance；Swap 路径按输入输出调整期望值。
+error AssetConservationViolation();
+
 /// @notice 向 Vault 转入资产的实际余额变化不等于请求数量，包括余额反而下降。
 error TokenTransferMismatch(address token, uint256 expectedAmount, uint256 balanceBefore, uint256 balanceAfter);
 
@@ -941,13 +968,13 @@ error InvalidPlanHash();
 /// @notice Swap 方向为 NONE，或与当前部署评估派生的方向不一致。
 error InvalidSwapDirection();
 
-/// @notice Adapter 绑定缺少有效 V3 tickSpacing、spacing 非正值或与 Pool 不一致。
+/// @notice V3 tickSpacing 非正、读取失败或与绑定不一致，或 V2 配置了非零 spacing。
 error InvalidTickSpacing();
 
-/// @notice spacing 步数换算溢出、Range 边界不合法或生成的 Range 超出 Uniswap V3 可用 Tick。
+/// @notice spacing 换算、Range 边界/对齐或窄宽关系非法，或 Range 超出 Uniswap V3 可用 Tick。
 error InvalidTickRange();
 
-/// @notice 当前区块时间已经超过调用者指定的 deadline。
+/// @notice 当前时间超过 deadline；Vault 入口也拒绝零 deadline。
 error DeadlineExpired();
 
 /// @notice 计划生成的状态或 Range 与当前状态相同，无需执行变更。
@@ -962,17 +989,23 @@ error CooldownActive(uint256 availableAt);
 /// @dev 这是通过 revert data 返回的 custom error，不是事件。
 error SwapRequired();
 
-/// @notice 当前入口、计划或部署评估不允许执行 Swap。
+/// @notice 当前入口、计划或部署评估不允许 Swap；也用于零 amountIn 或 Executor 的零 minAmountOut。
 error SwapNotAllowed();
 
-/// @notice Swap 使用的 Router 不是 Executor 部署时封存的 Router。
+/// @notice Executor 构造期的 Router 地址、代码、接口或 Factory 绑定校验失败。
 error RouterNotAllowed();
 
-/// @notice Swap 涉及的 Token 不属于 Vault 固定的 token0/token1，或与方向不一致。
-error TokenNotAllowed();
-
-/// @notice amountIn 超过本次过量资产修复允许使用的最大数量。
+/// @notice amountIn 超过可用输入余额，或最差输出模拟后出现超过 Dust 的反向过量库存。
 error SwapAmountExceeded();
+
+/// @notice Executor 持有的输入 Token 不足以支付计划要求的精确数量。
+error InsufficientExecutorInputBalance(address token, uint256 required, uint256 actual);
+
+/// @notice Router 调用后 Executor 的输入余额或输出余额不符合精确消耗及基线约束。
+error ExecutorBalanceMismatch(address token, uint256 expected, uint256 actual);
+
+/// @notice Router 调用期间 Vault 输出 Token 余额反而下降。
+error VaultOutputBalanceDecreased(address token, uint256 beforeBalance, uint256 afterBalance);
 
 /// @notice Swap 的实际输出低于本次 SwapPlan 的 minAmountOut；Vault 与 Executor 使用同一签名。
 error SwapSlippage(uint256 minimumAmountOut, uint256 actualAmountOut);
@@ -986,10 +1019,10 @@ error IdleLimitExceeded();
 /// @notice 目标 Position 的最差结果模拟部署率或最终实际部署率低于派生的 minDeployBps。
 error DeploymentRatioTooLow();
 
-/// @notice 建立目标 Position 前仍存在另一有效 Position。
+/// @notice 建仓前仍存在另一有效 Position，或 V3 Adapter 切换 Range 前旧仓位未清理。
 error ActivePositionExists();
 
-/// @notice 完整退出后旧 Position 的 liquidity 或资产状态未完全清空。
+/// @notice 完整退出后旧 Position 的 liquidity、资产或可领取费用未完全清空。
 error PositionNotCleared();
 
 /// @notice Vault 在 syncFees 后仍观察到可领取费用。
@@ -1013,18 +1046,18 @@ error InvalidManagedPosition();
 /// @notice 计算出的 V3 liquidity 超过 Position Manager 的 uint128 上限。
 error LiquidityOverflow();
 
-/// @notice 请求的非 IDLE Venue 尚未绑定 Adapter。
+/// @notice 请求的 Venue 尚未绑定 Adapter，或在要求已注册 Adapter 的入口传入 IDLE。
 error AdapterNotRegistered();
 
 /// @notice 当前 Active Adapter 或非 IDLE 候选目标 Adapter 不允许建立或增加 liquidity。
 /// @dev 必须在对应 Adapter 的 previewDeposit、deposit 或用户 Token 转入前检查；不阻止从已禁用旧 Adapter 读取、同步费用或退出。
 error AdapterDisabled();
 
-/// @notice Adapter 或 ControlledSwapExecutor 的资产方法由 Vault 以外的地址调用。
+/// @notice Adapter/Executor 的资产方法或 Control 的 Vault 专用方法由绑定 Vault 以外的地址调用。
 error NotVaultCaller();
 
-/// @notice 非重入保护检测到重入调用。
-error Reentrancy();
+/// @notice OpenZeppelin 非重入保护检测到重入调用。
+error ReentrancyGuardReentrantCall();
 ```
 
 ## 8. 事件契约
@@ -1440,6 +1473,8 @@ Bootstrap 使用 `grossInitialShares = mulDiv(NAV_seed, 10^18, 10^token1Decimals
 
 
 ### 10.5 授权与回调
+
+Executor/Control 外部转入的不可恢复与不入账边界以 `PRODUCT_SPEC.md` §5.5 为准。Executor 的“余额恢复基线”指恢复到 Vault 转入本次输入之前的实际余额，而非强制归零；Control 的既有外部转入余额也不得被协议操作改变。不变量测试应独立累计这两个地址的外部 Token 转入，精确核对操作后余额，另行检查临时授权为零；外部转入本身不能被判定为本次操作残留。
 
 - Adapter 对 Position Manager、Pair、Router 的授权使用最小额度，并在不需要时清零。
 - Swap Executor 不暴露调用者可指定的 receiver；相关资产流遵循 `PRODUCT_SPEC.md` 第 9.4 节。

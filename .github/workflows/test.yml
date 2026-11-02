@@ -22,6 +22,16 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: lib/uniswap-test-deps/package-lock.json
+
+      - name: Install Uniswap test dependencies
+        run: npm ci --prefix lib/uniswap-test-deps --ignore-scripts --no-audit --no-fund
+
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
