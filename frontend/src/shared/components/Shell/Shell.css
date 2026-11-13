@@ -1,0 +1,69 @@
+.app-shell {
+  min-height: 100vh;
+}
+.app-sidebar.ant-layout-sider {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  align-self: flex-start;
+}
+.main-layout {
+  min-width: 0;
+}
+.app-header {
+  height: auto;
+  line-height: normal;
+  padding: 20px 24px;
+}
+.app-content {
+  min-width: 0;
+  padding: 28px 24px;
+}
+.app-content main {
+  max-width: 1600px;
+  margin: 0 auto;
+}
+.sidebar-content {
+  height: 100%;
+  padding: 28px 12px;
+  overflow-y: auto;
+}
+.sidebar-navigation {
+  flex: 1;
+}
+.brand-icon {
+  color: #82d5bd;
+  font-size: 24px;
+}
+.brand-text {
+  color: #f5fbff;
+  font-size: 26px;
+  font-weight: 700;
+}
+.brand-sub {
+  display: block;
+  color: #82959e;
+  font-size: 8px;
+  letter-spacing: 1px;
+}
+.sidebar-caption {
+  color: #afc1ca;
+}
+.nav-button.ant-btn {
+  color: inherit;
+  padding: 0;
+  width: 100%;
+  text-align: left;
+  justify-content: flex-start;
+}
+.app-sidebar.ant-layout-sider-collapsed .sidebar-content {
+  padding-inline: 0;
+}
+@media (max-width: 575px) {
+  .app-header {
+    padding: 16px;
+  }
+  .app-content {
+    padding: 20px 16px;
+  }
+}

@@ -1,0 +1,21 @@
+import type { Access, Governance, RoleMember } from '../../types';
+export type AdminProps = {
+  access: Access;
+  governance: Governance;
+  ready: boolean;
+  busy: boolean;
+  members?: RoleMember[];
+  membersLoading: boolean;
+  membersError?: string;
+  onRefreshMembers: () => void;
+  onGrant: (account: string, role: string) => Promise<void>;
+  onRevoke: (account: string, role: string) => Promise<void>;
+  onAccept: () => Promise<void>;
+  onBeginTransfer: (account: string) => Promise<void>;
+  onCancelTransfer: () => Promise<void>;
+  onChangeDelay: (seconds: string) => Promise<void>;
+  onRollbackDelay: () => Promise<void>;
+  onScheduleRenounce: () => Promise<void>;
+  onRenounceAdmin: () => Promise<void>;
+  onRenounceRole: (role: string) => Promise<void>;
+};

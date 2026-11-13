@@ -1,18 +1,37 @@
 name: CI
-
 permissions: {}
-
 on:
   push:
   pull_request:
   workflow_dispatch:
-
-env:
-  FOUNDRY_PROFILE: ci
-
 jobs:
-  check:
-    name: Foundry project
+  contract:
+    name: Foundry regression
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: contract
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: contract/lib/uniswap-test-deps/package-lock.json
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - run: npm ci --prefix lib/uniswap-test-deps --ignore-scripts --no-audit --no-fund
+      - run: forge fmt --check && forge fmt --check local/script local/test
+      - run: forge build --sizes
+      - run: forge test -vvv
+  application:
+    name: Frontend and local-chain end-to-end
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -21,28 +40,18 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: lib/uniswap-test-deps/package-lock.json
-
-      - name: Install Uniswap test dependencies
-        run: npm ci --prefix lib/uniswap-test-deps --ignore-scripts --no-audit --no-fund
-
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-
-      - name: Show Forge version
-        run: forge --version
-
-      - name: Run Forge fmt
-        run: forge fmt --check
-
-      - name: Run Forge build
-        run: forge build --sizes
-
-      - name: Run Forge tests
-        run: forge test -vvv
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - run: npm ci
+      - run: npm ci --prefix contract/lib/uniswap-test-deps --ignore-scripts --no-audit --no-fund
+      - run: npm run abi
+      - run: npm run lint && npm run format:check && npm run typecheck -w contract && npm test && npm run build
+      - run: npm audit --omit=dev
+      - run: npx playwright install --with-deps chromium
+      - name: Isolated Foundry deployment and browser verification
+        run: npm run test:deployment -- --browser

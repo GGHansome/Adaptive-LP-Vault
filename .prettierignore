@@ -1,0 +1,7 @@
+node_modules
+contract/lib
+contract/out
+contract/cache
+frontend/src/generated
+frontend/dist
+package-lock.json

@@ -1,0 +1,34 @@
+{
+  "name": "adaptive-lp-vault",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "workspaces": [
+    "contract",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "npm run dev -w frontend",
+    "build": "npm run abi && npm run build -w frontend",
+    "lint": "npm run lint -w frontend",
+    "format": "prettier --write frontend/src frontend/*.ts frontend/*.js contract/tools contract/local/tools contract/local/simulator",
+    "format:check": "prettier --check frontend/src frontend/*.ts frontend/*.js contract/tools contract/local/tools contract/local/simulator",
+    "test": "npm run test -w frontend && npm run test:tools -w contract",
+    "contract:build": "npm run build -w contract",
+    "contract:test": "npm run test -w contract",
+    "abi": "npm run abi -w contract",
+    "chain": "anvil --host 127.0.0.1 --chain-id 31337 --block-time 1",
+    "local:deploy": "npm run local:deploy -w contract --",
+    "market": "npm run market -w contract --",
+    "test:e2e": "npm run test:e2e -w contract --",
+    "test:market": "npm run test:market -w contract",
+    "test:deployment": "npm run test:deployment -w contract --"
+  },
+  "devDependencies": {
+    "jsdom": "^29.0.0",
+    "prettier": "^3.6.2"
+  }
+}

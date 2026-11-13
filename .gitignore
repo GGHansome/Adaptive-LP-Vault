@@ -1,25 +1,22 @@
 .vscode
 .specstory
-
-# Compiler files
-cache/
-out/
-
-# Official Uniswap artifacts installed for local integration tests
-/lib/uniswap-test-deps/node_modules/
-
-# Ignores development broadcast logs
-!/broadcast
-/broadcast/*/31337/
-/broadcast/**/dry-run/
-
-# Docs
-/docs/*
-!/docs/
-!/docs/DEPLOYMENT_RUNBOOK.md
-
-# Deployment manifests are environment-specific
+.DS_Store
+node_modules/
+*.tsbuildinfo
+**/cache/
+**/out/
+**/dist/
+**/coverage/
+**/.env
+**/.env.local
+contract/broadcast/
+contract/deployments/
 /deployments/
-
-# Dotenv file
-.env
+/broadcast/
+contract/.local/
+contract/local/.state/
+contract/local/deployments/
+contract/local/broadcast/
+frontend/src/generated/deployment.json
+playwright-report/
+test-results/

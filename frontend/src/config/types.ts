@@ -1,0 +1,30 @@
+import type { Address } from 'viem';
+
+export type Deployment = {
+  chainId: number;
+  instanceId: string;
+  deploymentBlock: string;
+  deploymentBlockHash: Address;
+  vault: Address;
+  control: Address;
+  oracle: Address;
+  executor: Address;
+  token0: Address;
+  token1: Address;
+  decimals0: number;
+  decimals1: number;
+  symbol0: string;
+  symbol1: string;
+  v2Factory: Address;
+  v3Factory: Address;
+  v2Router: Address;
+  router: Address;
+  positionManager: Address;
+  pair: Address;
+  lowPool: Address;
+  highPool: Address;
+  canonicalPool: Address;
+  adapters: Address[];
+  accounts: Record<string, Address>;
+  bootstrapAmounts: string[];
+};

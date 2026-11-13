@@ -1,0 +1,77 @@
+import type { Address } from 'viem';
+import type { Deployment } from '../../config/types';
+import type { VaultSnapshot } from '../types';
+export const address: Address = '0x1111111111111111111111111111111111111111';
+export const otherAddress: Address = '0x2222222222222222222222222222222222222222';
+export const deployment: Deployment = {
+  chainId: 31337,
+  instanceId: 'test',
+  deploymentBlock: '1',
+  deploymentBlockHash: `0x${'1'.repeat(64)}`,
+  vault: address,
+  control: address,
+  oracle: address,
+  executor: address,
+  token0: address,
+  token1: address,
+  decimals0: 6,
+  decimals1: 18,
+  symbol0: 'tUSD',
+  symbol1: 'tETH',
+  v2Factory: address,
+  v3Factory: address,
+  v2Router: address,
+  router: address,
+  positionManager: address,
+  pair: address,
+  lowPool: address,
+  highPool: address,
+  canonicalPool: address,
+  adapters: [address, address, address],
+  accounts: { user: address },
+  bootstrapAmounts: ['1', '1'],
+};
+export function snapshotFixture(healthy = true): VaultSnapshot {
+  return {
+    initialized: true,
+    activeVenue: 2,
+    assets: {
+      idle0: 0n,
+      idle1: 0n,
+      position0: 1000000n,
+      position1: 10n ** 18n,
+      total0: 1000000n,
+      total1: 10n ** 18n,
+      totalShares: 2n * 10n ** 18n,
+    },
+    oracle: {
+      healthy,
+      spotTick: 0,
+      twapTick: 0,
+      shortTwapTick: 0,
+      spotPriceToken1: healthy ? 10n ** 18n : 0n,
+      twapPriceToken1: healthy ? 10n ** 18n : 0n,
+      shortTwapPriceToken1: healthy ? 10n ** 18n : 0n,
+      deviationBps: 0n,
+      observedAt: 1,
+      twapWindowSeconds: 120,
+      shortTwapWindowSeconds: 20,
+    },
+    plan: {
+      planHash: address,
+      targetVenue: 2,
+      marketRegime: 3,
+      tickLower: -10,
+      tickUpper: 10,
+      version: 1n,
+    },
+    pause: { depositPaused: false, plainRebalancePaused: false, swapRebalancePaused: false },
+    nav: healthy ? 2n * 10n ** 18n : undefined,
+    idleBps: healthy ? 0n : undefined,
+    lastChange: 1,
+    blockTime: 2,
+    blockNumber: 1n,
+    configs: [],
+    params: {},
+  };
+}

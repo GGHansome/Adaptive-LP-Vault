@@ -1,0 +1,20 @@
+{
+  "name": "@adaptive/contract",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "forge build",
+    "typecheck": "tsc --noEmit",
+    "test": "forge test",
+    "abi": "forge build src --skip test && tsx tools/export-abi.ts",
+    "local:deploy": "tsx local/tools/deploy-local.ts",
+    "market": "tsx local/simulator/index.ts",
+    "test:tools": "tsx --test local/simulator/*.test.ts local/tools/*.test.ts",
+    "test:market": "tsx local/tools/market-check.ts",
+    "test:deployment": "FOUNDRY_TEST=local/test forge test && tsx local/tools/deployment-check.ts",
+    "test:e2e": "tsx local/tools/e2e.ts"
+  },
+  "dependencies": {"viem": "2.57.16"},
+  "devDependencies": {"tsx": "^4.20.0", "typescript": "^5.9.3", "@types/node": "^24.0.0", "@playwright/test": "^1.56.0"}
+}

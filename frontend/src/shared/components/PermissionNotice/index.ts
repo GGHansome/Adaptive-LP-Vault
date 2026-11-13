@@ -1,0 +1,1 @@
+export { PermissionNotice } from './PermissionNotice';
