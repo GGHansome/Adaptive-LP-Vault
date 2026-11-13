@@ -2,7 +2,10 @@
 pragma solidity ^0.8.24;
 
 import {AdaptiveLPVaultFixture} from "./helpers/AdaptiveLPVaultFixture.sol";
-import {PauseState, PositionPlan, VenueType} from "../../src/core/VaultTypes.sol";
+import {PauseState, PauseFlag, PositionPlan, VenueType, MarketRegime} from "../../src/core/VaultTypes.sol";
+import {OracleSnapshot} from "../../src/oracle/OracleTypes.sol";
+import {ICanonicalV3Oracle} from "../../src/interfaces/ICanonicalV3Oracle.sol";
+import {IVaultPause} from "../../src/interfaces/IVaultPause.sol";
 import {PositionSnapshot} from "../../src/adapters/AdapterTypes.sol";
 import {IAdaptiveLPVault} from "../../src/interfaces/IAdaptiveLPVault.sol";
 import {IPositionAdapter} from "../../src/interfaces/IPositionAdapter.sol";
@@ -204,6 +207,124 @@ contract AdaptiveLPVaultRebalanceTest is AdaptiveLPVaultFixture {
         vault.emergencyExitToIdle();
         assertEq(vault.planVersion(), version + 1);
         assertEq(keccak256(abi.encode(vault.lastExecutedPlan())), plan);
+    }
+
+    function test_lowFeeExitSkipsIntermediateVenuesDuringCooldown() public {
+        _exitDuringCooldown(0);
+    }
+
+    function test_highFeeExitSkipsV2DuringCooldown() public {
+        _exitDuringCooldown(150);
+    }
+
+    function test_v2ExitDuringCooldown() public {
+        _exitDuringCooldown(350);
+    }
+
+    function _exitDuringCooldown(uint256 initialDeviation) private {
+        vm.warp(10000);
+        _bootstrap(initialDeviation, SEED, SEED);
+        vm.warp(10005);
+        bytes32 history = _history();
+        uint256 supply = vault.totalSupply();
+        // Only the final IDLE target is assessed, even if all entry adapters are disabled.
+        control.setAdapterEnabled(VenueType.UNISWAP_V3_LOW_FEE, false);
+        control.setAdapterEnabled(VenueType.UNISWAP_V3_HIGH_FEE, false);
+        control.setAdapterEnabled(VenueType.UNISWAP_V2, false);
+        oracle.setDeviation(1000);
+        (PositionPlan memory plan,) = vault.previewRebalance();
+        assertEq(uint8(plan.marketRegime), uint8(MarketRegime.EXTREME_DEVIATION));
+        assertEq(uint8(plan.targetVenue), uint8(VenueType.IDLE));
+        assertEq(plan.tickLower, 0);
+        assertEq(plan.tickUpper, 0);
+        assertEq(plan.version, 2);
+        assertEq(_history(), history);
+        vm.expectCall(address(low), abi.encodeWithSelector(IPositionAdapter.deposit.selector), uint64(0));
+        vm.expectCall(address(high), abi.encodeWithSelector(IPositionAdapter.deposit.selector), uint64(0));
+        vm.expectCall(address(v2), abi.encodeWithSelector(IPositionAdapter.deposit.selector), uint64(0));
+        vm.expectCall(
+            address(vault.swapExecutor()),
+            abi.encodeWithSelector(IControlledSwapExecutor.executeSwap.selector),
+            uint64(0)
+        );
+        address caller = makeAddr("permissionless strategy exit");
+        vm.prank(caller);
+        vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp()));
+        assertEq(uint8(vault.activeVenue()), uint8(VenueType.IDLE));
+        assertEq(vault.planVersion(), 2);
+        assertEq(vault.lastPositionChangeAt(), 10005);
+        assertEq(abi.encode(vault.lastExecutedPlan()), abi.encode(plan));
+        assertEq(vault.totalSupply(), supply);
+        assertEq(token0.balanceOf(address(vault)), SEED);
+        assertEq(token1.balanceOf(address(vault)), SEED);
+        assertEq(low.snapshot().liquidity, 0);
+        assertEq(high.snapshot().liquidity, 0);
+        assertEq(v2.snapshot().liquidity, 0);
+    }
+
+    function test_idleExitStartsFreshCooldownBeforeDirectLowFeeRecovery() public {
+        vm.warp(10000);
+        _bootstrap(0, SEED, SEED);
+        vm.warp(10005);
+        PositionPlan memory plan = _plan(1000);
+        vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp()));
+        bytes32 history = _history();
+        plan = _plan(0);
+        assertEq(uint8(plan.targetVenue), uint8(VenueType.UNISWAP_V3_LOW_FEE));
+        // Expiry of the bootstrap cooldown is insufficient: the exit restarted the clock.
+        vm.warp(13600);
+        vm.expectRevert(abi.encodeWithSelector(IAdaptiveLPVault.CooldownActive.selector, uint256(13605)));
+        vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp()));
+        assertEq(_history(), history);
+        vm.warp(13605);
+        vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp()));
+        assertEq(vault.planVersion(), 3);
+        assertEq(uint8(vault.activeVenue()), uint8(VenueType.UNISWAP_V3_LOW_FEE));
+    }
+
+    function test_idleExitExemptionPreservesPauseDeadlineHashAndHealthGates() public {
+        vm.warp(10000);
+        _bootstrap(0, SEED, SEED);
+        PositionPlan memory plan = _plan(1000);
+        bytes32 history = _history();
+        control.setPauseState(PauseState(false, true, false));
+        vm.expectRevert(abi.encodeWithSelector(IVaultPause.Paused.selector, PauseFlag.PLAIN_REBALANCE));
+        vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp()));
+        control.setPauseState(PauseState(false, false, false));
+        vm.expectRevert(IAdaptiveLPVault.DeadlineExpired.selector);
+        vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp() - 1));
+        vm.expectRevert(IAdaptiveLPVault.InvalidPlanHash.selector);
+        vault.rebalance(bytes32(0), uint32(vm.getBlockTimestamp()));
+        OracleSnapshot memory unhealthy;
+        vm.mockCall(address(oracle), abi.encodeCall(ICanonicalV3Oracle.snapshot, ()), abi.encode(unhealthy));
+        vm.expectRevert(IAdaptiveLPVault.OracleUnhealthy.selector);
+        vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp()));
+        assertEq(_history(), history);
+    }
+
+    function test_failedIdleExitRollsBackPositionAndHistory() public {
+        vm.warp(10000);
+        _bootstrap(0, SEED, SEED);
+        PositionPlan memory plan = _plan(1000);
+        bytes32 history = _history();
+        vm.mockCallRevert(address(low), abi.encodeCall(IPositionAdapter.withdrawAll, ()), "withdraw failed");
+        vm.expectRevert(bytes("withdraw failed"));
+        vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp()));
+        assertEq(_history(), history);
+        assertEq(low.snapshot().liquidity, 2 * SEED);
+        assertEq(token0.balanceOf(address(vault)), 0);
+        assertEq(token1.balanceOf(address(vault)), 0);
+    }
+
+    function test_idleCannotCommitRepeatedExtremePlan() public {
+        vm.warp(10000);
+        _bootstrap(1000, SEED, SEED);
+        PositionPlan memory plan = _plan(1000);
+        bytes32 history = _history();
+        vm.warp(13600);
+        vm.expectRevert(IAdaptiveLPVault.NoStateChangeRequired.selector);
+        vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp()));
+        assertEq(_history(), history);
     }
 
     function _readyForSwap() private {

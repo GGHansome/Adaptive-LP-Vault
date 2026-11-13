@@ -36,14 +36,31 @@ try {
     child.on('exit', resolve);
   });
   assert.equal(code, 0);
-  const oracle = await read(m.oracle, artifact('CanonicalV3Oracle').abi, 'snapshot');
+  const blockNumber = await publicClient.getBlockNumber({ cacheTime: 0 });
+  const oracle = await read(
+    m.oracle,
+    artifact('CanonicalV3Oracle').abi,
+    'snapshot',
+    [],
+    blockNumber,
+  );
   assert.equal(oracle.healthy, true);
-  assert(oracle.deviationBps >= 30n, '真实交易必须形成足以触发策略的偏离');
-  const preview = await read(m.vault, artifact('AdaptiveLPVault').abi, 'previewRebalance');
-  assert.equal(preview[0].marketRegime, 1);
-  assert.equal(preview[0].targetVenue, 3);
+  const abi = artifact('AdaptiveLPVault').abi;
+  const [enterMedium, enterHigh, enterExtreme] = await Promise.all(
+    ['enterMediumBps', 'enterHighBps', 'enterExtremeBps'].map((name) => read(m.vault, abi, name)),
+  );
+  assert(oracle.deviationBps >= BigInt(enterMedium), '真实交易必须形成足以触发策略的偏离');
+  const preview = await read(m.vault, abi, 'previewRebalance', [], blockNumber);
+  const expectedRegime =
+    oracle.deviationBps >= BigInt(enterExtreme)
+      ? 3
+      : oracle.deviationBps >= BigInt(enterHigh)
+        ? 2
+        : 1;
+  assert.equal(preview[0].marketRegime, expectedRegime);
+  assert.equal(preview[0].targetVenue, [2, 3, 1, 0][expectedRegime]);
   console.log(
-    'PASS 冲击场景形成真实预言机偏离和中偏离候选计划',
+    'PASS 冲击场景按完整进入阈值生成最终候选计划',
     stringify({ oracle, plan: preview[0], assessment: preview[1] }),
   );
 } finally {

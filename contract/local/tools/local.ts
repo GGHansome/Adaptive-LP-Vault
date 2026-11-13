@@ -95,8 +95,9 @@ export async function read(
   abi: Abi,
   functionName: string,
   args: readonly unknown[] = [],
+  blockNumber?: bigint,
 ): Promise<any> {
-  return publicClient.readContract({ address, abi, functionName, args });
+  return publicClient.readContract({ address, abi, functionName, args, blockNumber });
 }
 export type Manifest = {
   chainId: number;

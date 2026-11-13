@@ -441,7 +441,7 @@ struct AdapterConfig {
 | `maxSwapSlippageBps/maxMigrationLossBps`        | `uint16`       | `immutable` | 构造                                 | 不超过协议硬上限；部署后不可修改                                   |
 | `initialized`                                   | `bool`         | `storage`   | Bootstrap 成功                       | 只能从 false 到 true                                   |
 | `activeVenue`                                   | `VenueType`    | `storage`   | Bootstrap/Rebalance/Emergency Exit | 与有效 Position 一致                                    |
-| `lastPositionChangeAt`                           | `uint32`       | `storage`   | Bootstrap、两类 Rebalance 成功 | 初始为 0；两类 Rebalance 共用其 Cooldown；Emergency Exit 跳过检查且不更新；失败交易和 IDLE 幂等分支不更新 |
+| `lastPositionChangeAt`                           | `uint32`       | `storage`   | Bootstrap、两类 Rebalance 成功 | 初始为 0；两类 Rebalance 共用其 Cooldown，策略撤至 EXTREME/IDLE 的豁免见 §11.1 INV-10；Emergency Exit 跳过检查且不更新；失败交易和 IDLE 幂等分支不更新 |
 | `planVersion`                                   | `uint64`       | `storage`   | 成功 Position 结构变化                   | 初始为 0；每次成功变化递增 1，失败交易不更新                           |
 | `lastExecutedPlan`                              | `PositionPlan` | `storage`   | Bootstrap/成功策略计划执行                 | 保存最近一次成功执行的策略计划；其 `marketRegime` 是 Hysteresis 历史，非策略 Position 变化后可与当前资产位置不同 |
 
@@ -673,7 +673,7 @@ function assessDeployment(
 ```
 
 - Vault 从可信链上状态和完整 Oracle/Position 快照获取计划输入；Bootstrap、Preview 和两类 Rebalance 使用相同的输入来源规则。`_planInputs()` 只投影规划实际使用的字段，并直接传入 `_packedPlanStrategyConfig`。九个计划配置字段由 Vault 私有纯函数 `_packPlanStrategyConfig(StrategyConfig)` 在构造期打包一次，库只保留 `unpackPlanStrategyConfig()`，不再定义打包函数。八个 `uint24` 字段按声明顺序从位 0、24、48、72、96、120、144、168 开始，`minRecenterBps` 使用位 192..207；打包时高 48 位为零。完整快照、部署配置类型、公开配置 getter 和存储布局保持不变。计划参数编码负载为 12 个 ABI 字（384 字节，不含 selector）。
-- `VaultStrategyMath.getPlan()` 通过固定链接的外部纯函数生成候选计划；执行门控和状态提交由 Vault 负责。库部署与链接验证见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+- `VaultStrategyMath.getPlan()` 通过固定链接的外部纯函数生成候选计划；历史 Regime 的双向跨级滞后计算遵循 [PRODUCT_SPEC.md](PRODUCT_SPEC.md) §9.1.2，仅为最终状态生成计划。执行门控和状态提交由 Vault 负责。库部署与链接验证见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 - `VaultStrategyMath.getPlan()` 保持纯计算；`assessDeployment(AssessmentInputs)` 负责完整只读部署评估，包括一次 `previewDeposit()`、预览校验、两次独立向下取整的 Oracle 报价、最低部署率及方向计算。`AssessmentInputs` 定义在库内，其阈值字段为 `uint256 minDeployBps`，由 Vault 的 immutable 提供。
 - Vault 保证评估输入可信，在非 IDLE 评估前检查目标 Adapter 准入，并从健康 Oracle 快照取得 TWAP Tick；库不查询 Registry、不读写 Vault storage、不执行资产操作。IDLE 不查询 Adapter 或 Oracle；无效预览先于报价回滚。模拟校验继续在 Vault 使用相同评估结果检查部署率和预期方向；最终实际部署仍独立校验。固定链接库经 `DELEGATECALL` 执行，Adapter/Oracle 看到的调用地址仍是 Vault。
 - `PriceMath` 提供跨模块通用的价格计算；计划哈希计算由 `VaultStrategyMath` 内部完成，资产转账使用 OpenZeppelin `SafeERC20`。
@@ -1342,13 +1342,13 @@ sequenceDiagram
     Vault->>Vault: require target Adapter enter enabled if targetVenue is non-IDLE
     Vault->>NewAdapter: previewDeposit(current assets, plan) if targetVenue is non-IDLE
     NewAdapter-->>Vault: used0/used1
-    Vault->>Vault: assess deployment with local used0/used1; validate deadline, hash and cooldown; revert SwapRequired if needed
+    Vault->>Vault: assess deployment; validate deadline and hash; check cooldown unless active non-IDLE exits to EXTREME/IDLE; revert SwapRequired if needed
     Vault->>OldAdapter: syncFees()
     Vault->>Vault: emit FeesSynchronized only if old V3 fee0 or fee1 is nonzero
     Vault->>OldAdapter: withdrawAll()
     OldAdapter-->>Vault: token0/token1
-    Vault->>NewAdapter: deposit() without swap
-    NewAdapter-->>Vault: unused amounts and liquidity
+    Vault->>NewAdapter: deposit() without swap if targetVenue is non-IDLE
+    NewAdapter-->>Vault: unused amounts and liquidity if deposited
     Vault->>Vault: validate conservation, idle and single position
     Vault->>Vault: commit lastExecutedPlan and incremented planVersion; set lastPositionChangeAt = block.timestamp
     Vault-->>Caller: PositionPlanCommitted, V3RangeChanged if targetVenue is V3, and RebalanceExecuted
@@ -1497,7 +1497,7 @@ Executor/Control 外部转入的不可恢复与不入账边界以 `PRODUCT_SPEC.
 | INV-07 | Oracle 不健康时不执行价值相关操作                                                                | 入口回滚             |
 | INV-08 | Permissionless Caller 不能改变计划内容                                                      | 计划哈希校验失败         |
 | INV-09 | Swap 只允许固定 token0/token1、部署时封存的 Router/方法和目标过量资产修复范围                                | Swap 回滚          |
-| INV-10 | 两类 Rebalance 均不得在 Cooldown 结束前执行；Emergency Exit 跳过该检查且不更新 `lastPositionChangeAt`；失败交易不更新 `lastPositionChangeAt`、版本或资产位置，IDLE 幂等分支不更新时间戳 | `CooldownActive(availableAt)` 或原子回滚 |
+| INV-10 | 两类 Rebalance 共用 Cooldown；非 IDLE 仓位按健康策略撤至 EXTREME/IDLE 时豁免，成功后更新 `lastPositionChangeAt`，重新入场仍需冷却；Emergency Exit 跳过检查且不更新该时间；失败交易不更新该时间、版本或资产位置，IDLE 幂等分支不更新时间戳 | `CooldownActive(availableAt)` 或原子回滚 |
 | INV-11 | 支持资产 Donation 不可被角色救援                                                               | 不存在对应接口          |
 | INV-12 | Pause 不阻止正常双资产 Redeem                                                               | 赎回测试失败           |
 | INV-13 | `lastExecutedPlan` 只在健康策略计划成功执行后更新；其 `marketRegime` 是 Hysteresis 历史，不从 `activeVenue` 或 `lastExecutedPlan.targetVenue` 推导 | 状态机测试失败          |
@@ -1524,7 +1524,7 @@ Executor/Control 外部转入的不可恢复与不入账边界以 `PRODUCT_SPEC.
 | Adapter Registry 测试 | `configureAdapter(venue, adapter)` 的 Vault/Adapter/Pool 有序 Token 一致性、按 Venue 使用 Vault 预期 Factory 验证 Pool 登记并拒绝自报恶意 Factory、错误资产对与反向顺序回滚、其他 immutable 绑定校验、`tickSpacing` 缓存、初始化前重复配置、Bootstrap 后绑定和缓存冻结、仅 `enabled` 可变、Pool/Fee Tier 不重复存储 |
 | Swap 测试             | 组件工厂在 Vault 构造时创建专属 Executor、Executor `vault() == address(vault)`、Router 绑定来自 `VaultConfig.router`、`swapPool == canonicalPool`、swapPool/Executor/Vault 有序 Token 一致性与反向顺序回滚、固定 Router/Token 方法、方向、过量资产修复范围、方向报价与 BPS 滑点折算的两段向上取整、派生部署阈值、minOut、deadline、Vault 向 Executor 精确交付输入、Vault 直接使用可信 Executor 的输出金额返回值、不重复读取 Vault Swap 输出余额、Executor 余额恢复基线、回调验证和授权清理 |
 | Deposit/Redeem 集成测试 | 只转实际数量、V3 单边 Active Position 的 `ActivePositionSingleSided()`、V2 任一侧或双侧本金为零的 `InvalidPositionPrincipal()`、双边 Position 零实际存款的 `ZeroAmount()`、按 principal 比例的限制侧与非整除舍入、手续费不影响 Deposit 比例、暂停赎回、Oracle 异常赎回、Redeem 最小双资产输出、退出前 Idle 分配与原生 Position 单位分别向下取整、Adapter 嵌套取整导致最终实际输出不同于 `floor(x × T / S)`、直接使用可信 Adapter 的退出金额返回值、不重复读取退出后 Vault 余额、最低输出检查及退出前 Idle 独立分配、IDLE Redeem 不调用 Adapter、零 Position 单位退出、持有人自赎不消费 allowance、授权 spender 从显式 `owner` 销毁 shares 并消费有限 allowance、最大 allowance 不递减、任意 `receiver` 收款、owner 余额或 allowance 不足时原子回滚、捐赠、单边/高 Idle、比例公平性、当前 Active Adapter 禁用时 Deposit 在 Adapter 调用和 Token 转入前回滚、禁用后资产仍计价且 Redeem 成功 |
-| Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Bootstrap 初始化 `lastPositionChangeAt`、两类 Rebalance 共用 Cooldown 与 `CooldownActive(availableAt)`、Emergency Exit 绕过检查且不重置计时、IDLE 幂等分支不更新时间戳、全部流通 shares 赎回保留锁定份额对应资产、`activeVenue`/`planVersion`/`lastExecutedPlan` 不因 Redeem 改变、`expectedPlanHash`、`expectedDirection`、`simulatedDeployBps(x)`/`simulatedIdleBps(x)` 最差结果模拟、基于最终实际 Vault 余额与 `PositionSnapshot` 且复用迁移 `twapTick` 的 `finalDeployBps`/`finalIdleBps`、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
+| Rebalance 集成测试      | V2↔V3、V3↔V3、进入/退出 IDLE、计划与部署评估分离、相同评估输入只调用一次 `previewDeposit`、未初始化 Preview 回滚 `NotInitialized()`、Oracle 不健康 Preview 回滚 `OracleUnhealthy()`、非 IDLE 目标 Adapter 禁用时 Preview/两类 Rebalance 回滚且允许从已禁用旧 Adapter 迁出、Bootstrap 初始化 `lastPositionChangeAt`、两类 Rebalance 共用 Cooldown 与 `CooldownActive(availableAt)`、策略撤至 EXTREME/IDLE 豁免且重置计时、重新入场仍需冷却、Emergency Exit 绕过检查且不重置计时、IDLE 幂等分支不更新时间戳、全部流通 shares 赎回保留锁定份额对应资产、`activeVenue`/`planVersion`/`lastExecutedPlan` 不因 Redeem 改变、`expectedPlanHash`、`expectedDirection`、`simulatedDeployBps(x)`/`simulatedIdleBps(x)` 最差结果模拟、基于最终实际 Vault 余额与 `PositionSnapshot` 且复用迁移 `twapTick` 的 `finalDeployBps`/`finalIdleBps`、deadline、无 Swap 资产守恒、带 Swap 实际输出与 NAV 损失、后置条件和原子回滚 |
 | 事件契约测试            | `VaultBootstrapped.initialVenue` 初始化链下位置，`RebalanceExecuted.targetVenue` 更新位置且同 Venue Recenter 保持相同值，`EmergencyExit` 将位置更新为 `IDLE`；`FeesSynchronized` 仅在 V3 实际归集至少一种非零费用时恰好发出一次，V2、IDLE、V3 双零及最终回滚均不发出，事件费用等于 Vault 余额增量且 `total0/total1` 使用同步完成瞬间快照；Bootstrap 建立 V3、V2/IDLE 迁入 V3、同 Venue Recenter 和 V3 跨 Venue 迁移均发出 `V3RangeChanged`，无旧 V3 时 old Tick 为 0/0，跨 V3 Venue 且 Tick 相同仍发出；Deposit、Redeem、费用同步、目标为 V2/IDLE 的 Rebalance、Emergency Exit 和失败交易不发出 `V3RangeChanged`；已在 IDLE 的幂等 Emergency Exit 不发出 `EmergencyExit`；自定义事件 ABI 不包含额外的通用资产位置或 Idle 状态变化事件 |
 | Invariant/Fuzz      | 资产守恒、shares 公平性、单活 Position、费用不重复、任意调用者不能越权                                                                                                                                                                               |
 | Mainnet Fork        | 真实 canonical Pool TWAP、V2/V3 Pool 对应预期 Factory 的登记关系、canonical/Swap Pool 地址相等、双向指定金额 Router 报价、V2 Pair、V3 Position Manager 和 Tick spacing；部署流程的完整 Fork 验收以 `DEPLOYMENT.md` 为准 |

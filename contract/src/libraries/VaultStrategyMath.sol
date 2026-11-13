@@ -188,6 +188,21 @@ library VaultStrategyMath {
             if (deviation >= config.enterMediumBps) return MarketRegime.MEDIUM_DEVIATION;
             return MarketRegime.LOW_DEVIATION;
         }
+        // Validated hysteresis thresholds make transitions monotonic for one observation.
+        // Resolve all crossed boundaries in memory; only the final regime becomes a plan.
+        for (uint256 i; i < 3; ++i) {
+            MarketRegime next = _adjacentRegime(deviation, previous, config);
+            if (next == previous) break;
+            previous = next;
+        }
+        return previous;
+    }
+
+    function _adjacentRegime(uint256 deviation, MarketRegime previous, PlanStrategyConfig memory config)
+        private
+        pure
+        returns (MarketRegime)
+    {
         if (previous == MarketRegime.LOW_DEVIATION) {
             return deviation >= config.enterMediumBps ? MarketRegime.MEDIUM_DEVIATION : previous;
         }

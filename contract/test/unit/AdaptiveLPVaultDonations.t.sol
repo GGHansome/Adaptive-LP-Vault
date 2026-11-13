@@ -72,12 +72,9 @@ contract AdaptiveLPVaultDonationsTest is AdaptiveLPVaultFixture {
         _donate(1);
         _rebalance(150, VenueType.UNISWAP_V3_HIGH_FEE);
         _assertAssets(SEED, SEED);
-        // Hysteresis transitions one regime at a time: MEDIUM -> HIGH -> EXTREME.
-        _rebalance(350, VenueType.UNISWAP_V2);
         _rebalance(1000, VenueType.IDLE);
-        assertEq(pair.balanceOf(address(v2)), 0);
-        _donate(1);
-        _assertAssets(SEED + 1, SEED + 1);
+        assertEq(pair.balanceOf(address(v2)), 1);
+        _assertAssets(SEED, SEED);
         vault.emergencyExitToIdle();
         assertEq(pair.balanceOf(address(v2)), 1);
     }
@@ -166,7 +163,7 @@ contract AdaptiveLPVaultDonationsTest is AdaptiveLPVaultFixture {
         _bootstrap(350, SEED, SEED);
         _donate(100 ether);
         _assertAssets(1100 ether, 1100 ether);
-        _rebalance(0, VenueType.UNISWAP_V3_HIGH_FEE);
+        _rebalance(0, VenueType.UNISWAP_V3_LOW_FEE);
         assertEq(pair.balanceOf(address(v2)), 0);
         _assertAssets(1100 ether, 1100 ether);
         _donate(50 ether);
@@ -187,7 +184,7 @@ contract AdaptiveLPVaultDonationsTest is AdaptiveLPVaultFixture {
         _bootstrap(1000, SEED, SEED);
         _donate(100 ether);
         _assertAssets(SEED, SEED);
-        _rebalance(0, VenueType.UNISWAP_V2);
+        _rebalance(350, VenueType.UNISWAP_V2);
         _assertAssets(1100 ether, 1100 ether);
     }
 

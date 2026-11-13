@@ -53,6 +53,19 @@ contract InvariantHandlerReachabilityTest is VaultInvariantFixture {
         _assertGhostAccounting();
     }
 
+    function test_handlerExitsDuringCooldownAndRecoversWithoutIntermediateVenues() public {
+        handler.rebalance(600);
+        assertEq(uint8(vault.activeVenue()), uint8(VenueType.IDLE));
+        assertEq(vault.planVersion(), 2);
+        handler.rebalance(0);
+        assertEq(uint8(vault.activeVenue()), uint8(VenueType.IDLE));
+        handler.advanceTime(60);
+        handler.rebalance(0);
+        assertEq(uint8(vault.activeVenue()), uint8(VenueType.UNISWAP_V3_LOW_FEE));
+        assertEq(vault.planVersion(), 3);
+        _assertGhostAccounting();
+    }
+
     function test_handlerExecutesBothRealRouterDirections() public {
         handler.advanceTime(60);
         handler.rebalanceWithSwap(true, seed / 5);

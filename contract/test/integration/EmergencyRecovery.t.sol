@@ -20,6 +20,14 @@ contract EmergencyRecoveryIntegrationTest is IntegrationTestFixture {
         _exitAndRecover(VenueType.UNISWAP_V2, 350, 0);
     }
 
+    function test_emergencyRecoveryInHysteresisBandKeepsLowFeeHistory() public {
+        _exitAndRecover(VenueType.UNISWAP_V3_LOW_FEE, 75, 500);
+    }
+
+    function test_emergencyRecoveryInSameHysteresisBandKeepsHighFeeHistory() public {
+        _exitAndRecover(VenueType.UNISWAP_V3_HIGH_FEE, 75, 3000);
+    }
+
     function _exitAndRecover(VenueType venue, uint256 deviation, uint24 fee) private {
         _bootstrap(venue);
         _deposit(alice, alice, seed / 10, seed / 10);

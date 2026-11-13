@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {IntegrationTestFixture} from "./helpers/IntegrationTestFixture.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {VenueType, PositionPlan, DeploymentAssessment, AssetSnapshot} from "../../src/core/VaultTypes.sol";
 import {IAdaptiveLPVault} from "../../src/interfaces/IAdaptiveLPVault.sol";
 import {IUniswapV3Pool} from "../../src/interfaces/IUniswapV3External.sol";
@@ -31,6 +32,42 @@ contract RebalanceIntegrationTest is IntegrationTestFixture {
         _plain(0, VenueType.UNISWAP_V3_LOW_FEE);
         assertEq(vault.balanceOf(alice), shares);
         _redeem(alice, alice, alice, shares);
+    }
+
+    function test_extremeShockExitsDirectlyDuringCooldownAndRecoversDirectlyAfterCooldown() public {
+        _bootstrap(VenueType.UNISWAP_V3_LOW_FEE);
+        uint256 oldId = low.positionId();
+        uint64 version = vault.planVersion();
+        uint256 supply = vault.totalSupply();
+        AssetSnapshot memory beforeAssets = vault.assetSnapshot();
+        vm.warp(vm.getBlockTimestamp() + 1);
+        uint256 exitAt = vm.getBlockTimestamp();
+        _market(600);
+        (PositionPlan memory plan, DeploymentAssessment memory assessment) = vault.previewRebalance();
+        assertEq(uint8(plan.targetVenue), uint8(VenueType.IDLE));
+        assertFalse(assessment.requiresSwap);
+        vm.prank(alice);
+        vault.rebalance(plan.planHash, uint32(exitAt));
+        assertEq(vault.planVersion(), version + 1);
+        assertEq(vault.lastPositionChangeAt(), exitAt);
+        assertEq(vault.totalSupply(), supply);
+        assertEq(high.positionId(), 0);
+        assertEq(IERC20(pair).balanceOf(address(v2)), 0);
+        vm.expectRevert(bytes("ERC721: owner query for nonexistent token"));
+        positionManager.ownerOf(oldId);
+        AssetSnapshot memory exited = vault.assetSnapshot();
+        assertApproxEqAbs(exited.total0, beforeAssets.total0, DUST);
+        assertApproxEqAbs(exited.total1, beforeAssets.total1, DUST);
+        _assertAccounting();
+        _market(0);
+        (plan,) = vault.previewRebalance();
+        assertEq(uint8(plan.targetVenue), uint8(VenueType.UNISWAP_V3_LOW_FEE));
+        vm.expectRevert(abi.encodeWithSelector(IAdaptiveLPVault.CooldownActive.selector, exitAt + COOLDOWN));
+        vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp()));
+        _plain(0, VenueType.UNISWAP_V3_LOW_FEE);
+        assertEq(vault.planVersion(), version + 2);
+        assertEq(high.positionId(), 0);
+        assertEq(IERC20(pair).balanceOf(address(v2)), 0);
     }
 
     function test_previewThenAnotherExecutionMakesOldPlanStale() public {

@@ -69,7 +69,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | 角色                    | 可调用操作                                      | 业务权限                           | 明确禁止                                                             | 暂停影响                                                                           |
 | --------------------- | ------------------------------------------ | ------------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | LP 用户                 | `deposit`、`redeem`、shares 转账、只读查询          | 按规则提供双资产、获得和转让 shares、按比例赎回    | 单边存款、指定策略目标、调用 Swap Rebalance、取得额外 shares                        | `depositPaused` 不影响赎回；其他暂停不应阻止正常双资产赎回                                          |
-| Permissionless Caller | `rebalance`、只读查询                           | 在部署评估无需 Swap 时触发 Vault 策略逻辑生成当前计划 | 指定 Venue、Fee Tier、Tick Range、Swap、Router 或接收地址                   | 受 `plainRebalancePaused`、Cooldown、Oracle 健康、`expectedPlanHash` 和 `deadline` 限制 |
+| Permissionless Caller | `rebalance`、只读查询                           | 在部署评估无需 Swap 时触发 Vault 策略逻辑生成当前计划 | 指定 Venue、Fee Tier、Tick Range、Swap、Router 或接收地址                   | 受 `plainRebalancePaused`、Cooldown（豁免见 §9.3）、Oracle 健康、`expectedPlanHash` 和 `deadline` 限制 |
 | Keeper                | `rebalanceWithSwap`、普通 Rebalance、只读查询      | 按受控 Swap 参数修复资产比例并执行有效目标计划     | 任意 Token、任意 Router、超限数量、降低协议 `minOut`、绕过 NAV 检查                  | 受 `swapRebalancePaused` 和全部 Oracle/风控门控限制                                      |
 | Guardian              | 暂停入口、禁用 Adapter、`emergencyExitToIdle`、只读查询 | 在异常情况下停止风险操作并无 Swap 撤出 LP      | 更换核心依赖、提取支持资产、执行任意 Swap                                          | 可暂停存款和 Rebalance；不应冻结赎回或紧急退出                                                   |
 | Default Admin         | 业务角色授予/撤销、根管理员两阶段转移与延迟管理、只读查询 | 仅管理权限归属和根角色生命周期              | 在未另持业务角色时调用 Bootstrap、暂停、Adapter 或资产操作                           | 业务暂停不影响角色管理；不因根角色自动取得任何业务权限                                                 |
@@ -105,7 +105,7 @@ v1 不承诺最大化 APY，也不使用链下报价、链下策略签名或外�
 | Position Plan              | 目标 Venue、Market Regime、V3 Range 和计划版本的结构目标                                  | Vault 策略逻辑确定性生成                          | Rebalance 调用者只能提交期望哈希和 deadline，不能改写内容    |
 | Last Executed Plan / `lastExecutedPlan` | 最近一次成功执行的完整策略计划 | Vault 持久化状态 | 非策略 Position 变化后可与当前资产位置不同；其 `marketRegime` 是 Hysteresis 历史 |
 | Hysteresis                 | 状态进入和退出使用不同阈值形成的滞后区间                                                      | 部署固定的策略参数                             | 不能用 Cooldown 替代                           |
-| Cooldown                   | 两类计划性 Rebalance 距最近一次成功 Bootstrap 或计划性 Rebalance 的最小时间间隔                                        | Vault 存储的 `lastPositionChangeAt`              | Emergency Exit 跳过前置检查且不更新计时；失败交易和 IDLE 幂等调用不更新 |
+| Cooldown                   | 两类计划性 Rebalance 距最近一次成功 Bootstrap 或计划性 Rebalance 的最小时间间隔；非 IDLE 仓位按策略撤至 EXTREME/IDLE 时豁免 | Vault 存储的 `lastPositionChangeAt` | 策略撤至 IDLE 成功后重置计时，重新入场仍受限；Emergency Exit 跳过检查且不更新计时；失败交易和 IDLE 幂等调用不更新 |
 | Donation                   | 未铸造 shares 而无请求转入的资产，包含 Vault 支持 Token、Adapter LP 及 Executor/Control 的外部转入                                              | ERC-20 实际余额增加                           | 仅按 §5.5 纳入会计的捐赠归确认时的 shares 持有人；Executor/Control 转入永不入账，v1 均不提供救援                 |
 
 
@@ -896,7 +896,7 @@ Vault 策略逻辑生成候选 `PositionPlan` 后，调用内部只读的 `_asse
 - `plainRebalancePaused == false`；
 - Oracle Healthy；
 - `deadline` 尚未到期；
-- `minRebalanceCooldown` 已结束；
+- `minRebalanceCooldown` 已结束，或当前 `activeVenue != IDLE` 且最终计划为 `EXTREME_DEVIATION / IDLE`；
 - 重新生成的 Position Plan 内的 `planHash` 与 `expectedPlanHash` 匹配；
 - Position Plan 的目标为非 IDLE 时，`isEnterEnabled(targetVenue) == true`；
 - 部署评估的 `requiresSwap == false`；
@@ -1151,7 +1151,7 @@ Oracle 与策略：
 
 Rebalance、退出与接口：
 
-- Bootstrap 初始化 `lastPositionChangeAt`，两类 Rebalance 受同一 Cooldown 限制，Emergency Exit 可绕过检查且不重置计时，IDLE 幂等分支和失败交易不更新时间戳；
+- Bootstrap 初始化 `lastPositionChangeAt`；两类 Rebalance 共用 Cooldown，非 IDLE 仓位按策略撤至 EXTREME/IDLE 时豁免但成功后重置计时；重新入场仍需冷却；Emergency Exit 绕过检查且不重置计时，IDLE 幂等分支和失败交易不更新时间戳；
 - 普通 Rebalance 不含 Swap；
 - Preview、普通 Rebalance 和 Swap Rebalance 在非 IDLE 目标 Adapter 禁用时均以 `AdapterDisabled()` 回滚，但允许从已禁用的旧 Adapter 迁出；
 - Swap Rebalance 仅限 Keeper/Manager，且全部后置条件原子校验；

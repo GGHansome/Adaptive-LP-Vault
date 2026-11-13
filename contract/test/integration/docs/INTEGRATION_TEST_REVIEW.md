@@ -1,6 +1,6 @@
 # 集成测试函数目录
 
-本目录按测试函数说明“先做什么，再检查什么”。共 6 个测试文件、32 个测试函数，按函数在源码中的定义位置列出；继承的函数不重复列出，初始化和辅助函数也不计入。部分测试会用四种 Token 精度组合重复执行，因此 Foundry 实际执行 44 个测试实例；随机输入测试的每次采样不单独计数。
+本目录按测试函数说明“先做什么，再检查什么”。共 6 个测试文件、35 个测试函数，按函数在源码中的定义位置列出；继承的函数不重复列出，初始化和辅助函数也不计入。部分测试会用四种 Token 精度组合重复执行，因此 Foundry 实际执行 47 个测试实例；随机输入测试的每次采样不单独计数。
 
 ## 先了解几个名称
 
@@ -46,11 +46,12 @@ V3 手续费通过真实 Router 双向交易产生，V2 收益通过真实 Pair 
 - `test_realV2TradingFeesIncreaseLpEquityWithoutSeparateFeeClaims`：在 V2 池做双向交易后，检查 Vault 持有 LP 对应的资产增加，但“待领手续费”字段仍为零，因为 V2 收益已经包含在 LP 权益里。新老用户仍能存入和赎回；迁入 V3 后，V2 LP 应全部退出。
 - `test_nonActiveLpDonationIsRecognizedOnlyWhenV2IsActivated`：Vault 正在使用高费率 V3 时，向尚未使用的 V2 适配器捐入 LP，检查它暂不影响用户份额定价。切换到 V2 后，这笔捐赠才计入总资产：两种资产增加，总份额不增加，之后仍可存入和赎回。这里本来就应新增计价资产，因此不要求迁移前后资产近似相等。
 
-## `integration/Rebalance.t.sol`（4）
+## `integration/Rebalance.t.sol`（5）
 
 多数策略切换通过测试指定预言机返回值来触发；旧仓退出和新仓创建仍由真实协议执行。
 
 - `test_fullStrategyCycleAcrossAllVenuesAndBack`：依次经过低费率 V3、高费率 V3、V2、IDLE，再按相反顺序回到低费率 V3。每次离开 V3 都检查旧 NFT 已销毁；在 IDLE 时资产只留在 Vault；整个过程不改变用户份额，最后用户可以赎回。
+- `test_extremeShockExitsDirectlyDuringCooldownAndRecoversDirectlyAfterCooldown`：极端冲击下在冷却期内直接撤至 IDLE，真实 V3 NFT 销毁且中间场所没有建仓；撤仓重置冷却，等待结束后直接恢复低费率 V3。
 - `test_previewThenAnotherExecutionMakesOldPlanStale`：一个调用者先执行预览得到的计划，另一个调用者再提交旧计划哈希时应失败。检查失败不改变资产、历史计划和版本；重新预览后可以继续迁移。
 - `test_bothRebalanceEntrypointsRespectSharedCooldown`：完成一次普通迁移后，立即调用普通迁移和 Keeper 换币迁移，两者都应因同一个冷却期未结束而失败；等冷却期结束后，普通迁移可以成功。
 - `test_realPriceMoveCanRecenterSameV3VenueAndClearOldNft`：先通过真实交易把低费率池价格推到旧区间之外，再把实际 Tick 传给受控预言机，并补足新区间所需的两种 Token。检查同一池内生成位置更高的新区间和新 NFT、旧 NFT 销毁，两种资产的前后差额在容差内。此用例只验证区间重建，不验证自动换币配比，也不模拟 TWAP 自然变化。
@@ -70,13 +71,14 @@ V3 手续费通过真实 Router 双向交易产生，V2 收益通过真实 Pair 
 
 失败前后比较的状态包括：参与合约和池的两种 Token 余额、三种仓位快照、历史计划、版本、上次迁移时间、管理人份额、总供应量、V2 LP 和储备、换币池价格、Tick、费用增长及 Router 临时授权。测试只证明这些字段恢复，不代表比较了 EVM 的全部存储。
 
-## `integration/EmergencyRecovery.t.sol`（5）
+## `integration/EmergencyRecovery.t.sol`（7）
 
 前三个函数使用同一流程：先禁用当前适配器、暂停三个入口，并让预言机读取直接失败；Guardian 仍应能在冷却期内把仓位全部退出到 IDLE。检查资产前后差额在允许范围内、用户份额不变、版本只增加一次、历史计划和上次迁移时间不变，三个入口保持暂停，用户仍可赎回。再次紧急退出应不发事件、资产不变。最后修复预言机、启用适配器、解除暂停，检查能重新建仓、存入和赎回。
 
 - `test_lowFeeV3EmergencyExitRedeemAndRecovery`：先让低费率 V3 仓位赚到真实交易手续费，再执行上述故障、退出、重复退出和恢复流程。
 - `test_highFeeV3EmergencyExitRedeemAndRecovery`：换成高费率 V3 仓位，带着真实手续费执行同一流程。
 - `test_v2EmergencyExitRedeemAndRecovery`：持有真实 V2 LP 时执行同一流程；这个分支不额外做交易来产生手续费。
+- `test_emergencyRecoveryInHysteresisBandKeepsLowFeeHistory`、`test_emergencyRecoveryInSameHysteresisBandKeepsHighFeeHistory`：紧急退出后，同为 75 bps 的滞后区偏离分别按 LOW、MEDIUM 历史恢复低费率和高费率 V3。
 - `test_realOracleNormalizesObservationFailureWhileExitPathsRemainOpen`：只让参考池的 `observe()` 历史读取失败。检查生产预言机返回“不健康”快照，存款和迁移预览被阻止，但用户仍能从真实仓位赎回，Guardian 仍能紧急退出；解除故障后预言机恢复健康。
 - `test_idleBootstrapCanRedeemThenActivateV2`：初始化时选择 IDLE，管理人先赎回一部分份额，再把资产投入 V2；检查此后用户仍能存入和赎回。
 

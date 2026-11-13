@@ -255,7 +255,7 @@ contract AdaptiveLPVaultTest is AdaptiveLPVaultFixture {
             // Resume from IDLE via an ordinary permissionless rebalance.
             PositionPlan memory plan = _plan(0);
             vault.rebalance(plan.planHash, uint32(vm.getBlockTimestamp()));
-            assertEq(uint8(vault.activeVenue()), uint8(VenueType.UNISWAP_V2));
+            assertEq(uint8(vault.activeVenue()), uint8(VenueType.UNISWAP_V3_LOW_FEE));
         }
     }
 

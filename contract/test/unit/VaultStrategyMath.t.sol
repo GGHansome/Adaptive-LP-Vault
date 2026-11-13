@@ -57,21 +57,36 @@ contract VaultStrategyMathTest is Test {
         }
     }
 
-    function test_hysteresisUsesInclusiveBoundariesAndOnlyOneTransition() public view {
+    function test_hysteresisResolvesAllCrossedInclusiveBoundaries() public view {
         _assertRegime(MarketRegime.LOW_DEVIATION, 99, MarketRegime.LOW_DEVIATION);
         _assertRegime(MarketRegime.LOW_DEVIATION, 100, MarketRegime.MEDIUM_DEVIATION);
-        _assertRegime(MarketRegime.LOW_DEVIATION, 1000, MarketRegime.MEDIUM_DEVIATION);
+        _assertRegime(MarketRegime.LOW_DEVIATION, 300, MarketRegime.HIGH_DEVIATION);
+        _assertRegime(MarketRegime.LOW_DEVIATION, 500, MarketRegime.EXTREME_DEVIATION);
+        _assertRegime(MarketRegime.LOW_DEVIATION, type(uint256).max, MarketRegime.EXTREME_DEVIATION);
         _assertRegime(MarketRegime.MEDIUM_DEVIATION, 50, MarketRegime.LOW_DEVIATION);
         _assertRegime(MarketRegime.MEDIUM_DEVIATION, 51, MarketRegime.MEDIUM_DEVIATION);
         _assertRegime(MarketRegime.MEDIUM_DEVIATION, 299, MarketRegime.MEDIUM_DEVIATION);
         _assertRegime(MarketRegime.MEDIUM_DEVIATION, 300, MarketRegime.HIGH_DEVIATION);
+        _assertRegime(MarketRegime.MEDIUM_DEVIATION, 500, MarketRegime.EXTREME_DEVIATION);
+        _assertRegime(MarketRegime.HIGH_DEVIATION, 50, MarketRegime.LOW_DEVIATION);
         _assertRegime(MarketRegime.HIGH_DEVIATION, 200, MarketRegime.MEDIUM_DEVIATION);
         _assertRegime(MarketRegime.HIGH_DEVIATION, 201, MarketRegime.HIGH_DEVIATION);
         _assertRegime(MarketRegime.HIGH_DEVIATION, 499, MarketRegime.HIGH_DEVIATION);
         _assertRegime(MarketRegime.HIGH_DEVIATION, 500, MarketRegime.EXTREME_DEVIATION);
         _assertRegime(MarketRegime.EXTREME_DEVIATION, 400, MarketRegime.HIGH_DEVIATION);
         _assertRegime(MarketRegime.EXTREME_DEVIATION, 401, MarketRegime.EXTREME_DEVIATION);
-        _assertRegime(MarketRegime.EXTREME_DEVIATION, 0, MarketRegime.HIGH_DEVIATION);
+        _assertRegime(MarketRegime.EXTREME_DEVIATION, 200, MarketRegime.MEDIUM_DEVIATION);
+        _assertRegime(MarketRegime.EXTREME_DEVIATION, 50, MarketRegime.LOW_DEVIATION);
+        _assertRegime(MarketRegime.EXTREME_DEVIATION, 0, MarketRegime.LOW_DEVIATION);
+    }
+
+    function test_eachHysteresisBandRetainsHistoricalSide() public view {
+        _assertRegime(MarketRegime.LOW_DEVIATION, 75, MarketRegime.LOW_DEVIATION);
+        _assertRegime(MarketRegime.MEDIUM_DEVIATION, 75, MarketRegime.MEDIUM_DEVIATION);
+        _assertRegime(MarketRegime.MEDIUM_DEVIATION, 250, MarketRegime.MEDIUM_DEVIATION);
+        _assertRegime(MarketRegime.HIGH_DEVIATION, 250, MarketRegime.HIGH_DEVIATION);
+        _assertRegime(MarketRegime.HIGH_DEVIATION, 450, MarketRegime.HIGH_DEVIATION);
+        _assertRegime(MarketRegime.EXTREME_DEVIATION, 450, MarketRegime.EXTREME_DEVIATION);
     }
 
     function test_mediumRegimeUsesHighFeeSpacingAndWideRange() public view {
@@ -92,6 +107,11 @@ contract VaultStrategyMathTest is Test {
         _assertPlan(harness.getPlan(input), MarketRegime.HIGH_DEVIATION, VenueType.UNISWAP_V2, 0, 0, 1);
         input.oracle.deviationBps = 500;
         _assertPlan(harness.getPlan(input), MarketRegime.EXTREME_DEVIATION, VenueType.IDLE, 0, 0, 1);
+        // Crossing through MEDIUM must not evaluate its invalid V3 spacing/range.
+        input.planVersion = 7;
+        _assertPlan(harness.getPlan(input), MarketRegime.EXTREME_DEVIATION, VenueType.IDLE, 0, 0, 8);
+        input.oracle.deviationBps = 300;
+        _assertPlan(harness.getPlan(input), MarketRegime.HIGH_DEVIATION, VenueType.UNISWAP_V2, 0, 0, 8);
     }
 
     function test_rangeRoundingHandlesBothSignsAndTiesDownward() public view {
@@ -156,9 +176,11 @@ contract VaultStrategyMathTest is Test {
     function test_idleUsesHistoricalRegimeRatherThanCurrentVenue() public view {
         VaultStrategyMath.PlanInputs memory input = _inputs();
         input.planVersion = 7;
-        input.lastExecutedRegime = MarketRegime.EXTREME_DEVIATION;
-        input.oracle.deviationBps = 0;
-        _assertPlan(harness.getPlan(input), MarketRegime.HIGH_DEVIATION, VenueType.UNISWAP_V2, 0, 0, 8);
+        input.lastExecutedRegime = MarketRegime.LOW_DEVIATION;
+        input.oracle.deviationBps = 75;
+        _assertPlan(harness.getPlan(input), MarketRegime.LOW_DEVIATION, VenueType.UNISWAP_V3_LOW_FEE, -100, 100, 8);
+        input.lastExecutedRegime = MarketRegime.MEDIUM_DEVIATION;
+        _assertPlan(harness.getPlan(input), MarketRegime.MEDIUM_DEVIATION, VenueType.UNISWAP_V3_HIGH_FEE, -600, 600, 8);
     }
 
     function test_rejectsNonPositiveSpacingAndZeroSteps() public {
@@ -244,7 +266,7 @@ contract VaultStrategyMathTest is Test {
         assertEq(reconstructed, packed & ((uint256(1) << 208) - 1));
     }
 
-    function testFuzz_packedStrategyMatchesLegacyForArbitraryFields(
+    function testFuzz_packedStrategyMatchesReferenceWithValidThresholds(
         uint256 packed,
         uint256 deviation,
         uint8 previous,
@@ -252,8 +274,8 @@ contract VaultStrategyMathTest is Test {
         int24 tick
     ) public view {
         VaultStrategyMath.PlanInputs memory input = _activeInputs();
-        input.strategy = packed;
-        input.oracle.deviationBps = deviation;
+        input.strategy = _validThresholds(packed);
+        input.oracle.deviationBps = bound(deviation, 0, 7000);
         input.lastExecutedRegime = MarketRegime(previous % 4);
         input.planVersion = version;
         input.oracle.twapTick = tick;
@@ -273,7 +295,7 @@ contract VaultStrategyMathTest is Test {
         }
     }
 
-    function testFuzz_planMatchesPreExtractionAlgorithm(
+    function testFuzz_planMatchesReferenceAfterHysteresisResolution(
         uint256 deviation,
         uint8 previous,
         uint8 venue,
@@ -353,11 +375,60 @@ contract VaultStrategyMathTest is Test {
         full.strategy.narrowRangeHalfWidthSteps = uint24(input.strategy >> 144);
         full.strategy.wideRangeHalfWidthSteps = uint24(input.strategy >> 168);
         full.strategy.minRecenterBps = uint16(input.strategy >> 192);
-        full.lastExecutedRegime = input.lastExecutedRegime;
+        // Solve the three hysteresis boundaries independently. The frozen one-step
+        // reference then checks range retention, encoding and hashing at this fixed point.
+        if (input.planVersion != 0) {
+            if (input.lastExecutedRegime == MarketRegime.EXTREME_DEVIATION
+                    ? input.oracle.deviationBps > full.strategy.exitExtremeBps
+                    : input.oracle.deviationBps >= full.strategy.enterExtremeBps) {
+                full.lastExecutedRegime = MarketRegime.EXTREME_DEVIATION;
+            } else if (uint8(input.lastExecutedRegime) >= uint8(MarketRegime.HIGH_DEVIATION)
+                    ? input.oracle.deviationBps > full.strategy.exitHighBps
+                    : input.oracle.deviationBps >= full.strategy.enterHighBps) {
+                full.lastExecutedRegime = MarketRegime.HIGH_DEVIATION;
+            } else if (uint8(input.lastExecutedRegime) >= uint8(MarketRegime.MEDIUM_DEVIATION)
+                    ? input.oracle.deviationBps > full.strategy.exitMediumBps
+                    : input.oracle.deviationBps >= full.strategy.enterMediumBps) {
+                full.lastExecutedRegime = MarketRegime.MEDIUM_DEVIATION;
+            } else {
+                full.lastExecutedRegime = MarketRegime.LOW_DEVIATION;
+            }
+        }
         full.activeVenue = input.activeVenue;
         full.lowSpacing = input.lowSpacing;
         full.highSpacing = input.highSpacing;
         full.planVersion = input.planVersion;
+    }
+
+    function testFuzz_resolvedRegimeIsStable(uint256 packed, uint256 deviation, uint8 previous) public view {
+        VaultStrategyMath.PlanInputs memory input = _inputs();
+        input.strategy = _validThresholds(packed);
+        input.oracle.deviationBps = bound(deviation, 0, 7000);
+        input.planVersion = 1;
+        input.lastExecutedRegime = MarketRegime(previous % 4);
+        // Keep arbitrary range fields out of this state-machine property.
+        input.strategy = _withStrategyField(input.strategy, 144, 24, 10);
+        input.strategy = _withStrategyField(input.strategy, 168, 24, 10);
+        PositionPlan memory plan = harness.getPlan(input);
+        input.lastExecutedRegime = plan.marketRegime;
+        assertEq(abi.encode(harness.getPlan(input)), abi.encode(plan));
+    }
+
+    function _validThresholds(uint256 packed) private pure returns (uint256) {
+        uint256 threshold;
+        // Ordered exits/entries, including equal entry/next-exit boundaries.
+        for (uint256 i; i < 6; ++i) {
+            threshold += uint24(packed >> (i * 24)) % 1000 + (i % 2);
+            packed = _withStrategyField(packed, i * 24, 24, threshold);
+        }
+        // Wire order is enterMedium, exitMedium, enterHigh, exitHigh, enterExtreme, exitExtreme.
+        for (uint256 i; i < 6; i += 2) {
+            uint256 entry = uint24(packed >> ((i + 1) * 24));
+            uint256 exit = uint24(packed >> (i * 24));
+            packed = _withStrategyField(packed, i * 24, 24, entry);
+            packed = _withStrategyField(packed, (i + 1) * 24, 24, exit);
+        }
+        return packed;
     }
 
     function _inputs() private pure returns (VaultStrategyMath.PlanInputs memory input) {

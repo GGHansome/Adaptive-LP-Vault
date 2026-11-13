@@ -106,8 +106,8 @@ contract AdaptiveLPVaultAssessmentTest is Test {
         token0.approve(address(vault), 1000);
         token1.approve(address(vault), 1000);
         vault.bootstrap(1000, 1000, address(this));
-        // EXTREME history transitions to HIGH, selecting V2 while the assets remain in IDLE.
-        oracle.setDeviation(0);
+        // Keep the final target at HIGH/V2 while assets remain in IDLE.
+        oracle.setDeviation(350);
     }
 
     function test_constructorReportsInvalidControlBinding() public {
@@ -164,7 +164,7 @@ contract AdaptiveLPVaultAssessmentTest is Test {
             | (uint256(strategyConfig.narrowRangeHalfWidthSteps) << 144)
             | (uint256(strategyConfig.wideRangeHalfWidthSteps) << 168) | (uint256(strategyConfig.minRecenterBps) << 192);
         VaultStrategyMath.PlanInputs memory input;
-        input.oracle = VaultStrategyMath.PlanOracleInputs({deviationBps: 0, twapTick: 17, spotTick: 0});
+        input.oracle = VaultStrategyMath.PlanOracleInputs({deviationBps: 350, twapTick: 17, spotTick: 0});
         input.strategy = packed;
         input.lastExecutedRegime = vault.lastExecutedPlan().marketRegime;
         input.activeVenue = vault.activeVenue();

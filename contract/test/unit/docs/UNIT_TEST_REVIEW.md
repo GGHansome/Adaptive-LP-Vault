@@ -1,6 +1,6 @@
 # 单元测试函数目录
 
-本文逐函数说明“什么情况下执行什么操作，以及应得到什么结果”。共 20 个文件、344 个测试函数，按源码定义位置列出；继承的函数不重复列出，初始化和辅助函数不计入。
+本文逐函数说明“什么情况下执行什么操作，以及应得到什么结果”。共 20 个文件、353 个测试函数，按源码定义位置列出；继承的函数不重复列出，初始化和辅助函数不计入。
 
 ## 先了解几个名称
 
@@ -213,7 +213,7 @@
 - `test_plainRebalanceCommitTimestampOverflowRollsBack`：回调中人为把提交时间推到上限之外，检查普通迁移的资产、仓位、授权和全部历史恢复。
 - `test_swapRebalanceCommitTimestampOverflowRollsBack`：换币和建仓完成后，再人为制造提交时间溢出；换币双方余额和全部历史仍应恢复。
 
-## `unit/AdaptiveLPVaultRebalance.t.sol`（9）
+## `unit/AdaptiveLPVaultRebalance.t.sol`（16）
 
 - `test_rebalancesShareNonzeroCooldownAndAcceptExactBoundary`：普通迁移和换币迁移共用同一个非零冷却期；恰好到结束时刻应允许执行。
 - `test_rebalanceRejectsBadHashAndExpiredDeadlineInBothEntrypoints`：两个入口都拒绝零哈希、错误哈希、旧计划哈希和过期截止时间；恰好在截止时刻仍可执行。
@@ -224,6 +224,12 @@
 - `test_swapMigrationLossOneUnitBelowBoundaryRollsBackEverything`：最终净值比最低要求少一个最小单位时，余额、仓位、授权和完整计划全部恢复。
 - `test_finalDeploymentFailureRollsBackSuccessfulSwap`：确认 Router 已被调用后，再让最终仓位检查失败；此前完成的换币也必须撤销。
 - `test_emergencyExitIgnoresOracleCooldownAndPreservesFullHistory`：即使冷却未结束、入口暂停、适配器禁用、预言机不可用，仍可紧急退出；历史计划和上次迁移时间不变。
+
+- `test_lowFeeExitSkipsIntermediateVenuesDuringCooldown`、`test_highFeeExitSkipsV2DuringCooldown`、`test_v2ExitDuringCooldown`：三个活跃场所均可在冷却期内直接撤至 IDLE，不调用中间 Adapter 建仓或 Swap，禁用 Adapter 不阻止退出，版本只提交一次。
+- `test_idleExitStartsFreshCooldownBeforeDirectLowFeeRecovery`：策略撤仓重置冷却时间，恢复可直接选择低费率 V3，但须等待新冷却期。
+- `test_idleExitExemptionPreservesPauseDeadlineHashAndHealthGates`：冷却豁免不绕过暂停、截止时间、计划哈希和健康 Oracle 检查。
+- `test_failedIdleExitRollsBackPositionAndHistory`：退出失败时恢复原仓位、余额和历史。
+- `test_idleCannotCommitRepeatedExtremePlan`：已在 IDLE 时不能重复提交相同结构的极端计划。
 
 ## `unit/AdaptiveLPVaultReturnValues.t.sol`（32）
 
@@ -408,12 +414,13 @@
 - `test_singleAdminRuleAndNonzeroInitialAdmin`：根管理员只能有一个账户，初始管理员不能是零地址。
 - `test_businessRoleGrantRevokeAndSelfRenounce`：分别检查三种业务角色的授予、撤销、自愿放弃，以及无权操作时被拒绝。
 
-## `unit/VaultStrategyMath.t.sol`（24）
+## `unit/VaultStrategyMath.t.sol`（26）
 
 - `test_externalLibraryIsDeployedAndCalledFromPureEntryPoint`：检查计划库确实部署，并可通过纯计算入口生成首次低偏离市场计划。
 - `test_linkedLibraryCanExecuteWithinStaticCall`：外部链接的计划库可以在不修改状态的静态调用中执行。
 - `test_bootstrapClassifiesAtCompleteEntryThresholds`：首次生成计划时，按各状态的完整进入阈值分类；分别检查阈值前、恰好到阈值和阈值后的结果。
-- `test_hysteresisUsesInclusiveBoundariesAndOnlyOneTransition`：已有历史状态时，用不同的进入、退出阈值避免频繁切换；恰好到边界也算触发，但一次最多只切换一个相邻市场状态。
+- `test_hysteresisResolvesAllCrossedInclusiveBoundaries`：在同一快照上连续应用进入或退出阈值，可双向跨越多个边界；等号触发转换，只生成最终状态。
+- `test_eachHysteresisBandRetainsHistoricalSide`：相同偏离处于滞后区时，根据历史状态保持边界对应的一侧。
 - `test_mediumRegimeUsesHighFeeSpacingAndWideRange`：市场处于中等偏离状态时，选择高费率 V3 池，使用对应 Tick 间距和更宽区间。
 - `test_nonV3PlansNormalizeTicksAndDoNotNeedSpacing`：V2 和 IDLE 不需要 V3 区间，计划上下 Tick 都设为零，也不读取 V3 间距。
 - `test_rangeRoundingHandlesBothSignsAndTiesDownward`：正负 Tick 都对齐到最近的合法间距；到上下两个位置距离一样时，选较低的位置。
@@ -431,6 +438,7 @@
 - `test_planInputsEncodeOnlyTwelveWords`：检查新计划输入编码占 12 个 ABI 数据字，而旧完整输入占 41 个数据字。
 - `test_strategyUnpackingHasExactFieldBoundaries`：从打包参数中取回各字段时，不能互相串位；全零输入也应正确还原。
 - `testFuzz_strategyUnpackingPreservesAllFieldBits`：随机打包值解码后，各字段的有效位全部保留，多余高位不影响结果。
-- `testFuzz_packedStrategyMatchesLegacyForArbitraryFields`：随机策略参数下，打包实现与旧实现生成相同计划或相同失败；版本溢出的已知差异单独处理。
-- `testFuzz_planMatchesPreExtractionAlgorithm`：随机市场状态、目标协议、Tick、区间和版本下，生成计划与代码抽取前的参考算法相同。
+- `testFuzz_packedStrategyMatchesReferenceWithValidThresholds`：随机合法阈值与打包参数下，独立求解最终状态后，用原始参考实现核对 Range、编码、哈希及失败结果。
+- `testFuzz_planMatchesReferenceAfterHysteresisResolution`：随机历史、Venue、Tick、区间和版本下，独立求解滞后状态后核对完整计划。
+- `testFuzz_resolvedRegimeIsStable`：合法随机阈值下，最终状态在同一偏离上再次计算保持不变。
 - `testFuzz_bootstrapRangesAreAlignedCoverTwapAndHaveStableHash`：首次 V3 区间应按间距对齐、包含 TWAP 位置且宽度正确；同样输入生成同样计划哈希，独立重算也应一致。

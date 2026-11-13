@@ -12,6 +12,7 @@ import {
     AccessControlConfig,
     AssetSnapshot,
     DeploymentAssessment,
+    MarketRegime,
     PauseFlag,
     PositionPlan,
     StrategyConfig,
@@ -314,7 +315,6 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         _requireInitialized();
         _requireNotPaused(PauseFlag.PLAIN_REBALANCE);
         _requireDeadline(deadline);
-        _requireCooldown();
 
         OracleSnapshot memory oracle = _healthyOracleSnapshot();
         (PositionPlan memory plan, DeploymentAssessment memory assessment, PositionSnapshot memory current) =
@@ -322,6 +322,12 @@ contract AdaptiveLPVault is ERC20, ReentrancyGuard {
         if (plan.planHash != expectedPlanHash || expectedPlanHash == bytes32(0)) {
             revert IAdaptiveLPVault.InvalidPlanHash();
         }
+        // A healthy strategy exit must not wait for a deployment cooldown. Committing
+        // the exit still starts a new cooldown before assets can be deployed again.
+        if (
+            activeVenue == VenueType.IDLE || plan.targetVenue != VenueType.IDLE
+                || plan.marketRegime != MarketRegime.EXTREME_DEVIATION
+        ) _requireCooldown();
         if (!_hasStateChange(plan, current)) revert IAdaptiveLPVault.NoStateChangeRequired();
         if (assessment.requiresSwap) revert IAdaptiveLPVault.SwapRequired();
 

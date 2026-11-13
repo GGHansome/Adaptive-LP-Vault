@@ -362,9 +362,10 @@ contract VaultHandler is Test {
     }
 
     function rebalance(uint256 deviationSeed) external counted {
-        if (!oracleHealthy || control.pauseState().plainRebalancePaused || !_cooldownReady()) return _skip();
+        if (!oracleHealthy || control.pauseState().plainRebalancePaused) return _skip();
         _market(bound(deviationSeed, 0, 650), true);
         VenueType target = _targetRegimeVenue();
+        if ((target != VenueType.IDLE || e.vault.activeVenue() == VenueType.IDLE) && !_cooldownReady()) return _skip();
         if (target != VenueType.IDLE && !control.isEnterEnabled(target)) return _skip();
         (PositionPlan memory plan, DeploymentAssessment memory assessment) = e.vault.previewRebalance();
         _assertPlan(plan);
@@ -492,11 +493,15 @@ contract VaultHandler is Test {
                 IAdaptiveLPVault.OracleUnhealthy.selector
             );
         } else if (kind == 5) {
-            if (control.pauseState().plainRebalancePaused || _cooldownReady()) return _skip();
+            if (!oracleHealthy || control.pauseState().plainRebalancePaused || _cooldownReady()) return _skip();
+            VenueType target = _targetRegimeVenue();
+            if (target == VenueType.IDLE && e.vault.activeVenue() != VenueType.IDLE) return _skip();
+            if (target != VenueType.IDLE && !control.isEnterEnabled(target)) return _skip();
+            (PositionPlan memory plan,) = e.vault.previewRebalance();
             _failure(
                 address(e.vault),
                 owner,
-                abi.encodeCall(e.vault.rebalance, (bytes32(0), uint32(vm.getBlockTimestamp()))),
+                abi.encodeCall(e.vault.rebalance, (plan.planHash, uint32(vm.getBlockTimestamp()))),
                 IAdaptiveLPVault.CooldownActive.selector
             );
         } else {
@@ -597,8 +602,8 @@ contract VaultHandler is Test {
                 IAdaptiveLPVault.OracleUnhealthy.selector
             );
         }
-        bytes4 plainError = _rebalanceGateError(pauses.plainRebalancePaused);
-        bytes4 swapError = _rebalanceGateError(pauses.swapRebalancePaused);
+        bytes4 plainError = _rebalanceGateError(pauses.plainRebalancePaused, false);
+        bytes4 swapError = _rebalanceGateError(pauses.swapRebalancePaused, true);
         _failure(
             address(e.vault),
             caller,
@@ -617,9 +622,9 @@ contract VaultHandler is Test {
         ++successes[msg.sig];
     }
 
-    function _rebalanceGateError(bool paused) internal view returns (bytes4) {
+    function _rebalanceGateError(bool paused, bool withSwap) internal view returns (bytes4) {
         if (paused) return IVaultPause.Paused.selector;
-        if (!_cooldownReady()) return IAdaptiveLPVault.CooldownActive.selector;
+        if (withSwap && !_cooldownReady()) return IAdaptiveLPVault.CooldownActive.selector;
         if (!oracleHealthy) return IAdaptiveLPVault.OracleUnhealthy.selector;
         VenueType target = _targetRegimeVenue();
         if (target != VenueType.IDLE && !control.isEnterEnabled(target)) {
@@ -751,22 +756,12 @@ contract VaultHandler is Test {
 
     function _targetRegimeVenue() internal view returns (VenueType) {
         uint256 regime = uint8(e.vault.lastExecutedPlan().marketRegime);
-        // Explicit reference transition table: inclusive hysteresis, at most one step.
-        if (regime == 0 && marketDeviation >= 100) {
-            regime = 1;
-        } else if (regime == 1) {
-            if (marketDeviation <= 50) regime = 0;
-            else if (marketDeviation >= 300) regime = 2;
-        } else if (regime == 2) {
-            if (marketDeviation <= 200) regime = 1;
-            else if (marketDeviation >= 500) regime = 3;
-        } else if (regime == 3 && marketDeviation <= 400) {
-            regime = 2;
-        }
-        if (regime == 0) return VenueType.UNISWAP_V3_LOW_FEE;
-        if (regime == 1) return VenueType.UNISWAP_V3_HIGH_FEE;
-        if (regime == 2) return VenueType.UNISWAP_V2;
-        return VenueType.IDLE;
+        // Independent closed-form boundary model: history selects each boundary's
+        // entry or exit threshold, then the highest retained level is the final target.
+        if (regime == 3 ? marketDeviation > 400 : marketDeviation >= 500) return VenueType.IDLE;
+        if (regime >= 2 ? marketDeviation > 200 : marketDeviation >= 300) return VenueType.UNISWAP_V2;
+        if (regime >= 1 ? marketDeviation > 50 : marketDeviation >= 100) return VenueType.UNISWAP_V3_HIGH_FEE;
+        return VenueType.UNISWAP_V3_LOW_FEE;
     }
 
     function _market(uint256 deviation, bool healthy) internal {

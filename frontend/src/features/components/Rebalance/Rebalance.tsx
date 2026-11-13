@@ -10,7 +10,12 @@ import type { RebalanceProps } from './interface';
 export function Rebalance(p: RebalanceProps) {
   const d = p.data,
     m = p.deployment;
-  const blocked = !p.ready || p.busy || !p.preview || p.expired || p.loading || p.cooldown > 0;
+  const idleExit =
+    d.activeVenue !== 0 &&
+    p.preview?.plan.targetVenue === 0 &&
+    p.preview.plan.marketRegime === 3 &&
+    !p.preview.requiresSwap;
+  const blocked = !p.ready || p.busy || !p.preview || p.expired || p.loading;
   return (
     <Flex vertical gap="large">
       <PageTitle
@@ -39,7 +44,14 @@ export function Rebalance(p: RebalanceProps) {
                     : '预言机不可用',
               },
               { label: '已提交计划版本', value: String(d.plan.version) },
-              { label: '冷却时间', value: p.cooldown ? `${p.cooldown} 秒后可执行` : '已结束' },
+              {
+                label: '冷却时间',
+                value: idleExit
+                  ? '撤至 IDLE 豁免冷却；重新入场仍需冷却'
+                  : p.cooldown
+                    ? `${p.cooldown} 秒后可执行`
+                    : '已结束',
+              },
               { label: '最大协议换币滑点', value: `${Number(d.params.maxSwapSlippageBps) / 100}%` },
               {
                 label: '最大迁移净值损失',
@@ -88,11 +100,16 @@ export function Rebalance(p: RebalanceProps) {
         left={
           <ActionForm
             title="普通再平衡"
-            description="任何账户都可触发无需换币的计划。没有状态变化、尚在冷却或目标池禁用时，合约会拒绝执行。"
+            description="任何账户都可触发无需换币的计划。极端偏离撤至 IDLE 豁免冷却，重新入场仍需冷却；其他执行检查保持有效。"
             fields={[]}
             submit="执行普通再平衡"
             busy={p.busy}
-            disabled={blocked || !!p.preview?.requiresSwap || d.pause.plainRebalancePaused}
+            disabled={
+              blocked ||
+              (p.cooldown > 0 && !idleExit) ||
+              !!p.preview?.requiresSwap ||
+              d.pause.plainRebalancePaused
+            }
             onSubmit={p.onExecute}
           />
         }
@@ -118,7 +135,11 @@ export function Rebalance(p: RebalanceProps) {
             submit="模拟并执行换币再平衡"
             busy={p.busy}
             disabled={
-              blocked || !p.allowedSwap || !p.preview?.requiresSwap || d.pause.swapRebalancePaused
+              blocked ||
+              p.cooldown > 0 ||
+              !p.allowedSwap ||
+              !p.preview?.requiresSwap ||
+              d.pause.swapRebalancePaused
             }
             onSubmit={(v) => p.onSwap({ amountIn: v.amountIn, minOut: v.minOut })}
           />
