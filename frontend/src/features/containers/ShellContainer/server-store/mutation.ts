@@ -1,11 +1,12 @@
 import { App } from 'antd';
-import { useConnect, useDisconnect, useSwitchChain } from 'wagmi';
+import { useConnect, useConnectors, useDisconnect, useSwitchChain } from 'wagmi';
 import { deployment } from '../../../../config/web3';
 import { describeError } from '../../../../shared/web3/errors';
 export function useWalletMutation() {
-  const { connect, connectors, isPending } = useConnect();
-  const { disconnect } = useDisconnect();
-  const { switchChain } = useSwitchChain();
+  const { mutate: connect, isPending } = useConnect();
+  const connectors = useConnectors();
+  const { mutate: disconnect } = useDisconnect();
+  const { mutate: switchChain } = useSwitchChain();
   const { message } = App.useApp();
   return {
     connecting: isPending,
