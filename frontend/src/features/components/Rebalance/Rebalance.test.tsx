@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { Rebalance } from './Rebalance';
 import type { RebalanceProps } from './interface';
@@ -26,6 +26,8 @@ function props(): RebalanceProps {
     onRefresh: vi.fn(),
     onExecute: vi.fn(async () => {}),
     onSwap: vi.fn(async () => {}),
+    suggestionScope: 'keeper',
+    onSuggestSwap: vi.fn(async () => '1125'),
   };
 }
 
@@ -78,4 +80,58 @@ it('当前已为 IDLE 时不提供撤仓冷却豁免', () => {
   render(<Rebalance {...p} />);
   expect(screen.getByRole('button', { name: '执行普通再平衡' })).toBeDisabled();
   expect(screen.queryByText('撤至 IDLE 豁免冷却；重新入场仍需冷却')).not.toBeInTheDocument();
+});
+
+function swapProps() {
+  const p = props();
+  p.preview = { plan: { ...p.data.plan }, direction: 2, requiresSwap: true, at: p.data.blockTime };
+  p.cooldown = 0;
+  return p;
+}
+
+it('建议金额必须显式填入，不修改最低输出或触发提交', async () => {
+  const p = swapProps();
+  render(<Rebalance {...p} />);
+  const input = screen.getByRole('spinbutton', { name: '换币输入（tETH）' });
+  const minOut = screen.getByRole('spinbutton', { name: '调用者最低输出（tUSD）' });
+  fireEvent.change(minOut, { target: { value: '15.5' } });
+  fireEvent.click(screen.getByRole('button', { name: '计算建议金额' }));
+  const fill = await screen.findByRole('button', { name: '填入建议金额' });
+  expect(input).toHaveValue('');
+  expect(p.onSuggestSwap).toHaveBeenCalledWith('15.5');
+  fireEvent.click(fill);
+  expect(input).toHaveValue('1125');
+  expect(minOut).toHaveValue('15.5');
+  expect(p.onSwap).not.toHaveBeenCalled();
+});
+
+it('非 Keeper 或 Manager 看不到可执行的计算入口', () => {
+  render(<Rebalance {...swapProps()} allowedSwap={false} />);
+  expect(screen.getByRole('button', { name: '计算建议金额' })).toBeDisabled();
+});
+
+it('切换账户后丢弃仍在计算的结果', async () => {
+  const p = swapProps();
+  let resolve!: (value: string) => void;
+  p.onSuggestSwap = () =>
+    new Promise((done) => {
+      resolve = done;
+    });
+  const { rerender } = render(<Rebalance {...p} />);
+  fireEvent.click(screen.getByRole('button', { name: '计算建议金额' }));
+  expect(screen.getByRole('button', { name: '模拟并执行换币再平衡' })).toBeDisabled();
+  rerender(<Rebalance {...p} suggestionScope="manager" />);
+  await act(async () => resolve('1125'));
+  expect(screen.queryByRole('button', { name: '填入建议金额' })).not.toBeInTheDocument();
+});
+
+it('修改最低输出后，原建议即使改回原值也不会重新出现', async () => {
+  render(<Rebalance {...swapProps()} />);
+  const minOut = screen.getByRole('spinbutton', { name: '调用者最低输出（tUSD）' });
+  fireEvent.click(screen.getByRole('button', { name: '计算建议金额' }));
+  await screen.findByRole('button', { name: '填入建议金额' });
+  fireEvent.change(minOut, { target: { value: '5' } });
+  expect(screen.queryByRole('button', { name: '填入建议金额' })).not.toBeInTheDocument();
+  fireEvent.change(minOut, { target: { value: '0' } });
+  expect(screen.queryByRole('button', { name: '填入建议金额' })).not.toBeInTheDocument();
 });

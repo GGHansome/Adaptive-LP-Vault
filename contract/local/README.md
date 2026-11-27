@@ -75,6 +75,7 @@ npm run local:deploy -- --uninitialized
 npm run market -- --scenario steady
 npm run market -- --scenario trend --seed 42
 npm run market -- --scenario shock
+npm run market -- --scenario shock --shock-ticks -1200
 npm run market -- --scenario recovery
 npm run market -- --scenario steady --seed 42 --rounds 10 --interval 1000 --scale 1 --bias 0
 ```
@@ -83,7 +84,9 @@ npm run market -- --scenario steady --seed 42 --rounds 10 --interval 1000 --scal
 
 参数：`--scenario` 取 `steady` / `trend` / `shock` / `recovery`；`--seed` 为非负安全整数，默认 42；`--rounds` 为 0–100000，0 表示持续；`--interval` 为 500–60000 毫秒，默认 3000；`--scale` 为 `(0, 2]`，默认 1；`--bias` 为 -100–100 Tick，默认 0。实际轮次还包含交易确认等待。
 
-同一随机种子和同一链上时间输入产生相同目标，但实际出块时序会影响成交结果，并非逐字节确定重放。冲击约 10 秒后将目标价推高约 12.7%；恢复场景先保持冲击，再逐步回归。场景稳定后长短时间加权平均价格会收敛，偏离不会永久维持。
+`--shock-ticks` 仅适用于 `shock`，接受绝对值为 1–5000 的整数，默认 `1200`。运行约 10 秒后，目标 Tick 相对初始 1:1 报价移动指定值并保持。默认 `1200` 让 `tETH` 相对 `tUSD` 跌价；`-1200` 让 `tETH` 相对 `tUSD` 涨约 12.7%。
+
+同一随机种子和同一链上时间输入产生相同目标，但实际出块时序会影响成交结果，并非逐字节确定重放。恢复场景先保持冲击，再逐步回归。场景稳定后长短时间加权平均价格会收敛，偏离不会永久维持。
 
 输出逐行 JSON：`started`、`swap`、`market`、`error`、`stopped`。金额使用 `bigint`；浮点 Tick 估算仅决定本地交易方向和规模。模拟器不会调用 Vault 初始化、存款、赎回或再平衡，也不自动修改链时间。锁位于 `contract/local/.state/market.lock`；第二个进程拒绝启动，连续失败三次后退出。
 
@@ -91,7 +94,11 @@ npm run market -- --scenario steady --seed 42 --rounds 10 --interval 1000 --scal
 
 用户在“我的资产”填写两种最大投入，分别授权、预览并确认存款。启动模拟器后在总览观察真实价格、偏离与 V3 待领取费用；V2 费用已包含在储备权益，口径不同。
 
-在“策略再平衡”刷新计划：无需换币时任何账户可执行，需要换币时切换 Keeper / Manager 并先模拟交易。合约基于历史状态和同一预言机快照连续计算至最终状态，可双向跨级但只执行最终计划；实时偏离、候选计划和已执行状态不等价。剧烈行情可能让计划过期或仓位单边，按合约错误处理；策略撤至 EXTREME/IDLE 豁免冷却，重新入场及其他迁移仍受冷却限制，滑点和迁移校验保持有效。没有自动最优换币数量或自动 Keeper。
+在“策略再平衡”刷新计划：无需换币时任何账户可执行；需要换币时切换 Keeper / Manager。可点击“计算建议金额”，按当前计划试算并只读模拟若干候选，再点击“填入建议金额”。建议不会改动“调用者最低输出”、签名或发送交易；它不保证最优或实际成交。计划或最低输出变化后须重新计算；找不到可执行金额时仍可手动填写。提交时还会重新检查计划并模拟整笔交易。
+
+前端每笔写链交易都会重新估算 Gas，增加 20% 余量并向上取整，再使用同一 Gas 上限模拟和提交。估算或模拟失败时不会打开钱包确认；初始化等多笔交易逐笔估算。该余量不改变 Gas 单价，也不影响只读查询或预览。
+
+合约基于历史状态和同一预言机快照连续计算至最终状态，可双向跨级但只执行最终计划；实时偏离、候选计划和已执行状态不等价。剧烈行情可能让计划过期或仓位单边，按合约错误处理；策略撤至 EXTREME/IDLE 豁免冷却，重新入场及其他迁移仍受冷却限制，滑点和迁移校验保持有效。没有自动提交的 Keeper。
 
 Guardian 可测试暂停和紧急退出，Manager 恢复；用户仍可预览和执行正常赎回。
 
@@ -126,6 +133,8 @@ npm run test:deployment -- --browser
 npm run test:e2e
 npm run test:e2e -- --bootstrap
 npm run test:market
+# 可选：shock 稳定、同池调整计划需要 tETH → tUSD 时，仅验证建议金额，不发送交易
+VITE_TEST_LOCAL_SWAP=1 npm test -w frontend -- local-suggestion-check.test.ts
 ```
 
 单独运行本地 Solidity 测试：在 `contract/` 执行 `FOUNDRY_TEST=local/test forge test`；格式检查执行 `forge fmt --check local/script local/test`。原有合约回归继续使用 `npm run contract:test`，本地专用测试与原 `test/` 分开。

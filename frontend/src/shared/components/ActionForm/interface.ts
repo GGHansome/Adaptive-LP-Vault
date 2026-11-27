@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import type { FormInstance } from 'antd';
 export type Field = {
   name: string;
   label: string;
@@ -19,6 +20,7 @@ export type ActionFormProps = {
   danger?: boolean;
   confirm?: string;
   notice?: string;
+  form?: FormInstance;
   children?: ReactNode;
   onValuesChange?: (values: FormValues) => void;
 };

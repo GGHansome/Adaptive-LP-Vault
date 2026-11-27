@@ -41,7 +41,11 @@ export function useVaultWrite() {
         },
         async simulate(call) {
           // Dynamic ABI is confined to this generic execution boundary. Business mutations use generated ABIs.
-          const { request } = await client.simulateContract({ ...call, account });
+          const input = { ...call, account };
+          const estimate = await client.estimateContractGas(input);
+          // Round up the shared 20% buffer before simulating the exact gas limit to send.
+          const gas = (estimate * 120n + 99n) / 100n;
+          const { request } = await client.simulateContract({ ...input, gas });
           return () => wallet.writeContract(request);
         },
         receipt: (hash) => client.waitForTransactionReceipt({ hash }),

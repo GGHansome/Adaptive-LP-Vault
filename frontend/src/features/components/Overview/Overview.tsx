@@ -30,10 +30,16 @@ export function Overview({
   onRebalance,
 }: OverviewProps) {
   const idle = d.idleBps === undefined ? undefined : Number(d.idleBps) / 100;
-  const sharePrice =
-    d.nav !== undefined && d.assets.totalShares
-      ? (d.nav * 10n ** 18n) / d.assets.totalShares
-      : undefined;
+  const nav1 = d.oracle.healthy ? d.nav : undefined;
+  // The long TWAP quote is in raw token1 units per whole token0.
+  const quote1 = d.oracle.twapPriceToken1;
+  const nav0 =
+    nav1 !== undefined && quote1 > 0n ? (nav1 * 10n ** BigInt(m.decimals0)) / quote1 : undefined;
+  const totalShares = d.assets.totalShares;
+  const perShare = (nav: bigint | undefined) =>
+    nav !== undefined && totalShares > 0n ? (nav * 10n ** 18n) / totalShares : undefined;
+  const sharePrice0 = perShare(nav0);
+  const sharePrice1 = perShare(nav1);
   return (
     <Flex vertical gap="large">
       <PageTitle
@@ -62,23 +68,41 @@ export function Overview({
       </Card>
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} xl={6}>
-          <Card>
-            <Statistic title={`资产净值 · ${m.symbol1}`} value={amount(d.nav, m.decimals1)} />
-            <Typography.Text type="secondary">
-              {d.oracle.healthy ? '按长周期 TWAP 计价' : '预言机不可用，暂不展示估值'}
-            </Typography.Text>
+          <Card role="group" aria-label="资产净值">
+            <Statistic
+              title="资产净值"
+              value={amount(nav0, m.decimals0)}
+              suffix={nav0 !== undefined ? m.symbol0 : undefined}
+            />
+            <Flex vertical gap={2}>
+              {nav0 !== undefined && (
+                <Typography.Text type="secondary">
+                  约 {amount(nav1, m.decimals1)} {m.symbol1}
+                </Typography.Text>
+              )}
+              <Typography.Text type="secondary">
+                {nav0 !== undefined ? '按长周期 TWAP 计价' : '预言机不可用，暂不展示估值'}
+              </Typography.Text>
+            </Flex>
           </Card>
         </Col>
         <Col xs={24} sm={12} xl={6}>
-          <Card>
+          <Card role="group" aria-label="每份额净值">
             <Statistic
               title="每份额净值"
-              value={amount(sharePrice, m.decimals1, 6)}
-              suffix={m.symbol1}
+              value={amount(sharePrice0, m.decimals0, 6)}
+              suffix={sharePrice0 !== undefined ? m.symbol0 : undefined}
             />
-            <Typography.Text type="secondary">
-              总供应量 {amount(d.assets.totalShares, 18)} ALPV
-            </Typography.Text>
+            <Flex vertical gap={2}>
+              {sharePrice0 !== undefined && (
+                <Typography.Text type="secondary">
+                  约 {amount(sharePrice1, m.decimals1, 6)} {m.symbol1}
+                </Typography.Text>
+              )}
+              <Typography.Text type="secondary">
+                {totalShares ? `总供应量 ${amount(totalShares, 18)} ALPV` : '尚无已发行份额'}
+              </Typography.Text>
+            </Flex>
           </Card>
         </Col>
         <Col xs={24} sm={12} xl={6}>

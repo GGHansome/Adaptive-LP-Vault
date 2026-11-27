@@ -16,8 +16,9 @@ import type { RebalancePreview } from '../../../types';
 export async function readRebalancePreview(
   client: PublicClient,
   m: Deployment,
+  atBlock?: { number: bigint; timestamp: bigint },
 ): Promise<RebalancePreview> {
-  const block = await client.getBlock();
+  const block = atBlock ?? (await client.getBlock());
   const result = await client.readContract({
     address: m.vault,
     abi: vaultAbi,
@@ -43,6 +44,9 @@ export function useRebalanceSelector() {
   const expired =
     !!preview.data && !!d && (!d.oracle.healthy || previewExpired(preview.data.at, d.blockTime));
   return {
+    client,
+    address,
+    chainId,
     snapshot,
     access,
     preview,

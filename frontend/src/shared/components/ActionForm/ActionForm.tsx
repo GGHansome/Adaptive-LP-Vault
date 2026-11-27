@@ -43,6 +43,7 @@ export function ActionForm(p: ActionFormProps) {
         )}
         {p.notice && <Alert type="warning" showIcon title={p.notice} />}
         <Form
+          form={p.form}
           name={id}
           layout="vertical"
           onFinish={finish}

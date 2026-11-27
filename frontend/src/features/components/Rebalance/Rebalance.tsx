@@ -1,4 +1,6 @@
 import { Alert, Button, Card, Flex, Space, Tag, Typography } from 'antd';
+import { useState } from 'react';
+import { SwapRebalanceForm } from './SwapRebalanceForm';
 import { ActionForm } from '../../../shared/components/ActionForm';
 import { KeyValues } from '../../../shared/components/KeyValues';
 import { PageTitle } from '../../../shared/components/PageTitle';
@@ -8,6 +10,7 @@ import { regimes, venues } from '../../types';
 import type { RebalanceProps } from './interface';
 
 export function Rebalance(p: RebalanceProps) {
+  const [revision, setRevision] = useState(0);
   const d = p.data,
     m = p.deployment;
   const idleExit =
@@ -23,7 +26,14 @@ export function Rebalance(p: RebalanceProps) {
         title="策略再平衡"
         description="目标由链上策略生成。你可以触发执行，但不能指定目标池或仓位区间。"
         action={
-          <Button onClick={p.onRefresh} loading={p.loading} disabled={!d.initialized || p.busy}>
+          <Button
+            onClick={() => {
+              setRevision((previous) => previous + 1);
+              p.onRefresh();
+            }}
+            loading={p.loading}
+            disabled={!d.initialized || p.busy}
+          >
             刷新计划预览
           </Button>
         }
@@ -114,34 +124,18 @@ export function Rebalance(p: RebalanceProps) {
           />
         }
         right={
-          <ActionForm
-            title="受控换币再平衡"
-            description="仅 Keeper / Manager。预览只给出换币方向，不给出最优数量；输入金额后会先模拟整笔迁移，失败时不会发起钱包交易。"
-            fields={[
-              {
-                name: 'amountIn',
-                label: `换币输入（${p.preview?.direction === 2 ? m.symbol1 : m.symbol0}）`,
-                type: 'number',
-              },
-              {
-                name: 'minOut',
-                label: `调用者最低输出（${p.preview?.direction === 2 ? m.symbol0 : m.symbol1}）`,
-                initial: '0',
-                type: 'number',
-                hint: '协议最低输出仍然有效，即使此处填写 0。',
-              },
-            ]}
-            notice={!p.allowedSwap ? '当前账户未确认持有 Keeper 或 Manager 角色' : undefined}
-            submit="模拟并执行换币再平衡"
-            busy={p.busy}
+          <SwapRebalanceForm
+            p={p}
+            revision={revision}
             disabled={
               blocked ||
+              !d.oracle.healthy ||
               p.cooldown > 0 ||
               !p.allowedSwap ||
               !p.preview?.requiresSwap ||
+              (p.preview.direction !== 1 && p.preview.direction !== 2) ||
               d.pause.swapRebalancePaused
             }
-            onSubmit={(v) => p.onSwap({ amountIn: v.amountIn, minOut: v.minOut })}
           />
         }
       />

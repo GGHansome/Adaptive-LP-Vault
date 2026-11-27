@@ -3,6 +3,43 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { Overview } from './Overview';
 import { deployment, snapshotFixture } from '../../test/fixtures';
 afterEach(cleanup);
+it('按长周期 TWAP 将总净值和每份额净值主显示为 tUSD，并保留 tETH 对照', () => {
+  const data = snapshotFixture();
+  data.nav = 1_500_000_000_000_000_000n;
+  data.oracle.twapPriceToken1 = 500_000_000_000_000_000n;
+  render(
+    <Overview
+      data={data}
+      deployment={deployment}
+      events={[]}
+      eventsLoading={false}
+      onPortfolio={vi.fn()}
+      onRebalance={vi.fn()}
+    />,
+  );
+  const total = screen.getByRole('group', { name: '资产净值' });
+  const perShare = screen.getByRole('group', { name: '每份额净值' });
+  expect(total).toHaveTextContent(/3\s*tUSD/);
+  expect(perShare).toHaveTextContent(/1\.5\s*tUSD/);
+  expect(screen.getByText('约 1.5 tETH')).toBeInTheDocument();
+  expect(screen.getByText('约 0.75 tETH')).toBeInTheDocument();
+});
+it('没有已发行份额时不展示每份额估值', () => {
+  const data = snapshotFixture();
+  data.assets.totalShares = 0n;
+  render(
+    <Overview
+      data={data}
+      deployment={deployment}
+      events={[]}
+      eventsLoading={false}
+      onPortfolio={vi.fn()}
+      onRebalance={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole('group', { name: '每份额净值' })).toHaveTextContent('—');
+  expect(screen.getByText('尚无已发行份额')).toBeInTheDocument();
+});
 it('预言机不健康时隐藏无效价格、估值和市场状态', () => {
   render(
     <Overview

@@ -106,7 +106,8 @@ while (!stopped && (!config.rounds || round < config.rounds)) {
     await assertDeployment(m);
     const block = await publicClient.getBlock();
     const elapsed = Number(block.timestamp - start);
-    const target = baseTick + targetOffset(config.scenario, elapsed, rng()) + config.bias;
+    const target =
+      baseTick + targetOffset(config.scenario, elapsed, rng(), config.shockTicks) + config.bias;
     for (const pool of market) {
       if (stopped) break;
       let current: number, liquidity: bigint, sqrtCurrent: bigint;

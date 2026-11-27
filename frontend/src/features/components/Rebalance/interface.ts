@@ -11,6 +11,8 @@ export type RebalanceProps = {
   cooldown: number;
   expired: boolean;
   allowedSwap: boolean;
+  suggestionScope: string;
+  onSuggestSwap: (minOut: string) => Promise<string>;
   onRefresh: () => void;
   onExecute: () => Promise<void>;
   onSwap: (values: { amountIn: string; minOut: string }) => Promise<void>;
